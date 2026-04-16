@@ -1036,7 +1036,7 @@ defineExpose({
   color: var(--el-color-primary) !important
 
 .viewer-mode-setting
-  opacity: 0.1
+  opacity: 0.05
   position: absolute
   width: 100px
   top: 8px
