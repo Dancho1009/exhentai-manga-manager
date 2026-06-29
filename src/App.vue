@@ -350,6 +350,7 @@ export default defineComponent({
     ipcRenderer.invoke('load-setting')
     .then(async (res) => {
       this.setting = res
+      this.setting.matchConcurrency = this.normalizeMatchConcurrency(this.setting.matchConcurrency)
       if (this.setting.loadOnStart) {
         // display exist books first then load new books
         await this.loadBookList()
@@ -709,6 +710,10 @@ export default defineComponent({
         this.buttonGetMetadatasLoading = false
         console.error(error)
       }
+    },
+    normalizeMatchConcurrency (value) {
+      const number = Number.parseInt(value, 10)
+      return Number.isFinite(number) && number >= 1 ? number : 1
     },
     shuffleBook () {
       this.sortValue = 'shuffle'

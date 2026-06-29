@@ -76,6 +76,8 @@
     "imageViewer": "外置阅读器",
     "requestGap": "请求间隔(毫秒)",
     "requireGapInfo": "默认值是10000ms",
+    "matchConcurrency": "匹配并发数",
+    "matchConcurrencyInfo": "1 = 维持现状",
     "thumbnailColumn": "缩略图列数",
     "theme": "主题",
     "like": "格式为",

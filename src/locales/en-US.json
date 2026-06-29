@@ -76,6 +76,8 @@
     "imageViewer": "External Viewer",
     "requestGap": "Request Gap(ms)",
     "requireGapInfo": "Default value is 10000",
+    "matchConcurrency": "Match Concurrency",
+    "matchConcurrencyInfo": "1 = keep current behavior",
     "thumbnailColumn": "Thumbnail Column",
     "theme": "Theme",
     "like": "Like",

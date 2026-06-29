@@ -257,6 +257,17 @@
             </div>
           </el-col>
           <el-col :span="24">
+            <div class="setting-line">
+              <el-input
+                v-model.number="setting.matchConcurrency"
+                :placeholder="$t('m.matchConcurrencyInfo')"
+                @change="handleMatchConcurrencyChange"
+              >
+                <template #prepend><span class="setting-label">{{$t('m.matchConcurrency')}}</span></template>
+              </el-input>
+            </div>
+          </el-col>
+          <el-col :span="24">
             <NameFormItem class="setting-line" prependWidth="110px">
               <template #prepend>{{$t('m.customOptions')}}</template>
               <template #default>
@@ -528,6 +539,7 @@ onMounted(() => {
       if (res.defaultScraper === undefined) setting.value.defaultScraper = 'exhentai'
       if (res.defaultInsertEmptyPage === undefined) setting.value.defaultInsertEmptyPage = true
       if (res.viewerType === undefined) setting.value.viewerType = 'original'
+      setting.value.matchConcurrency = normalizeMatchConcurrency(res.matchConcurrency)
       saveSetting()
 
       // default action
@@ -705,8 +717,19 @@ const handleLanguageSet = async (languageCode) => {
 }
 
 const saveSetting = _.debounce(() => {
+  setting.value.matchConcurrency = normalizeMatchConcurrency(setting.value.matchConcurrency)
   ipcRenderer.invoke('save-setting', _.cloneDeep(setting.value))
 }, 500)
+
+const normalizeMatchConcurrency = (value) => {
+  const number = Number.parseInt(value, 10)
+  return Number.isFinite(number) && number >= 1 ? number : 1
+}
+
+const handleMatchConcurrencyChange = () => {
+  setting.value.matchConcurrency = normalizeMatchConcurrency(setting.value.matchConcurrency)
+  saveSetting()
+}
 
 const openLink = (link) => {
   ipcRenderer.invoke('open-url', link)
@@ -851,6 +874,11 @@ defineExpose({
     border-left: solid 1px var(--el-border-color)
     .el-select
       width: 100%
+  .el-input-number
+    width: 100%
+    .el-input__wrapper
+      border-top-left-radius: 0
+      border-bottom-left-radius: 0
 .about-logo
   width: 160px
   position: absolute

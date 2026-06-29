@@ -37,12 +37,26 @@ const preparePath = () => {
 
 const _mange_reader = `"${path.join(getRootPath(), 'resources/extraResources/manga_reader.exe')}"`
 
+const normalizeMatchConcurrency = (value) => {
+  const number = Number.parseInt(value, 10)
+  return Number.isFinite(number) && number >= 1 ? number : 1
+}
+
 const prepareSetting = () => {
   let setting
   try {
     setting = JSON.parse(fs.readFileSync(path.join(STORE_PATH, 'setting.json'), { encoding: 'utf-8' }))
+    let changed = false
     if (setting.imageExplorer === '"C:\\Windows\\explorer.exe"') {
       setting.imageExplorer = _mange_reader
+      changed = true
+    }
+    const matchConcurrency = normalizeMatchConcurrency(setting.matchConcurrency)
+    if (setting.matchConcurrency !== matchConcurrency) {
+      setting.matchConcurrency = matchConcurrency
+      changed = true
+    }
+    if (changed) {
       fs.writeFileSync(path.join(STORE_PATH, 'setting.json'), JSON.stringify(setting, null, '  '), { encoding: 'utf-8' })
     }
   } catch {
@@ -74,6 +88,7 @@ const prepareSetting = () => {
       skipDeleteConfirm: false,
       displayTitle: 'japaneseTitle',
       keepReadingProgress: true,
+      matchConcurrency: 1,
     }
     fs.writeFileSync(path.join(STORE_PATH, 'setting.json'), JSON.stringify(setting, null, '  '), { encoding: 'utf-8' })
   }
@@ -101,4 +116,5 @@ module.exports = {
   prepareCollectionList,
   preparePath,
   _mange_reader,
+  normalizeMatchConcurrency,
 }

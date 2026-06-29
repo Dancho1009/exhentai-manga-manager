@@ -26,7 +26,7 @@ const {
   STORE_PATH, isPortable,
   TEMP_PATH, COVER_PATH, VIEWER_PATH,
   prepareSetting, prepareCollectionList, preparePath,
-  _mange_reader
+  _mange_reader, normalizeMatchConcurrency
 } = require('./modules/init_folder_setting.js')
 const { findSameFile } = require('./fileLoader/folder.js')
 
@@ -976,6 +976,7 @@ ipcMain.handle('load-setting', async (event, arg) => {
 })
 
 ipcMain.handle('save-setting', async (event, receiveSetting) => {
+  receiveSetting.matchConcurrency = normalizeMatchConcurrency(receiveSetting.matchConcurrency)
   if (receiveSetting.proxy) {
     await session.defaultSession.setProxy({
       mode: 'fixed_servers',

@@ -73,6 +73,36 @@ const searchTypeDialog = ref('')
 const ehSearchResultList = ref([])
 const bookDetail = ref({})
 
+const normalizeMatchConcurrency = (value) => {
+  const number = Number.parseInt(value, 10)
+  return Number.isFinite(number) && number >= 1 ? number : 1
+}
+
+const createSerialQueue = () => {
+  let queue = Promise.resolve()
+  return (task) => {
+    const result = queue.then(task)
+    queue = result.catch(() => {})
+    return result
+  }
+}
+
+const runWithConcurrency = async (items, concurrency, task, shouldContinue = () => true) => {
+  const workerCount = Math.min(normalizeMatchConcurrency(concurrency), items.length)
+  let nextIndex = 0
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (shouldContinue()) {
+      if (nextIndex >= items.length) break
+      const index = nextIndex
+      nextIndex += 1
+      await task(items[index], index)
+    }
+  })
+  const results = await Promise.allSettled(workers)
+  const rejected = results.find(result => result.status === 'rejected')
+  if (rejected) throw rejected.reason
+}
+
 const openSearchDialog = (book, server) => {
   if (!searchTypeDialog.value) searchTypeDialog.value = setting.value.defaultScraper || 'exhentai'
   dialogVisibleEhSearch.value = true
@@ -96,8 +126,8 @@ const resolveSearchResult = (bookId, url, type) => {
   }
   dialogVisibleEhSearch.value = false
 }
-const getBookInfoFromHentag = async (book) => {
-  const data = await fetch(`https://hentag.com/public/api/vault/${book.url.slice(25)}`).then(res => res.json())
+
+const applyBookInfoFromHentag = (book, data) => {
   const tags = {}
   data.language === 11 ? tags['language'] = ['chinese','translated'] : ''
   data.parodies.length > 0 ? tags['parody'] = data.parodies.map(parody => parody.name) : ''
@@ -131,9 +161,62 @@ const getBookInfoFromHentag = async (book) => {
     tags
   })
   book.status = 'tagged'
+}
+
+const fetchAndApplyBookInfoFromHentag = async (book) => {
+  const data = await fetch(`https://hentag.com/public/api/vault/${book.url.slice(25)}`).then(res => res.json())
+  applyBookInfoFromHentag(book, data)
+}
+
+const getBookInfoFromHentag = async (book) => {
+  await fetchAndApplyBookInfoFromHentag(book)
   await saveBook(book)
 }
-const getBookInfoFromEh = async (book) => {
+
+const applyBookInfoFromEh = (book, metadata) => {
+  _.assign(
+    book,
+    _.pick(metadata, ['tags', 'title', 'title_jpn', 'filecount', 'rating', 'posted', 'filesize', 'category']),
+  )
+  book.posted = +book.posted
+  book.filecount = +book.filecount
+  book.rating = +book.rating
+  book.title = he.decode(book.title)
+  book.title_jpn = he.decode(book.title_jpn)
+  const tagObject = _.groupBy(book.tags, tag => {
+    const result = /(.+):/.exec(tag)
+    if (result) {
+      return /(.+):/.exec(tag)[1]
+    } else {
+      return 'misc'
+    }
+  })
+  _.forIn(tagObject, (arr, key) => {
+    tagObject[key] = arr.map(tag => {
+      const result = /:(.+)$/.exec(tag)
+      if (result) {
+        return /:(.+)$/.exec(tag)[1]
+      } else {
+        return tag
+      }
+    })
+  })
+  book.tags = tagObject
+  book.status = 'tagged'
+}
+
+const applyBookInfoFromEhFailure = (book, res) => {
+  if (_.includes(res, 'Your IP address has been')) {
+    book.status = 'non-tag'
+    printMessage('error', t('c.ipBanned'))
+    serviceAvailable.value = false
+  } else {
+    book.status = 'tag-failed'
+    printMessage('error', t('c.getMetadataFailed'))
+  }
+}
+
+const fetchAndApplyBookInfoFromEh = async (book) => {
   const match = /(\d+)\/([a-z0-9]+)/.exec(book.url)
   const res = await ipcRenderer.invoke('post-data-ex', {
     url: 'https://api.e-hentai.org/api.php',
@@ -146,61 +229,32 @@ const getBookInfoFromEh = async (book) => {
     }
   })
   try {
-    _.assign(
-      book,
-      _.pick(JSON.parse(res).gmetadata[0], ['tags', 'title', 'title_jpn', 'filecount', 'rating', 'posted', 'filesize', 'category']),
-    )
-    book.posted = +book.posted
-    book.filecount = +book.filecount
-    book.rating = +book.rating
-    book.title = he.decode(book.title)
-    book.title_jpn = he.decode(book.title_jpn)
-    const tagObject = _.groupBy(book.tags, tag => {
-      const result = /(.+):/.exec(tag)
-      if (result) {
-        return /(.+):/.exec(tag)[1]
-      } else {
-        return 'misc'
-      }
-    })
-    _.forIn(tagObject, (arr, key) => {
-      tagObject[key] = arr.map(tag => {
-        const result = /:(.+)$/.exec(tag)
-        if (result) {
-          return /:(.+)$/.exec(tag)[1]
-        } else {
-          return tag
-        }
-      })
-    })
-    book.tags = tagObject
-    book.status = 'tagged'
-    await saveBook(book)
+    applyBookInfoFromEh(book, JSON.parse(res).gmetadata[0])
   } catch (e) {
     console.log(e)
-    if (_.includes(res, 'Your IP address has been')) {
-      book.status = 'non-tag'
-      printMessage('error', t('c.ipBanned'))
-      await saveBook(book)
-      serviceAvailable.value = false
-    } else {
-      book.status = 'tag-failed'
-      printMessage('error', t('c.getMetadataFailed'))
-      await saveBook(book)
-    }
+    applyBookInfoFromEhFailure(book, res)
   }
+}
+
+const getBookInfoFromEh = async (book) => {
+  await fetchAndApplyBookInfoFromEh(book)
+  await saveBook(book)
 }
 const getBookInfo = (book) => {
   if (book.url.startsWith('https://hentag.com')) {
-    getBookInfoFromHentag(book)
+    return getBookInfoFromHentag(book)
   } else if (book.url.includes('exhentai') || book.url.includes('e-hentai')) {
-    getBookInfoFromEh(book)
+    return getBookInfoFromEh(book)
   }
+  return Promise.resolve()
 }
 const getBooksMetadata = async (bookList, gap, callback) => {
   const server = setting.value.defaultScraper || 'exhentai'
+  const concurrency = normalizeMatchConcurrency(setting.value.matchConcurrency)
   serviceAvailable.value = true
   const timer = ms => new Promise(res => setTimeout(res, ms))
+  const saveQueue = createSerialQueue()
+  let completedCount = 0
   const messageInstance = ElMessage({
     message: t('c.gettingMetadata'),
     type: 'success',
@@ -210,39 +264,69 @@ const getBooksMetadata = async (bookList, gap, callback) => {
       serviceAvailable.value = false
     }
   })
-  for (let i = 0; i < bookList.length; i++) {
-    ipcRenderer.invoke('set-progress-bar', (i + 1) / bookList.length)
-    const book = bookList[i]
-    try {
-      if (serviceAvailable.value) {
+  try {
+    await runWithConcurrency(bookList, concurrency, async (book) => {
+      try {
+        if (!serviceAvailable.value) return
         if (!book.url) {
-          const resultList = await getBookListFromWeb(
+          const resultList = await getBookListFromWebRaw(
             book.hash.toUpperCase(),
             returnTrimFileName(book),
             server,
             book.filepath
           )
-          resolveSearchResult(book.id, resultList[0].url, resultList[0].type)
+          if (resultList?.[0]) {
+            const changed = await fetchAndApplySearchResult(book, resultList[0].url, resultList[0].type)
+            if (changed) await saveQueue(() => saveBook(book))
+          }
         } else {
-          getBookInfo(book)
+          const changed = await fetchAndApplyBookInfo(book)
+          if (changed) await saveQueue(() => saveBook(book))
         }
         await timer(gap)
+      } catch (error) {
+        book.status = 'tag-failed'
+        await saveQueue(() => saveBook(book))
+        console.error(error)
+      } finally {
+        completedCount += 1
+        ipcRenderer.invoke('set-progress-bar', bookList.length ? completedCount / bookList.length : 1)
       }
-    } catch (error) {
-      book.status = 'tag-failed'
-      await saveBook(book)
-      console.error(error)
-    }
+    }, () => serviceAvailable.value)
+    printMessage('success', t('c.getMetadataComplete'))
+  } finally {
+    messageInstance.close()
+    ipcRenderer.invoke('set-progress-bar', -1)
+    if (callback) callback()
   }
-  messageInstance.close()
-  ipcRenderer.invoke('set-progress-bar', -1)
-  printMessage('success', t('c.getMetadataComplete'))
-  if (callback) callback()
 }
 
-const getBookListFromWeb = async (bookHash, title, server = 'e-hentai', bookPath = '') => {
+const fetchAndApplyBookInfo = async (book) => {
+  if (book.url.startsWith('https://hentag.com')) {
+    await fetchAndApplyBookInfoFromHentag(book)
+    return true
+  } else if (book.url.includes('exhentai') || book.url.includes('e-hentai')) {
+    await fetchAndApplyBookInfoFromEh(book)
+    return true
+  }
+  return false
+}
+
+const fetchAndApplySearchResult = async (book, url, type) => {
+  if (type === 'hentag') {
+    book.url = url
+    await fetchAndApplyBookInfoFromHentag(book)
+    return true
+  } else if (type === 'e-hentai') {
+    book.url = url
+    await fetchAndApplyBookInfoFromEh(book)
+    return true
+  }
+  return false
+}
+
+const getBookListFromWebRaw = async (bookHash, title, server = 'e-hentai', bookPath = '') => {
   let resultList = []
-  searchResultLoading.value = true
   if (server === 'e-hentai') {
     resultList = await fetch(`https://e-hentai.org/?f_shash=${bookHash}&fs_similar=on&fs_exp=on&f_cats=161`)
     .then(res => res.text())
@@ -280,18 +364,27 @@ const getBookListFromWeb = async (bookHash, title, server = 'e-hentai', bookPath
   } else if (server === '.ehviewer') {
     const ehviewerData = await ipcRenderer.invoke('get-ehviewer-data', bookPath)
 
-    ehSearchResultList.value = []
     if (ehviewerData) {
       resultList = [{
         title,
         url: `https://exhentai.org/g/${ehviewerData.gid}/${ehviewerData.token}/`,
         type: 'e-hentai'
       }]
-      ehSearchResultList.value = resultList
     }
   }
-  searchResultLoading.value = false
   return resultList
+}
+
+const getBookListFromWeb = async (bookHash, title, server = 'e-hentai', bookPath = '') => {
+  searchResultLoading.value = true
+  ehSearchResultList.value = []
+  try {
+    const resultList = await getBookListFromWebRaw(bookHash, title, server, bookPath)
+    ehSearchResultList.value = resultList || []
+    return resultList
+  } finally {
+    searchResultLoading.value = false
+  }
 }
 
 const redirectSearch = (bookHash, title, server = 'e-hentai') => {
@@ -320,15 +413,15 @@ const redirectSearch = (bookHash, title, server = 'e-hentai') => {
 const resolveEhentaiResult = (htmlString) => {
   try {
     const resultNodes = new DOMParser().parseFromString(htmlString, 'text/html').querySelectorAll('.gl3c.glname')
-    ehSearchResultList.value = []
+    const resultList = []
     resultNodes.forEach((node) => {
-      ehSearchResultList.value.push({
+      resultList.push({
         title: node.querySelector('.glink').innerHTML,
         url: node.querySelector('a').getAttribute('href'),
         type: 'e-hentai'
       })
     })
-    return ehSearchResultList.value
+    return resultList
   } catch (e) {
     console.log(e)
     if (htmlString.includes('Your IP address has been')) {
@@ -342,24 +435,22 @@ const resolveEhentaiResult = (htmlString) => {
 
 const resolveHentagResult = (data) => {
   const resultList = data.works.slice(0, 30)
-  ehSearchResultList.value = []
-  resultList.forEach((result) => {
+  return resultList.map((result) => {
     const findExUrl = result.locations.find((location) => location.startsWith('https://exhentai.org'))
     if (findExUrl) {
-      ehSearchResultList.value.push({
+      return {
         title: result.title,
         url: findExUrl,
         type: 'e-hentai'
-      })
+      }
     } else {
-      ehSearchResultList.value.push({
+      return {
         title: result.title,
         url: `https://hentag.com/vault/${result.id}`,
         type: 'hentag'
-      })
+      }
     }
   })
-  return ehSearchResultList.value
 }
 
 defineExpose({
