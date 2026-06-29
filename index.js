@@ -1115,7 +1115,7 @@ ipcMain.on('get-path-sep', async (event, arg) => {
 })
 
 
-// 鍒濆鍖朎xpress
+// 初始化Express
 const LANBrowsing = express()
 const port = 23786
 const sortkey_map = {
@@ -1146,7 +1146,7 @@ const sortkey_map = {
   "random": {}
 }
 
-// 璁剧疆闈欐€佹枃浠跺す
+// 设置静态文件夹
 const staticFilePath = path.resolve(STORE_PATH, 'public')
 fs.mkdirSync(staticFilePath, { recursive: true })
 LANBrowsing.use('/static', express.static(staticFilePath))
@@ -1182,7 +1182,7 @@ function compareItems(a, b, sortKey, ascending = false) {
   return 0
 }
 
-// 鏍煎紡鍖栨爣绛?
+// 格式化标签
 const formatTags = (tags) => {
   return Object.entries(tags)
     .map(([key, values]) => values.map(value => setting.showTranslation ? `${tagTranslation?.[key]?.name || key}:${tagTranslation?.[key]?.[value]?.name || value}` : `${key}:${value}`).join(', '))
@@ -1198,7 +1198,7 @@ LANBrowsing.get('/api/search', async (req, res) => {
     const filter = req.query.filter || ''
     const start = parseInt(req.query.start, 10) || 0
     const length = parseInt(req.query.length, 10) || 200
-    // 榛樿浣跨敤闃呰娆℃暟鎺掑簭, 鏉ュ尮閰?mihon 鐑棬涓嶅甫 sortby
+    // 默认使用阅读次数排序, 来匹配 mihon 热门不带 sortby
     let sortKey = req.query.sortby || 'read_count'
     let showAll = false
     if (sortKey.includes("_all")) {
@@ -1206,7 +1206,7 @@ LANBrowsing.get('/api/search', async (req, res) => {
       showAll = true
     }
 
-    // 璇诲彇骞舵悳绱㈡暟鎹簱
+    // 读取并搜索数据库
     mangas = await loadBookListFromDatabase()
     let filterMangas
     if (filter) {
@@ -1225,7 +1225,7 @@ LANBrowsing.get('/api/search', async (req, res) => {
     }
     filterMangas = showAll ? filterMangas : filterMangas.slice(start, start + length)
 
-    // 鏍煎紡鍖栧搷搴旀暟鎹?
+    // 格式化响应数据
     const responseData = filterMangas.map(manga => ({
       arcid: manga.hash,
       extension: path.extname(manga.filepath),
@@ -1256,7 +1256,7 @@ LANBrowsing.get('/api/search', async (req, res) => {
 
 LANBrowsing.get('/api/search/random', async (req, res) => {
   try {
-    // 浠庢暟鎹簱涓殢鏈鸿幏鍙栨寚瀹氭暟閲忕殑 Manga 璁板綍
+    // 从数据库中随机获取指定数量的 Manga 记录
     const count = parseInt(req.query.count, 10) || 1
     const randomMangas = _.sampleSize(await loadBookListFromDatabase(), count)
 
@@ -1288,7 +1288,7 @@ LANBrowsing.get('/api/archives/:hash/metadata', async (req, res) => {
   try {
     const mangaHash = req.params.hash
 
-    // 浠庢暟鎹簱鎵惧埌瀵瑰簲鐨勬极鐢?
+    // 从数据库找到对应的漫画
     if (_.isEmpty(mangas)) mangas = await loadBookListFromDatabase()
     const manga = await mangas.find(manga => manga.hash === mangaHash)
 
@@ -1296,7 +1296,7 @@ LANBrowsing.get('/api/archives/:hash/metadata', async (req, res) => {
       return res.status(404).send('Manga not found')
     }
 
-    // 鏋勯€犲搷搴旀暟鎹?
+    // 构造响应数据
     const responseMetadata = {
       arcid: manga.hash,
       extension: path.extname(manga.filepath),
@@ -1318,7 +1318,7 @@ LANBrowsing.get('/api/archives/:hash/metadata', async (req, res) => {
   }
 })
 
-// 澶勭悊灏侀潰鍥剧墖璇锋眰
+// 处理封面图片请求
 LANBrowsing.get('/api/archives/:hash/thumbnail', async (req, res) => {
   const hash = req.params.hash
   const manga = await Manga.findOne({where: {hash: hash}})
@@ -1339,12 +1339,12 @@ let existBook = {
   imageList: []
 }
 
-// 澶勭悊绔犺妭鍒楄〃璇锋眰
+// 处理章节列表请求
 LANBrowsing.get('/api/archives/:hash/files', async (req, res) => {
   try {
     const mangaHash = req.params.hash
 
-    // 浠庢暟鎹簱鎵惧埌瀵瑰簲鐨勬极鐢?
+    // 从数据库找到对应的漫画
     const manga = await Manga.findOne({where: {hash: mangaHash}})
 
     if (!manga) {
@@ -1359,9 +1359,9 @@ LANBrowsing.get('/api/archives/:hash/files', async (req, res) => {
       hash: manga.hash,
       imageList: imageList.map(p => p.absolutePath)
     }
-    // 鏋勯€犲搷搴旀暟鎹?
+    // 构造响应数据
     const responseFiles = {
-      job: Date.now(), // 绀轰緥涓殑 job 鍙互鏄竴涓殢鏈烘暟鎴栨椂闂存埑
+      job: Date.now(), // 示例中的 job 可以是一个随机数或时间戳
       pages: imageList.map((file, index) => `/api/archives/${manga.hash}/page?path=${index + 1}`)
     }
 
@@ -1371,7 +1371,7 @@ LANBrowsing.get('/api/archives/:hash/files', async (req, res) => {
   }
 })
 
-// 澶勭悊绔犺妭鍥剧墖璇锋眰
+// 处理章节图片请求
 LANBrowsing.get('/api/archives/:hash/page', async (req, res) => {
   const hash = req.params.hash
   const page = parseInt(req.query.path, 10)
@@ -1384,7 +1384,7 @@ LANBrowsing.get('/api/archives/:hash/page', async (req, res) => {
     return res.status(404).send('File not found')
   }
 
-  // 鑾峰彇绔犺妭鍥剧墖鍒楄〃
+  // 获取章节图片列表
   try {
     let imageList
     if (manga.hash === existBook.hash) {
@@ -1402,12 +1402,12 @@ LANBrowsing.get('/api/archives/:hash/page', async (req, res) => {
       return res.status(404).send('Image not found')
     }
 
-    // 閲嶅懡鍚嶅苟澶嶅埗鍥剧墖鏂囦欢鍒伴潤鎬佹枃浠跺す
+    // 重命名并复制图片文件到静态文件夹
     const imageFileName = `${manga.hash}_${page}${path.extname(imageFilePath)}`
     const imageFile = path.join(staticFilePath, imageFileName)
     await fs.promises.copyFile(imageFilePath, imageFile)
 
-    // 鍙戦€佸浘鐗囨枃浠?
+    // 发送图片文件
     if (fs.existsSync(imageFile)) {
       res.sendFile(imageFile)
     } else {
@@ -1419,12 +1419,12 @@ LANBrowsing.get('/api/archives/:hash/page', async (req, res) => {
   }
 })
 
-// 澶勭悊webview璇锋眰
+// 处理webview请求
 LANBrowsing.get('/reader', async (req, res) => {
   const id = req.query.id
   const manga = await Manga.findOne({where: {hash: id}})
 
-  // 閲嶅畾鍚戣嚦manga.url
+  // 重定向至manga.url
   if (manga && manga.url) {
     res.redirect(manga.url.replace('exhentai', 'e-hentai'))
   } else {
@@ -1446,7 +1446,7 @@ LANBrowsing.get('/', (req, res) => {
 })
 
 let LANBrowsingInstance
-// 鍚姩Express鏈嶅姟鍣?
+// 启动Express服务器
 const enableLANBrowsing = () => {
   if (LANBrowsingInstance?.listening) {
     LANBrowsingInstance.close(() => {
