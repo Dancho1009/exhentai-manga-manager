@@ -1340,13 +1340,13 @@ body
   position: fixed
   top: 0
   left: 0
-  height: 4px
+  height: 8px
   background-color: #67C23A
   background-image: linear-gradient(45deg,rgba(0,0,0,.1) 25%,transparent 25%,transparent 50%,rgba(0,0,0,.1) 50%,rgba(0,0,0,.1) 75%,transparent 75%,transparent)
   background-size: 2em 2em
   animation: striped-flow 3s linear infinite
   animation-duration: 30s
-  border-radius: 2px
+  border-radius: 4px
 
 
 .fullscreen-button
