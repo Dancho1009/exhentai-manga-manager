@@ -4,6 +4,22 @@ const { globSync } = require('glob')
 const AdmZip = require('adm-zip')
 const { nanoid } = require('nanoid')
 const _ = require('lodash')
+const { readEhviewerBuffer } = require('./ehviewer.js')
+
+const pickEhviewerEntryName = (entryNames) => {
+  const candidates = entryNames
+    .map(entryName => ({
+      original: entryName,
+      normalized: String(entryName).replace(/\\/g, '/').replace(/^\.\/+/, '')
+    }))
+    .filter(({ normalized }) => normalized && !normalized.includes('__MACOSX') && path.posix.basename(normalized) === '.ehviewer')
+
+  const rootCandidate = candidates.find(({ normalized }) => normalized === '.ehviewer')
+  if (rootCandidate) return rootCandidate.original
+
+  candidates.sort((a, b) => a.normalized.length - b.normalized.length || a.normalized.localeCompare(b.normalized))
+  return candidates[0]?.original
+}
 
 const getZipFilelist = async (libraryPath) => {
   const list = globSync('**/*.@(zip|cbz)', {
@@ -73,8 +89,25 @@ const getImageListFromZip = async (filepath, VIEWER_PATH) => {
   }))
 }
 
+const getEhviewerDataFromZip = async (filepath) => {
+  try {
+    const zip = new AdmZip(filepath)
+    const entryName = pickEhviewerEntryName(zip.getEntries().map(entry => entry.entryName))
+    if (!entryName) return null
+
+    const entry = zip.getEntry(entryName)
+    if (!entry || entry.isDirectory) return null
+
+    return readEhviewerBuffer(entry.getData())
+  } catch (error) {
+    console.error('Failed to read .ehviewer from zip:', error)
+    return null
+  }
+}
+
 module.exports = {
   getZipFilelist,
   solveBookTypeZip,
-  getImageListFromZip
+  getImageListFromZip,
+  getEhviewerDataFromZip
 }

@@ -5,8 +5,21 @@ const { nanoid } = require('nanoid')
 const { spawn } = require('child_process')
 const _ = require('lodash')
 const { getRootPath } = require('../modules/utils.js')
+const { readEhviewerBuffer } = require('./ehviewer.js')
 
 const _7z = path.join(getRootPath(), 'resources/extraResources/7z.exe')
+
+const pickEhviewerEntryName = (entryNames) => {
+  const candidates = entryNames
+    .map(entryName => String(entryName).replace(/\\/g, '/').replace(/^\.\/+/, ''))
+    .filter(entryName => entryName && !entryName.includes('__MACOSX') && path.posix.basename(entryName) === '.ehviewer')
+
+  const rootCandidate = candidates.find(entryName => entryName === '.ehviewer')
+  if (rootCandidate) return rootCandidate
+
+  candidates.sort((a, b) => a.length - b.length || a.localeCompare(b))
+  return candidates[0]
+}
 
 const getArchivelist = async (libraryPath) => {
   const list = globSync('**/*.@(rar|7z|cb7|cbr)', {
@@ -79,6 +92,35 @@ const deleteImageFromArchive = async (filename, filepath) => {
   return true
 }
 
+const getEhviewerDataFromArchive = async (filepath, TEMP_PATH) => {
+  const tempFolder = path.join(TEMP_PATH, nanoid(8))
+  try {
+    const output = await spawnPromise(_7z, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
+    let pathlist = _.filter(output.split(/\r\n/), s => _.startsWith(s, 'Path'))
+    pathlist = pathlist.map(p => {
+      const match = /(?<== ).*$/.exec(p)
+      return match ? match[0] : ''
+    })
+
+    const targetEntry = pickEhviewerEntryName(pathlist)
+    if (!targetEntry) return null
+
+    await spawnPromise(_7z, ['x', '-o' + tempFolder, '-p123456', '--', filepath, targetEntry])
+    const extractedFilePath = path.join(tempFolder, targetEntry)
+    const fileContent = await fs.promises.readFile(extractedFilePath)
+    return readEhviewerBuffer(fileContent)
+  } catch (error) {
+    console.error('Failed to read .ehviewer from archive:', error)
+    return null
+  } finally {
+    try {
+      await fs.promises.rm(tempFolder, { recursive: true, force: true })
+    } catch (cleanupError) {
+      console.error('Failed to cleanup temporary .ehviewer folder:', cleanupError)
+    }
+  }
+}
+
 const spawnPromise = (commmand, argument, timeoutMs = 30 * 1000) => {
   return new Promise((resolve, reject) => {
     const spawned = spawn(commmand, argument)
@@ -110,5 +152,6 @@ module.exports = {
   getArchivelist,
   solveBookTypeArchive,
   getImageListFromArchive,
-  deleteImageFromArchive
+  deleteImageFromArchive,
+  getEhviewerDataFromArchive
 }
