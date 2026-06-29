@@ -7,9 +7,8 @@ const _ = require('lodash')
 const { nanoid } = require('nanoid')
 const sharp = require('sharp')
 const { exec } = require('child_process')
+const { Worker } = require('worker_threads')
 const { createHash } = require('crypto')
-const sqlite3 = require('sqlite3')
-const { open } = require('sqlite')
 const fetch = require('node-fetch')
 const { HttpsProxyAgent } = require('https-proxy-agent')
 const windowStateKeeper = require('electron-window-state')
@@ -18,7 +17,11 @@ const { globSync } = require('glob')
 
 const { prepareMangaModel, prepareMetadataModel } = require('./modules/database')
 const { prepareTemplate } = require('./modules/prepare_menu.js')
+const { getRootPath } = require('./modules/utils.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
+const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
+const { getEhviewerDataFromZip } = require('./fileLoader/zip.js')
+const { readEhviewerFile } = require('./fileLoader/ehviewer.js')
 const {
   STORE_PATH, isPortable,
   TEMP_PATH, COVER_PATH, VIEWER_PATH,
@@ -298,6 +301,92 @@ const saveBookToDatabase = async (book) => {
   console.log(`Saved ${book.title}`)
 }
 
+const runImportSqliteWorker = ({ sqlitePath, bookList }) => {
+  const bookById = new Map(bookList.map(book => [book.id, book]))
+  const importBookList = bookList
+    .filter(book => book.status !== 'tagged')
+    .map(book => _.pick(book, ['id', 'status', 'filepath', 'type', 'title', 'coverHash']))
+
+  const worker = new Worker(path.join(__dirname, 'modules/import_sqlite_worker.js'), {
+    workerData: {
+      sqlitePath,
+      bookList: importBookList,
+      concurrency: setting.matchConcurrency,
+      tempPath: TEMP_PATH,
+      sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe')
+    }
+  })
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let workerDone = false
+    const result = {
+      matchedCount: 0,
+      processedCount: 0
+    }
+    let saveQueue = Promise.resolve()
+
+    const settleReject = (error, terminateWorker = true) => {
+      if (settled) return
+      settled = true
+      if (terminateWorker) worker.terminate().catch(() => {})
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
+
+    const settleResolve = () => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
+
+    const enqueueSave = (bookId, metadata) => {
+      saveQueue = saveQueue.then(async () => {
+        const book = bookById.get(bookId)
+        if (!book) return
+        _.assign(book, metadata, { status: 'tagged' })
+        await saveBookToDatabase(book)
+      })
+      saveQueue.catch(error => settleReject(error))
+    }
+
+    const finishAfterSaves = () => {
+      saveQueue
+        .then(settleResolve)
+        .catch(error => settleReject(error, false))
+    }
+
+    worker.on('message', message => {
+      switch (message.type) {
+        case 'matched':
+          enqueueSave(message.bookId, message.metadata)
+          break
+        case 'progress':
+          setProgressBar(message.progress)
+          break
+        case 'done':
+          workerDone = true
+          result.matchedCount = message.matchedCount
+          result.processedCount = message.processedCount
+          finishAfterSaves()
+          break
+        case 'error':
+          settleReject(new Error(message.error))
+          break
+      }
+    })
+
+    worker.on('error', error => settleReject(error, false))
+    worker.on('exit', code => {
+      if (settled) return
+      if (code !== 0) {
+        settleReject(new Error(`Import worker exited with code ${code}`), false)
+      } else if (!workerDone) {
+        settleReject(new Error('Import worker exited before completing'), false)
+      }
+    })
+  })
+}
+
 const setProgressBar = (progress) => {
   mainWindow.setProgressBar(progress)
   mainWindow.webContents.send('send-action', {
@@ -522,18 +611,11 @@ ipcMain.handle('patch-local-metadata-by-book', async (event, book) => {
   }
 })
 
-// Function to read the .ehviewer file
-function getEhviewerDataManually(dir) {
+async function getEhviewerDataManually(dir) {
   try {
     const filePath = path.join(dir, '.ehviewer')
     if (fs.existsSync(filePath)) {
-      const fileContent = fs.readFileSync(filePath, 'utf-8')
-      const lines = fileContent.split('\n')
-      if (lines.length >= 4) {
-        const gid = lines[2].trim()
-        const token = lines[3].trim()
-        return { gid, token }
-      }
+      return await readEhviewerFile(filePath)
     }
     return null
   } catch (error) {
@@ -542,8 +624,41 @@ function getEhviewerDataManually(dir) {
   }
 }
 
-ipcMain.handle('get-ehviewer-data', async (event, dir) => {
-  return getEhviewerDataManually(dir)
+async function resolveBookTypeFromPath(filepath) {
+  try {
+    const stat = await fs.promises.stat(filepath)
+    if (stat.isDirectory()) return 'folder'
+  } catch (error) {
+    console.error('Failed to resolve book type from path:', error)
+    return null
+  }
+
+  const ext = path.extname(filepath).toLowerCase()
+  if (['.zip', '.cbz'].includes(ext)) return 'zip'
+  if (['.rar', '.cbr', '.7z', '.cb7'].includes(ext)) return 'archive'
+  return null
+}
+
+async function getEhviewerDataByPath(filepath, type) {
+  let resolvedType = type
+  if (!resolvedType) {
+    resolvedType = await resolveBookTypeFromPath(filepath)
+  }
+
+  switch (resolvedType) {
+    case 'folder':
+      return await getEhviewerDataManually(filepath)
+    case 'zip':
+      return await getEhviewerDataFromZip(filepath)
+    case 'archive':
+      return await getEhviewerDataFromArchive(filepath, TEMP_PATH)
+    default:
+      return null
+  }
+}
+
+ipcMain.handle('get-ehviewer-data', async (event, targetPath) => {
+  return await getEhviewerDataByPath(targetPath)
 })
 
 ipcMain.handle('get-ex-webpage', async (event, { url, cookie }) => {
@@ -928,78 +1043,31 @@ ipcMain.handle('import-sqlite', async (event, bookList) => {
     filters: [{ name: 'SQLite', extensions: ['sqlite'] }]
   })
   if (!result.canceled) {
-    const db = await open({
-      filename: result.filePaths[0],
-      driver: sqlite3.Database
-    })
     try {
-      const re = /'/g
-      const bookListLength = bookList.length
-      for (let i = 0; i < bookListLength; i++) {
-        const book = bookList[i]
-        if (book.status !== 'tagged') {
-          let metadata
-          // 当book type为folder时，尝试获取.ehviewer数据
-          if (book.type === 'folder') {
-            const dirname = book.filepath
-            const ehviewerData = getEhviewerDataManually(dirname)
-            const { gid, token } = ehviewerData || {}
-            if (gid && token) {
-              metadata = await db.get('SELECT * FROM gallery WHERE gid = ? AND token = ?', [gid, token])
-            }
-          }
-          if (metadata === undefined) {
-            // remove file extension
-            const filename = path.parse(book.title).name
-            metadata = await db.get(`SELECT * FROM gallery WHERE torrents LIKE ?
-                                                            OR title LIKE ?
-                                                            OR title_jpn LIKE ?
-                                                            OR thumb LIKE ?`,
-              `%${filename}%`,
-              `%${filename}%`,
-              `%${filename}%`,
-              `%${book.coverHash}%`
-            )
-          }
-
-          if (metadata) {
-            metadata.tags = {
-              language: metadata.language ? JSON.parse(metadata.language.replace(re, '\"')) : undefined,
-              parody: metadata.parody ? JSON.parse(metadata.parody.replace(re, '\"')) : undefined,
-              character: metadata.character ? JSON.parse(metadata.character.replace(re, '\"')) : undefined,
-              group: metadata.group ? JSON.parse(metadata.group.replace(re, '\"')) : undefined,
-              artist: metadata.artist ? JSON.parse(metadata.artist.replace(re, '\"')) : undefined,
-              male: metadata.male ? JSON.parse(metadata.male.replace(re, '\"')) : undefined,
-              female: metadata.female ? JSON.parse(metadata.female.replace(re, '\"')) : undefined,
-              mixed: metadata.mixed ? JSON.parse(metadata.mixed.replace(re, '\"')) : undefined,
-              other: metadata.other ? JSON.parse(metadata.other.replace(re, '\"')) : undefined,
-              cosplayer: metadata.cosplayer ? JSON.parse(metadata.cosplayer.replace(re, '\"')) : undefined,
-              rest: metadata.rest ? JSON.parse(metadata.rest.replace(re, '\"')) : undefined,
-            }
-            metadata.filecount = +metadata.filecount
-            metadata.rating = +metadata.rating
-            metadata.posted = +metadata.posted
-            metadata.filesize = +metadata.filesize
-            metadata.url = `https://exhentai.org/g/${metadata.gid}/${metadata.token}/`
-            _.assign(book, _.pick(metadata, ['tags', 'title', 'title_jpn', 'filecount', 'rating', 'posted', 'filesize', 'category', 'url']), { status: 'tagged' })
-            await saveBookToDatabase(book)
-          }
-          setProgressBar(i / bookListLength)
-        }
-      }
-      await db.close()
+      const workerResult = await runImportSqliteWorker({
+        sqlitePath: result.filePaths[0],
+        bookList
+      })
       setProgressBar(-1)
+      return {
+        success: true,
+        bookList,
+        matchedCount: workerResult.matchedCount,
+        processedCount: workerResult.processedCount
+      }
     } catch (e) {
       console.log(e)
-      await db.close()
-    }
-    return {
-      success: true,
-      bookList
+      setProgressBar(-1)
+      sendMessageToWebContents(`Import api_dump.sqlite failed because ${e.message || e}`)
+      return {
+        success: false,
+        error: e.message || String(e)
+      }
     }
   } else {
     return {
-      success: false
+      success: false,
+      canceled: true
     }
   }
 })
@@ -1046,7 +1114,7 @@ ipcMain.on('get-path-sep', async (event, arg) => {
 })
 
 
-// 初始化Express
+// 鍒濆鍖朎xpress
 const LANBrowsing = express()
 const port = 23786
 const sortkey_map = {
@@ -1077,7 +1145,7 @@ const sortkey_map = {
   "random": {}
 }
 
-// 设置静态文件夹
+// 璁剧疆闈欐€佹枃浠跺す
 const staticFilePath = path.resolve(STORE_PATH, 'public')
 fs.mkdirSync(staticFilePath, { recursive: true })
 LANBrowsing.use('/static', express.static(staticFilePath))
@@ -1113,7 +1181,7 @@ function compareItems(a, b, sortKey, ascending = false) {
   return 0
 }
 
-// 格式化标签
+// 鏍煎紡鍖栨爣绛?
 const formatTags = (tags) => {
   return Object.entries(tags)
     .map(([key, values]) => values.map(value => setting.showTranslation ? `${tagTranslation?.[key]?.name || key}:${tagTranslation?.[key]?.[value]?.name || value}` : `${key}:${value}`).join(', '))
@@ -1129,7 +1197,7 @@ LANBrowsing.get('/api/search', async (req, res) => {
     const filter = req.query.filter || ''
     const start = parseInt(req.query.start, 10) || 0
     const length = parseInt(req.query.length, 10) || 200
-    // 默认使用阅读次数排序, 来匹配 mihon 热门不带 sortby
+    // 榛樿浣跨敤闃呰娆℃暟鎺掑簭, 鏉ュ尮閰?mihon 鐑棬涓嶅甫 sortby
     let sortKey = req.query.sortby || 'read_count'
     let showAll = false
     if (sortKey.includes("_all")) {
@@ -1137,7 +1205,7 @@ LANBrowsing.get('/api/search', async (req, res) => {
       showAll = true
     }
 
-    // 读取并搜索数据库
+    // 璇诲彇骞舵悳绱㈡暟鎹簱
     mangas = await loadBookListFromDatabase()
     let filterMangas
     if (filter) {
@@ -1156,7 +1224,7 @@ LANBrowsing.get('/api/search', async (req, res) => {
     }
     filterMangas = showAll ? filterMangas : filterMangas.slice(start, start + length)
 
-    // 格式化响应数据
+    // 鏍煎紡鍖栧搷搴旀暟鎹?
     const responseData = filterMangas.map(manga => ({
       arcid: manga.hash,
       extension: path.extname(manga.filepath),
@@ -1187,7 +1255,7 @@ LANBrowsing.get('/api/search', async (req, res) => {
 
 LANBrowsing.get('/api/search/random', async (req, res) => {
   try {
-    // 从数据库中随机获取指定数量的 Manga 记录
+    // 浠庢暟鎹簱涓殢鏈鸿幏鍙栨寚瀹氭暟閲忕殑 Manga 璁板綍
     const count = parseInt(req.query.count, 10) || 1
     const randomMangas = _.sampleSize(await loadBookListFromDatabase(), count)
 
@@ -1219,7 +1287,7 @@ LANBrowsing.get('/api/archives/:hash/metadata', async (req, res) => {
   try {
     const mangaHash = req.params.hash
 
-    // 从数据库找到对应的漫画
+    // 浠庢暟鎹簱鎵惧埌瀵瑰簲鐨勬极鐢?
     if (_.isEmpty(mangas)) mangas = await loadBookListFromDatabase()
     const manga = await mangas.find(manga => manga.hash === mangaHash)
 
@@ -1227,7 +1295,7 @@ LANBrowsing.get('/api/archives/:hash/metadata', async (req, res) => {
       return res.status(404).send('Manga not found')
     }
 
-    // 构造响应数据
+    // 鏋勯€犲搷搴旀暟鎹?
     const responseMetadata = {
       arcid: manga.hash,
       extension: path.extname(manga.filepath),
@@ -1249,7 +1317,7 @@ LANBrowsing.get('/api/archives/:hash/metadata', async (req, res) => {
   }
 })
 
-// 处理封面图片请求
+// 澶勭悊灏侀潰鍥剧墖璇锋眰
 LANBrowsing.get('/api/archives/:hash/thumbnail', async (req, res) => {
   const hash = req.params.hash
   const manga = await Manga.findOne({where: {hash: hash}})
@@ -1270,12 +1338,12 @@ let existBook = {
   imageList: []
 }
 
-// 处理章节列表请求
+// 澶勭悊绔犺妭鍒楄〃璇锋眰
 LANBrowsing.get('/api/archives/:hash/files', async (req, res) => {
   try {
     const mangaHash = req.params.hash
 
-    // 从数据库找到对应的漫画
+    // 浠庢暟鎹簱鎵惧埌瀵瑰簲鐨勬极鐢?
     const manga = await Manga.findOne({where: {hash: mangaHash}})
 
     if (!manga) {
@@ -1290,9 +1358,9 @@ LANBrowsing.get('/api/archives/:hash/files', async (req, res) => {
       hash: manga.hash,
       imageList: imageList.map(p => p.absolutePath)
     }
-    // 构造响应数据
+    // 鏋勯€犲搷搴旀暟鎹?
     const responseFiles = {
-      job: Date.now(), // 示例中的 job 可以是一个随机数或时间戳
+      job: Date.now(), // 绀轰緥涓殑 job 鍙互鏄竴涓殢鏈烘暟鎴栨椂闂存埑
       pages: imageList.map((file, index) => `/api/archives/${manga.hash}/page?path=${index + 1}`)
     }
 
@@ -1302,7 +1370,7 @@ LANBrowsing.get('/api/archives/:hash/files', async (req, res) => {
   }
 })
 
-// 处理章节图片请求
+// 澶勭悊绔犺妭鍥剧墖璇锋眰
 LANBrowsing.get('/api/archives/:hash/page', async (req, res) => {
   const hash = req.params.hash
   const page = parseInt(req.query.path, 10)
@@ -1315,7 +1383,7 @@ LANBrowsing.get('/api/archives/:hash/page', async (req, res) => {
     return res.status(404).send('File not found')
   }
 
-  // 获取章节图片列表
+  // 鑾峰彇绔犺妭鍥剧墖鍒楄〃
   try {
     let imageList
     if (manga.hash === existBook.hash) {
@@ -1333,12 +1401,12 @@ LANBrowsing.get('/api/archives/:hash/page', async (req, res) => {
       return res.status(404).send('Image not found')
     }
 
-    // 重命名并复制图片文件到静态文件夹
+    // 閲嶅懡鍚嶅苟澶嶅埗鍥剧墖鏂囦欢鍒伴潤鎬佹枃浠跺す
     const imageFileName = `${manga.hash}_${page}${path.extname(imageFilePath)}`
     const imageFile = path.join(staticFilePath, imageFileName)
     await fs.promises.copyFile(imageFilePath, imageFile)
 
-    // 发送图片文件
+    // 鍙戦€佸浘鐗囨枃浠?
     if (fs.existsSync(imageFile)) {
       res.sendFile(imageFile)
     } else {
@@ -1350,12 +1418,12 @@ LANBrowsing.get('/api/archives/:hash/page', async (req, res) => {
   }
 })
 
-// 处理webview请求
+// 澶勭悊webview璇锋眰
 LANBrowsing.get('/reader', async (req, res) => {
   const id = req.query.id
   const manga = await Manga.findOne({where: {hash: id}})
 
-  // 重定向至manga.url
+  // 閲嶅畾鍚戣嚦manga.url
   if (manga && manga.url) {
     res.redirect(manga.url.replace('exhentai', 'e-hentai'))
   } else {
@@ -1377,7 +1445,7 @@ LANBrowsing.get('/', (req, res) => {
 })
 
 let LANBrowsingInstance
-// 启动Express服务器
+// 鍚姩Express鏈嶅姟鍣?
 const enableLANBrowsing = () => {
   if (LANBrowsingInstance?.listening) {
     LANBrowsingInstance.close(() => {

@@ -738,12 +738,12 @@ const importDatabase = async () => {
 }
 
 const importMetadataFromSqlite = async () => {
-  const {success, bList} = await ipcRenderer.invoke('import-sqlite', _.cloneDeep(bookList.value))
-  if (success) {
-    bookList.value = bList
-    printMessage('success', t('c.importMessage'))
+  const res = await ipcRenderer.invoke('import-sqlite', _.cloneDeep(bookList.value))
+  if (res.success) {
+    bookList.value = res.bookList
+    printMessage('success', `${t('c.importMessage')}${Number.isInteger(res.matchedCount) ? ` (${res.matchedCount}/${res.processedCount})` : ''}`)
   } else {
-    printMessage('info', t('c.canceled'))
+    printMessage(res.error ? 'error' : 'info', res.error || t('c.canceled'))
   }
 }
 
