@@ -156,6 +156,7 @@ const createWindow = () => {
   } else {
     win.loadURL('http://localhost:5374')
   }
+  mainWindowState.manage(win)
   win.setMenuBarVisibility(false)
   win.setAutoHideMenuBar(true)
   const menu = Menu.buildFromTemplate(prepareTemplate(win))
@@ -200,7 +201,6 @@ const createWindow = () => {
   })
   win.on('show', () => {
     win.setSkipTaskbar(false)
-    mainWindowState.manage(win)
   })
   return win
 }
