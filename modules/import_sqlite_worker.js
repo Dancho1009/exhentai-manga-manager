@@ -11,27 +11,7 @@ const { getEhviewerDataFromZip } = require('../fileLoader/zip.js')
 const { readEhviewerFile } = require('../fileLoader/ehviewer.js')
 const { readEhviewerBuffer } = require('../fileLoader/ehviewer.js')
 
-const { sqlitePath, bookList, concurrency, tempPath, sevenZipPath } = workerData
-
-const normalizeMatchConcurrency = (value) => {
-  const number = Number.parseInt(value, 10)
-  return Number.isFinite(number) && number >= 1 ? number : 1
-}
-
-const runWithConcurrency = async (items, concurrencyLimit, task) => {
-  const workerCount = Math.min(normalizeMatchConcurrency(concurrencyLimit), items.length)
-  let nextIndex = 0
-  const workers = Array.from({ length: workerCount }, async () => {
-    while (nextIndex < items.length) {
-      const index = nextIndex
-      nextIndex += 1
-      await task(items[index], index)
-    }
-  })
-  const results = await Promise.allSettled(workers)
-  const rejected = results.find(result => result.status === 'rejected')
-  if (rejected) throw rejected.reason
-}
+const { workerId = 0, sqlitePath, bookList, tempPath, sevenZipPath } = workerData
 
 const spawnPromise = (commmand, argument, timeoutMs = 30 * 1000) => {
   return new Promise((resolve, reject) => {
@@ -190,10 +170,11 @@ const matchBook = async (db, book) => {
   return normalizeMetadata(metadata)
 }
 
-const postProgress = (completedCount, processedCount) => {
+const postProgress = (completedCount) => {
   parentPort.postMessage({
     type: 'progress',
-    progress: processedCount ? completedCount / processedCount : 1
+    workerId,
+    completedCount
   })
 }
 
@@ -204,7 +185,7 @@ const createProgressPoster = (processedCount) => {
     const now = Date.now()
     if (!force && completedCount < processedCount && now - lastSentAt < intervalMs) return
     lastSentAt = now
-    postProgress(completedCount, processedCount)
+    postProgress(completedCount)
   }
 }
 
@@ -216,11 +197,12 @@ const createProgressPoster = (processedCount) => {
   const postThrottledProgress = createProgressPoster(processedCount)
   const db = await open({
     filename: sqlitePath,
+    mode: sqlite3.OPEN_READONLY,
     driver: sqlite3.Database
   })
 
   try {
-    await runWithConcurrency(pendingBookList, concurrency, async (book) => {
+    for (const book of pendingBookList) {
       try {
         const metadata = await matchBook(db, book)
         if (metadata) {
@@ -235,9 +217,10 @@ const createProgressPoster = (processedCount) => {
         completedCount += 1
         postThrottledProgress(completedCount, completedCount >= processedCount)
       }
-    })
+    }
     parentPort.postMessage({
       type: 'done',
+      workerId,
       matchedCount,
       processedCount
     })

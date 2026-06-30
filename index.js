@@ -9,6 +9,8 @@ const sharp = require('sharp')
 const { exec } = require('child_process')
 const { Worker } = require('worker_threads')
 const { createHash } = require('crypto')
+const sqlite3 = require('sqlite3')
+const { open } = require('sqlite')
 const fetch = require('node-fetch')
 const { HttpsProxyAgent } = require('https-proxy-agent')
 const windowStateKeeper = require('electron-window-state')
@@ -301,90 +303,161 @@ const saveBookToDatabase = async (book) => {
   console.log(`Saved ${book.title}`)
 }
 
-const runImportSqliteWorker = ({ sqlitePath, bookList }) => {
+const prepareImportSqliteCopy = async (sourcePath) => {
+  const tempDir = path.join(TEMP_PATH, `import_sqlite_${nanoid(8)}`)
+  const sqlitePath = path.join(tempDir, path.basename(sourcePath))
+  await fs.promises.mkdir(tempDir, { recursive: true })
+  await fs.promises.copyFile(sourcePath, sqlitePath)
+  return { tempDir, sqlitePath }
+}
+
+const prepareImportSqliteIndexes = async (sqlitePath) => {
+  const db = await open({
+    filename: sqlitePath,
+    driver: sqlite3.Database
+  })
+
+  try {
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_gallery_gid_token ON gallery(gid, token)')
+  } finally {
+    await db.close()
+  }
+}
+
+const splitImportBooks = (items, workerCount) => {
+  const chunks = Array.from({ length: workerCount }, () => [])
+  items.forEach((item, index) => {
+    chunks[index % workerCount].push(item)
+  })
+  return chunks.filter(chunk => chunk.length > 0)
+}
+
+const runImportSqliteWorkers = async ({ sqlitePath, bookList }) => {
   const bookById = new Map(bookList.map(book => [book.id, book]))
   const importBookList = bookList
     .filter(book => book.status !== 'tagged')
     .map(book => _.pick(book, ['id', 'status', 'filepath', 'type', 'title', 'coverHash']))
 
-  const worker = new Worker(path.join(__dirname, 'modules/import_sqlite_worker.js'), {
-    workerData: {
-      sqlitePath,
-      bookList: importBookList,
-      concurrency: setting.matchConcurrency,
-      tempPath: TEMP_PATH,
-      sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe')
-    }
-  })
-
-  return new Promise((resolve, reject) => {
-    let settled = false
-    let workerDone = false
-    const result = {
+  const processedCount = importBookList.length
+  if (processedCount === 0) {
+    setProgressBar(1)
+    return {
       matchedCount: 0,
       processedCount: 0
     }
-    let saveQueue = Promise.resolve()
+  }
 
-    const settleReject = (error, terminateWorker = true) => {
-      if (settled) return
-      settled = true
-      if (terminateWorker) worker.terminate().catch(() => {})
-      reject(error instanceof Error ? error : new Error(String(error)))
-    }
+  const concurrency = Math.min(normalizeMatchConcurrency(setting.matchConcurrency), processedCount)
+  const chunks = splitImportBooks(importBookList, concurrency)
+  const importCopy = await prepareImportSqliteCopy(sqlitePath)
 
-    const settleResolve = () => {
-      if (settled) return
-      settled = true
-      resolve(result)
-    }
+  try {
+    await prepareImportSqliteIndexes(importCopy.sqlitePath)
 
-    const enqueueSave = (bookId, metadata) => {
-      saveQueue = saveQueue.then(async () => {
-        const book = bookById.get(bookId)
-        if (!book) return
-        _.assign(book, metadata, { status: 'tagged' })
-        await saveBookToDatabase(book)
+    return await new Promise((resolve, reject) => {
+      let settled = false
+      let doneWorkerCount = 0
+      const result = {
+        matchedCount: 0,
+        processedCount
+      }
+      let saveQueue = Promise.resolve()
+      const workerProgress = new Map()
+      const workerDone = new Map()
+      let lastProgressSentAt = 0
+      const workers = chunks.map((chunk, workerId) => {
+        workerProgress.set(workerId, 0)
+        workerDone.set(workerId, false)
+        return new Worker(path.join(__dirname, 'modules/import_sqlite_worker.js'), {
+          workerData: {
+            workerId,
+            sqlitePath: importCopy.sqlitePath,
+            bookList: chunk,
+            tempPath: TEMP_PATH,
+            sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe')
+          }
+        })
       })
-      saveQueue.catch(error => settleReject(error))
-    }
 
-    const finishAfterSaves = () => {
-      saveQueue
-        .then(settleResolve)
-        .catch(error => settleReject(error, false))
-    }
-
-    worker.on('message', message => {
-      switch (message.type) {
-        case 'matched':
-          enqueueSave(message.bookId, message.metadata)
-          break
-        case 'progress':
-          setProgressBar(message.progress)
-          break
-        case 'done':
-          workerDone = true
-          result.matchedCount = message.matchedCount
-          result.processedCount = message.processedCount
-          finishAfterSaves()
-          break
-        case 'error':
-          settleReject(new Error(message.error))
-          break
+      const terminateWorkers = () => {
+        workers.forEach(worker => worker.terminate().catch(() => {}))
       }
-    })
 
-    worker.on('error', error => settleReject(error, false))
-    worker.on('exit', code => {
-      if (settled) return
-      if (code !== 0) {
-        settleReject(new Error(`Import worker exited with code ${code}`), false)
-      } else if (!workerDone) {
-        settleReject(new Error('Import worker exited before completing'), false)
+      const settleReject = (error, terminateWorker = true) => {
+        if (settled) return
+        settled = true
+        if (terminateWorker) terminateWorkers()
+        reject(error instanceof Error ? error : new Error(String(error)))
       }
+
+      const settleResolve = () => {
+        if (settled) return
+        settled = true
+        resolve(result)
+      }
+
+      const enqueueSave = (bookId, metadata) => {
+        saveQueue = saveQueue.then(async () => {
+          const book = bookById.get(bookId)
+          if (!book) return
+          _.assign(book, metadata, { status: 'tagged' })
+          await saveBookToDatabase(book)
+        })
+        saveQueue.catch(error => settleReject(error))
+      }
+
+      const postImportProgress = (force = false) => {
+        const now = Date.now()
+        if (!force && now - lastProgressSentAt < 100) return
+        lastProgressSentAt = now
+        const completedCount = Array.from(workerProgress.values()).reduce((sum, count) => sum + count, 0)
+        setProgressBar(processedCount ? completedCount / processedCount : 1)
+      }
+
+      const finishAfterSaves = () => {
+        saveQueue
+          .then(settleResolve)
+          .catch(error => settleReject(error, false))
+      }
+
+      workers.forEach((worker, workerId) => {
+        worker.on('message', message => {
+          switch (message.type) {
+            case 'matched':
+              enqueueSave(message.bookId, message.metadata)
+              break
+            case 'progress':
+              workerProgress.set(message.workerId ?? workerId, message.completedCount)
+              postImportProgress(message.completedCount >= chunks[workerId].length)
+              break
+            case 'done':
+              result.matchedCount += message.matchedCount
+              doneWorkerCount += 1
+              workerDone.set(workerId, true)
+              workerProgress.set(message.workerId ?? workerId, message.processedCount)
+              postImportProgress(doneWorkerCount >= workers.length)
+              if (doneWorkerCount >= workers.length) finishAfterSaves()
+              break
+            case 'error':
+              settleReject(new Error(message.error))
+              break
+          }
+        })
+
+        worker.on('error', error => settleReject(error, false))
+        worker.on('exit', code => {
+          if (settled) return
+          if (code !== 0) {
+            settleReject(new Error(`Import worker ${workerId} exited with code ${code}`), false)
+          } else if (!workerDone.get(workerId)) {
+            settleReject(new Error(`Import worker ${workerId} exited before completing`), false)
+          }
+        })
+      })
     })
-  })
+  } finally {
+    await fs.promises.rm(importCopy.tempDir, { recursive: true, force: true })
+  }
 }
 
 const setProgressBar = (progress) => {
@@ -1045,7 +1118,7 @@ ipcMain.handle('import-sqlite', async (event, bookList) => {
   })
   if (!result.canceled) {
     try {
-      const workerResult = await runImportSqliteWorker({
+      const workerResult = await runImportSqliteWorkers({
         sqlitePath: result.filePaths[0],
         bookList
       })
