@@ -324,6 +324,21 @@ const prepareImportSqliteIndexes = async (sqlitePath) => {
   }
 }
 
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+const rmWithRetry = async (targetPath, options, retryCount = 8) => {
+  const retryableErrors = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY'])
+  for (let attempt = 0; attempt <= retryCount; attempt++) {
+    try {
+      await fs.promises.rm(targetPath, options)
+      return
+    } catch (error) {
+      if (attempt >= retryCount || !retryableErrors.has(error?.code)) throw error
+      await wait(100 * (attempt + 1))
+    }
+  }
+}
+
 const splitImportBooks = (items, workerCount) => {
   const chunks = Array.from({ length: workerCount }, () => [])
   items.forEach((item, index) => {
@@ -456,7 +471,7 @@ const runImportSqliteWorkers = async ({ sqlitePath, bookList }) => {
       })
     })
   } finally {
-    await fs.promises.rm(importCopy.tempDir, { recursive: true, force: true })
+    await rmWithRetry(importCopy.tempDir, { recursive: true, force: true })
   }
 }
 

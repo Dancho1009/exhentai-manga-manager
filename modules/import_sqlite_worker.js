@@ -200,6 +200,7 @@ const createProgressPoster = (processedCount) => {
     mode: sqlite3.OPEN_READONLY,
     driver: sqlite3.Database
   })
+  let dbClosed = false
 
   try {
     for (const book of pendingBookList) {
@@ -218,6 +219,8 @@ const createProgressPoster = (processedCount) => {
         postThrottledProgress(completedCount, completedCount >= processedCount)
       }
     }
+    await db.close()
+    dbClosed = true
     parentPort.postMessage({
       type: 'done',
       workerId,
@@ -225,7 +228,12 @@ const createProgressPoster = (processedCount) => {
       processedCount
     })
   } finally {
-    await db.close()
+    if (!dbClosed) {
+      try {
+        await db.close()
+      } catch {
+      }
+    }
   }
 })().catch(error => {
   parentPort.postMessage({
