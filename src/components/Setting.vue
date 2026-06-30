@@ -268,6 +268,17 @@
             </div>
           </el-col>
           <el-col :span="24">
+            <div class="setting-line">
+              <el-input
+                v-model.number="setting.scanConcurrency"
+                :placeholder="$t('m.scanConcurrencyInfo')"
+                @change="handleScanConcurrencyChange"
+              >
+                <template #prepend><span class="setting-label">{{$t('m.scanConcurrency')}}</span></template>
+              </el-input>
+            </div>
+          </el-col>
+          <el-col :span="24">
             <NameFormItem class="setting-line" prependWidth="110px">
               <template #prepend>{{$t('m.customOptions')}}</template>
               <template #default>
@@ -540,6 +551,7 @@ onMounted(() => {
       if (res.defaultInsertEmptyPage === undefined) setting.value.defaultInsertEmptyPage = true
       if (res.viewerType === undefined) setting.value.viewerType = 'original'
       setting.value.matchConcurrency = normalizeMatchConcurrency(res.matchConcurrency)
+      setting.value.scanConcurrency = normalizeScanConcurrency(res.scanConcurrency)
       saveSetting()
 
       // default action
@@ -718,16 +730,25 @@ const handleLanguageSet = async (languageCode) => {
 
 const saveSetting = _.debounce(() => {
   setting.value.matchConcurrency = normalizeMatchConcurrency(setting.value.matchConcurrency)
+  setting.value.scanConcurrency = normalizeScanConcurrency(setting.value.scanConcurrency)
   ipcRenderer.invoke('save-setting', _.cloneDeep(setting.value))
 }, 500)
 
-const normalizeMatchConcurrency = (value) => {
+const normalizeConcurrency = (value) => {
   const number = Number.parseInt(value, 10)
   return Number.isFinite(number) && number >= 1 ? number : 1
 }
 
+const normalizeMatchConcurrency = normalizeConcurrency
+const normalizeScanConcurrency = normalizeConcurrency
+
 const handleMatchConcurrencyChange = () => {
   setting.value.matchConcurrency = normalizeMatchConcurrency(setting.value.matchConcurrency)
+  saveSetting()
+}
+
+const handleScanConcurrencyChange = () => {
+  setting.value.scanConcurrency = normalizeScanConcurrency(setting.value.scanConcurrency)
   saveSetting()
 }
 

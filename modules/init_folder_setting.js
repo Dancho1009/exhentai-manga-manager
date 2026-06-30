@@ -37,10 +37,13 @@ const preparePath = () => {
 
 const _mange_reader = `"${path.join(getRootPath(), 'resources/extraResources/manga_reader.exe')}"`
 
-const normalizeMatchConcurrency = (value) => {
+const normalizeConcurrency = (value) => {
   const number = Number.parseInt(value, 10)
   return Number.isFinite(number) && number >= 1 ? number : 1
 }
+
+const normalizeMatchConcurrency = normalizeConcurrency
+const normalizeScanConcurrency = normalizeConcurrency
 
 const prepareSetting = () => {
   let setting
@@ -54,6 +57,11 @@ const prepareSetting = () => {
     const matchConcurrency = normalizeMatchConcurrency(setting.matchConcurrency)
     if (setting.matchConcurrency !== matchConcurrency) {
       setting.matchConcurrency = matchConcurrency
+      changed = true
+    }
+    const scanConcurrency = normalizeScanConcurrency(setting.scanConcurrency)
+    if (setting.scanConcurrency !== scanConcurrency) {
+      setting.scanConcurrency = scanConcurrency
       changed = true
     }
     if (changed) {
@@ -89,6 +97,7 @@ const prepareSetting = () => {
       displayTitle: 'japaneseTitle',
       keepReadingProgress: true,
       matchConcurrency: 1,
+      scanConcurrency: 1,
     }
     fs.writeFileSync(path.join(STORE_PATH, 'setting.json'), JSON.stringify(setting, null, '  '), { encoding: 'utf-8' })
   }
@@ -117,4 +126,5 @@ module.exports = {
   preparePath,
   _mange_reader,
   normalizeMatchConcurrency,
+  normalizeScanConcurrency,
 }

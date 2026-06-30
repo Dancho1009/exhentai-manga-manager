@@ -78,6 +78,8 @@
     "requireGapInfo": "默认值是10000ms",
     "matchConcurrency": "导入匹配并发数",
     "matchConcurrencyInfo": "仅影响导入api_dump.sqlite，1 = 维持现状",
+    "scanConcurrency": "扫库并发数",
+    "scanConcurrencyInfo": "仅影响本地扫库和重建，1 = 维持现状",
     "thumbnailColumn": "缩略图列数",
     "theme": "主题",
     "like": "格式为",

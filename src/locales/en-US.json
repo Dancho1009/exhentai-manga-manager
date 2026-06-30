@@ -78,6 +78,8 @@
     "requireGapInfo": "Default value is 10000",
     "matchConcurrency": "Import Match Concurrency",
     "matchConcurrencyInfo": "Only affects api_dump.sqlite imports, 1 = keep current behavior",
+    "scanConcurrency": "Scan Concurrency",
+    "scanConcurrencyInfo": "Only affects local library scan and rebuild, 1 = keep current behavior",
     "thumbnailColumn": "Thumbnail Column",
     "theme": "Theme",
     "like": "Like",

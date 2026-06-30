@@ -492,11 +492,82 @@ const clearFolder = async (Folder) => {
   }
 }
 
+const runWithConcurrency = async (items, concurrencyLimit, task) => {
+  const workerCount = Math.min(normalizeScanConcurrency(concurrencyLimit), items.length)
+  let nextIndex = 0
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex
+      nextIndex += 1
+      await task(items[index], index)
+    }
+  })
+  const results = await Promise.allSettled(workers)
+  const rejected = results.find(result => result.status === 'rejected')
+  if (rejected) throw rejected.reason
+}
+
+const createSerialQueue = () => {
+  let queue = Promise.resolve()
+  return (task) => {
+    const result = queue.then(task)
+    queue = result.catch(() => {})
+    return result
+  }
+}
+
+const createScanProgressPoster = (totalCount) => {
+  const intervalMs = 100
+  let completedCount = 0
+  let lastSentAt = 0
+
+  return () => {
+    completedCount += 1
+    const now = Date.now()
+    const force = completedCount >= totalCount
+    if (!force && completedCount < totalCount && now - lastSentAt < intervalMs) return
+    lastSentAt = now
+    setProgressBar(totalCount ? completedCount / totalCount : 1)
+  }
+}
+
+const withScanTempFolder = async (task) => {
+  const tempPath = path.join(TEMP_PATH, `scan_${nanoid(8)}`)
+  await fs.promises.mkdir(tempPath, { recursive: true })
+  try {
+    return await task(tempPath)
+  } finally {
+    await rmWithRetry(tempPath, { recursive: true, force: true })
+  }
+}
+
+const createBookFromCoverData = (filepath, type, coverData) => {
+  const { targetFilePath, coverPath, pageCount, bundleSize, mtime, coverHash } = coverData
+  if (!targetFilePath || !coverPath) return null
+
+  const hash = createHash('sha1').update(fs.readFileSync(targetFilePath)).digest('hex')
+  return {
+    title: path.basename(filepath),
+    coverPath,
+    hash,
+    filepath,
+    type,
+    id: nanoid(),
+    pageCount,
+    bundleSize,
+    mtime: mtime.toJSON(),
+    coverHash,
+    status: 'non-tag',
+    date: Date.now()
+  }
+}
+
 
 // library and metadata
 ipcMain.handle('load-book-list', async (event, scan) => {
   if (scan) {
     sendMessageToWebContents('Start loading library')
+    await clearFolder(TEMP_PATH)
 
     const bookList = await Manga.findAll({ raw: true })
     bookList.forEach(b => b.exist = false)
@@ -513,73 +584,69 @@ ipcMain.handle('load-book-list', async (event, scan) => {
     }
     const listLength = list.length
     sendMessageToWebContents(`Load ${listLength} book from library`)
+    const saveQueue = createSerialQueue()
+    const bookListQueue = createSerialQueue()
+    const postScanProgress = createScanProgressPoster(listLength)
 
-    for (let i = 0; i < listLength; i++) {
+    const scanOneBook = async (bookFile, index) => {
       try {
-        const { filepath, type } = list[i]
-        const foundData = bookList.find(b => b.filepath === filepath)
+        const { filepath, type } = bookFile
+        const foundData = await bookListQueue(() => Promise.resolve(bookList.find(b => b.filepath === filepath)))
         if (foundData === undefined) {
           /*
           * check whether the file is the relocated only
           * return the existing data if and only if there is one match
           * */
-          const existingManga = await findSameFile(filepath,type, Manga)
+          const existingManga = await findSameFile(filepath, type, Manga)
           if (existingManga) {
-            // the file is relocated only, so no need to regenerate the cover
-            foundPrevBook = bookList.find(b => b.id === existingManga.id)
-            // this is necessary otherwise it will be deleted in the next step
-            foundPrevBook.exist = true
-            // update the Mangas table in database.sqlite
-            const newCoverPath = path.join(COVER_PATH, path.basename(foundPrevBook.coverPath))
-            foundPrevBook.coverPath = newCoverPath
-            await Manga.update(
-              { filepath: filepath, coverPath: newCoverPath },
-              { where: { id: existingManga.id } }
-            )
+            await bookListQueue(async () => {
+              // the file is relocated only, so no need to regenerate the cover
+              const foundPrevBook = bookList.find(b => b.id === existingManga.id)
+              if (!foundPrevBook) return
+              // this is necessary otherwise it will be deleted in the next step
+              foundPrevBook.exist = true
+              // update the Mangas table in database.sqlite
+              const newCoverPath = path.join(COVER_PATH, path.basename(foundPrevBook.coverPath))
+              foundPrevBook.coverPath = newCoverPath
+              await saveQueue(() => Manga.update(
+                { filepath: filepath, coverPath: newCoverPath },
+                { where: { id: existingManga.id } }
+              ))
+            })
           } else {
             // this is the new file, so generate the cover
-            const id = nanoid()
-            const { targetFilePath, coverPath, pageCount, bundleSize, mtime, coverHash } = await geneCover(filepath, type)
-            if (targetFilePath && coverPath) {
-              const hash = createHash('sha1').update(fs.readFileSync(targetFilePath)).digest('hex')
-              const newBook = {
-                title: path.basename(filepath),
-                coverPath,
-                hash,
-                filepath,
-                type,
-                id,
-                pageCount,
-                bundleSize,
-                mtime: mtime.toJSON(),
-                coverHash,
-                status: 'non-tag',
-                exist: true,
-                date: Date.now()
-              }
-              await Manga.create(newBook)
-              bookList.push(newBook)
+            const newBook = await withScanTempFolder(async (tempPath) => {
+              const coverData = await geneCover(filepath, type, { tempPath })
+              return createBookFromCoverData(filepath, type, coverData)
+            })
+            if (newBook) {
+              newBook.exist = true
+              await bookListQueue(async () => {
+                bookList.push(newBook)
+                await saveQueue(() => Manga.create(newBook))
+              })
             }
           }
         } else {
-          foundData.exist = true
-          if (isPortable) {
-            const newCoverPath = path.join(COVER_PATH, path.basename(foundData.coverPath))
-            if (foundData.coverPath !== newCoverPath) {
-              foundData.coverPath = newCoverPath
-              await Manga.update({ coverPath: newCoverPath }, { where: { id: foundData.id } })
+          await bookListQueue(async () => {
+            foundData.exist = true
+            if (isPortable) {
+              const newCoverPath = path.join(COVER_PATH, path.basename(foundData.coverPath))
+              if (foundData.coverPath !== newCoverPath) {
+                foundData.coverPath = newCoverPath
+                await saveQueue(() => Manga.update({ coverPath: newCoverPath }, { where: { id: foundData.id } }))
+              }
             }
-          }
-        }
-        if (i === 0) setProgressBar(0.05)
-        if ((i + 1) % 50 === 0) {
-          setProgressBar(i / listLength)
-          await clearFolder(TEMP_PATH)
+          })
         }
       } catch (e) {
-        sendMessageToWebContents(`Load ${list[i].filepath} failed because ${e}, ${i + 1} of ${listLength}`)
+        sendMessageToWebContents(`Load ${bookFile.filepath} failed because ${e}, ${index + 1} of ${listLength}`)
+      } finally {
+        postScanProgress()
       }
     }
+
+    await runWithConcurrency(list, setting.scanConcurrency, scanOneBook)
     await clearFolder(TEMP_PATH)
 
     const existData = bookList.filter(b => b.exist === true)
@@ -619,34 +686,27 @@ ipcMain.handle('force-gene-book-list', async (event, arg) => {
   }
   const listLength = list.length
   sendMessageToWebContents(`Load ${listLength} book from library`)
-  for (let i = 0; i < listLength; i++) {
+  const saveQueue = createSerialQueue()
+  const postScanProgress = createScanProgressPoster(listLength)
+
+  const rebuildOneBook = async (bookFile, index) => {
     try {
-      const { filepath, type } = list[i]
-      const id = nanoid()
-      const { targetFilePath, coverPath, pageCount, bundleSize, mtime, coverHash } = await geneCover(filepath, type)
-      if (targetFilePath && coverPath) {
-        const hash = createHash('sha1').update(fs.readFileSync(targetFilePath)).digest('hex')
-        await Manga.create({
-          title: path.basename(filepath),
-          coverPath,
-          hash,
-          filepath,
-          type,
-          id,
-          pageCount,
-          bundleSize,
-          mtime: mtime.toJSON(),
-          coverHash,
-          status: 'non-tag',
-          date: Date.now()
-        })
+      const { filepath, type } = bookFile
+      const newBook = await withScanTempFolder(async (tempPath) => {
+        const coverData = await geneCover(filepath, type, { tempPath })
+        return createBookFromCoverData(filepath, type, coverData)
+      })
+      if (newBook) {
+        await saveQueue(() => Manga.create(newBook))
       }
-      if ((i + 1) % 50 === 0) await clearFolder(TEMP_PATH)
-      setProgressBar(i / listLength)
     } catch (e) {
-      sendMessageToWebContents(`Load ${list[i].filepath} failed because ${e}, ${i + 1} of ${listLength}`)
+      sendMessageToWebContents(`Load ${bookFile.filepath} failed because ${e}, ${index + 1} of ${listLength}`)
+    } finally {
+      postScanProgress()
     }
   }
+
+  await runWithConcurrency(list, setting.scanConcurrency, rebuildOneBook)
   await clearFolder(TEMP_PATH)
 
   setProgressBar(-1)

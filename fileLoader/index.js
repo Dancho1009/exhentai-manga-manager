@@ -19,28 +19,30 @@ const getBookFilelist = async (library) => {
   ]
 }
 
-const geneCover = async (filepath, type) => {
+const geneCover = async (filepath, type, options = {}) => {
+  const tempPath = options.tempPath || TEMP_PATH
+  const coverPathRoot = options.coverPath || COVER_PATH
   let targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime
   switch (type) {
     case 'folder':
-      ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeFolder(filepath, TEMP_PATH, COVER_PATH))
+      ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeFolder(filepath, tempPath, coverPathRoot))
       break
     case 'zip':
       try {
-        ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeArchive(filepath, TEMP_PATH, COVER_PATH))
+        ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeArchive(filepath, tempPath, coverPathRoot))
       } catch (e) {
         console.log(e)
         console.log(`reload ${filepath} use adm-zip`)
-        ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeZip(filepath, TEMP_PATH, COVER_PATH))
+        ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeZip(filepath, tempPath, coverPathRoot))
       }
       break
     case 'archive':
-      ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeArchive(filepath, TEMP_PATH, COVER_PATH))
+      ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeArchive(filepath, tempPath, coverPathRoot))
       break
   }
 
   const coverHash = createHash('sha1').update(fs.readFileSync(tempCoverPath)).digest('hex')
-  const copyTempCoverPath = path.join(TEMP_PATH, nanoid(8) + path.extname(tempCoverPath))
+  const copyTempCoverPath = path.join(tempPath, nanoid(8) + path.extname(tempCoverPath))
   await fs.promises.copyFile(tempCoverPath, copyTempCoverPath)
   await sharp(copyTempCoverPath, { failOnError: false })
     .resize(500, 707, {
