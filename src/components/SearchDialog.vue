@@ -49,7 +49,6 @@
 <script setup>
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage } from 'element-plus'
 import { Search32Filled } from '@vicons/fluent'
 import { Link } from '@element-plus/icons-vue'
 import he from 'he'
@@ -62,7 +61,7 @@ const {
   setting, bookList, serviceAvailable,
   cookie, tag2cat
 } = storeToRefs(appStore)
-const { printMessage, returnTrimFileName, saveBook } = appStore
+const { printMessage, returnTrimFileName, runWithTaskMessage, saveBook } = appStore
 
 const { t } = useI18n()
 
@@ -240,47 +239,46 @@ const getBooksMetadata = async (bookList, gap, callback) => {
   const timer = ms => new Promise(res => setTimeout(res, ms))
   const saveQueue = createSerialQueue()
   let completedCount = 0
-  const messageInstance = ElMessage({
-    message: t('c.gettingMetadata'),
-    type: 'success',
-    duration: 0,
-    showClose: true,
-    onClose: () => {
-      serviceAvailable.value = false
-    }
-  })
   try {
-    await runSerially(bookList, async (book) => {
-      try {
-        if (!serviceAvailable.value) return
-        if (!book.url) {
-          const resultList = await getBookListFromWebRaw(
-            book.hash.toUpperCase(),
-            returnTrimFileName(book),
-            server,
-            book.filepath
-          )
-          if (resultList?.[0]) {
-            const changed = await fetchAndApplySearchResult(book, resultList[0].url, resultList[0].type)
-            if (changed) await saveQueue(() => saveBook(book))
+    await runWithTaskMessage({
+      message: t('c.gettingMetadata'),
+      showClose: true,
+      onClose: () => {
+        serviceAvailable.value = false
+      },
+      task: async () => {
+        await runSerially(bookList, async (book) => {
+          try {
+            if (!serviceAvailable.value) return
+            if (!book.url) {
+              const resultList = await getBookListFromWebRaw(
+                book.hash.toUpperCase(),
+                returnTrimFileName(book),
+                server,
+                book.filepath
+              )
+              if (resultList?.[0]) {
+                const changed = await fetchAndApplySearchResult(book, resultList[0].url, resultList[0].type)
+                if (changed) await saveQueue(() => saveBook(book))
+              }
+            } else {
+              const changed = await fetchAndApplyBookInfo(book)
+              if (changed) await saveQueue(() => saveBook(book))
+            }
+            await timer(gap)
+          } catch (error) {
+            book.status = 'tag-failed'
+            await saveQueue(() => saveBook(book))
+            console.error(error)
+          } finally {
+            completedCount += 1
+            ipcRenderer.invoke('set-progress-bar', bookList.length ? completedCount / bookList.length : 1)
           }
-        } else {
-          const changed = await fetchAndApplyBookInfo(book)
-          if (changed) await saveQueue(() => saveBook(book))
-        }
-        await timer(gap)
-      } catch (error) {
-        book.status = 'tag-failed'
-        await saveQueue(() => saveBook(book))
-        console.error(error)
-      } finally {
-        completedCount += 1
-        ipcRenderer.invoke('set-progress-bar', bookList.length ? completedCount / bookList.length : 1)
+        }, () => serviceAvailable.value)
       }
-    }, () => serviceAvailable.value)
+    })
     printMessage('success', t('c.getMetadataComplete'))
   } finally {
-    messageInstance.close()
     ipcRenderer.invoke('set-progress-bar', -1)
     if (callback) callback()
   }

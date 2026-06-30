@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { ElMessage } from 'element-plus'
 
+let lastToastMessage = null
+
 export const useAppStore = defineStore('appStore', {
   state: () => ({
     cat2letter: {
@@ -185,11 +187,30 @@ export const useAppStore = defineStore('appStore', {
       return !book.folderHide && !book.collectionHide && !book.hiddenBook
     },
     printMessage(type, msg) {
-      ElMessage.closeAll()
-      ElMessage[type]({
+      if (lastToastMessage) lastToastMessage.close()
+      lastToastMessage = ElMessage[type]({
         message: msg,
         offset: 50
       })
+    },
+    async runWithTaskMessage({ message, task, type = 'success', showClose = false, onClose }) {
+      let closingByTask = false
+      const messageInstance = ElMessage({
+        message,
+        type,
+        duration: 0,
+        showClose,
+        offset: 50,
+        onClose: () => {
+          if (!closingByTask && onClose) onClose()
+        }
+      })
+      try {
+        return await task()
+      } finally {
+        closingByTask = true
+        messageInstance.close()
+      }
     },
     returnFileNameWithExt (filepath) {
       return filepath.split(/[/\\]/).pop()

@@ -1,5 +1,5 @@
 {
-  "m":{
+  "m": {
     "folderTree": "文件夹树",
     "search": "搜索",
     "shuffle": "随机排序",
@@ -216,6 +216,10 @@
     "reGetMetadataWarning": "此操作将清除现有元数据链接并重新搜索，消耗大量配额。请确保单次处理数量<100且不要频繁操作。确定？",
     "rescanSuccess": "重新扫描完成",
     "gettingMetadata": "获取元数据中...",
+    "scanningLibrary": "扫描漫画库中...",
+    "rebuildingLibrary": "重建漫画库中...",
+    "importingSqlite": "导入 api_dump.sqlite 中...",
+    "patchingLocalMetadata": "修补本地元数据中...",
     "artist": "作者",
     "scanComplete": "扫描完成",
     "ipBanned": "IP被临时封禁，请切换IP或稍后再试",

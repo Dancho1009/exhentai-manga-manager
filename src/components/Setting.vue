@@ -530,7 +530,7 @@ import { storeToRefs } from 'pinia'
 import { useAppStore } from '../pinia.js'
 const appStore = useAppStore()
 const { searchTypeList, setting, bookList, resolvedTranslation, localeFile, tagListRaw } = storeToRefs(appStore)
-const { printMessage } = appStore
+const { printMessage, runWithTaskMessage } = appStore
 
 const { t, locale } = useI18n()
 
@@ -759,12 +759,18 @@ const openLink = (link) => {
 const forceGeneBookList = async () => {
   dialogVisibleSetting.value = false
   localStorage.setItem('viewerReadingProgress', JSON.stringify([]))
-  bookList.value = await ipcRenderer.invoke('force-gene-book-list')
+  bookList.value = await runWithTaskMessage({
+    message: t('c.rebuildingLibrary'),
+    task: async () => await ipcRenderer.invoke('force-gene-book-list')
+  })
   emit('loadCollectionList')
   printMessage('success', t('c.rebuildMessage'))
 }
 const patchLocalMetadata = async () => {
-  await ipcRenderer.invoke('patch-local-metadata')
+  await runWithTaskMessage({
+    message: t('c.patchingLocalMetadata'),
+    task: async () => await ipcRenderer.invoke('patch-local-metadata')
+  })
   emit('loadBookList')
 }
 
@@ -782,7 +788,15 @@ const importDatabase = async () => {
 }
 
 const importMetadataFromSqlite = async () => {
-  const res = await ipcRenderer.invoke('import-sqlite', _.cloneDeep(bookList.value))
+  const sqlitePath = await ipcRenderer.invoke('select-file', t('m.importMetadataFromSqlite'), [{name: 'SQLite', extensions: ['sqlite']}])
+  if (!sqlitePath) {
+    printMessage('info', t('c.canceled'))
+    return
+  }
+  const res = await runWithTaskMessage({
+    message: t('c.importingSqlite'),
+    task: async () => await ipcRenderer.invoke('import-sqlite', _.cloneDeep(bookList.value), sqlitePath)
+  })
   if (res.success) {
     bookList.value = res.bookList
     printMessage('success', `${t('c.importMessage')}${Number.isInteger(res.matchedCount) ? ` (${res.matchedCount}/${res.processedCount})` : ''}`)

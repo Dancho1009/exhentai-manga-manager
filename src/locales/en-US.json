@@ -1,5 +1,5 @@
 {
-  "m":{
+  "m": {
     "folderTree": "Folder Tree",
     "search": "Search",
     "shuffle": "Shuffle",
@@ -216,6 +216,10 @@
     "reGetMetadataWarning": "This will clear current metadata url and re-search, using a lot of quota. Ensure batch size < 100 and do not repeat often. OK?",
     "rescanSuccess": "Rescan successful",
     "gettingMetadata": "Getting metadata...",
+    "scanningLibrary": "Scanning library...",
+    "rebuildingLibrary": "Rebuilding library...",
+    "importingSqlite": "Importing api_dump.sqlite...",
+    "patchingLocalMetadata": "Patching local metadata...",
     "artist": "Artist",
     "scanComplete": "Scan complete",
     "ipBanned": "IP is temporarily banned, please switch IP or try again later",

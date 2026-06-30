@@ -415,6 +415,7 @@ export default defineComponent({
       'copyTagClipboard',
       'pasteTagClipboard',
       'filterFolderMethod',
+      'runWithTaskMessage',
     ]),
 
     // base function
@@ -666,7 +667,13 @@ export default defineComponent({
     async loadBookList (scan) {
       try {
         this.buttonLoadBookListLoading = true
-        const res = await ipcRenderer.invoke('load-book-list', scan)
+        const loadTask = async () => await ipcRenderer.invoke('load-book-list', scan)
+        const res = scan
+          ? await this.runWithTaskMessage({
+            message: this.$t('c.scanningLibrary'),
+            task: loadTask
+          })
+          : await loadTask()
         const bookList = this.prepareBookList(res)
         await this.loadCollectionList(bookList)
         this.bookList = bookList

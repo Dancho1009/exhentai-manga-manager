@@ -1186,15 +1186,25 @@ ipcMain.handle('import-database', async (event, arg) => {
   }
 })
 
-ipcMain.handle('import-sqlite', async (event, bookList) => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    filters: [{ name: 'SQLite', extensions: ['sqlite'] }]
-  })
-  if (!result.canceled) {
+ipcMain.handle('import-sqlite', async (event, bookList, sqlitePath) => {
+  if (!sqlitePath) {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [{ name: 'SQLite', extensions: ['sqlite'] }]
+    })
+    if (result.canceled) {
+      return {
+        success: false,
+        canceled: true
+      }
+    }
+    sqlitePath = result.filePaths[0]
+  }
+
+  if (sqlitePath) {
     try {
       const workerResult = await runImportSqliteWorkers({
-        sqlitePath: result.filePaths[0],
+        sqlitePath,
         bookList
       })
       setProgressBar(-1)
@@ -1213,11 +1223,11 @@ ipcMain.handle('import-sqlite', async (event, bookList) => {
         error: e.message || String(e)
       }
     }
-  } else {
-    return {
-      success: false,
-      canceled: true
-    }
+  }
+
+  return {
+    success: false,
+    canceled: true
   }
 })
 
