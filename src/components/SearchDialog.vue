@@ -73,11 +73,6 @@ const searchTypeDialog = ref('')
 const ehSearchResultList = ref([])
 const bookDetail = ref({})
 
-const normalizeMatchConcurrency = (value) => {
-  const number = Number.parseInt(value, 10)
-  return Number.isFinite(number) && number >= 1 ? number : 1
-}
-
 const createSerialQueue = () => {
   let queue = Promise.resolve()
   return (task) => {
@@ -87,20 +82,11 @@ const createSerialQueue = () => {
   }
 }
 
-const runWithConcurrency = async (items, concurrency, task, shouldContinue = () => true) => {
-  const workerCount = Math.min(normalizeMatchConcurrency(concurrency), items.length)
-  let nextIndex = 0
-  const workers = Array.from({ length: workerCount }, async () => {
-    while (shouldContinue()) {
-      if (nextIndex >= items.length) break
-      const index = nextIndex
-      nextIndex += 1
-      await task(items[index], index)
-    }
-  })
-  const results = await Promise.allSettled(workers)
-  const rejected = results.find(result => result.status === 'rejected')
-  if (rejected) throw rejected.reason
+const runSerially = async (items, task, shouldContinue = () => true) => {
+  for (let index = 0; index < items.length; index++) {
+    if (!shouldContinue()) break
+    await task(items[index], index)
+  }
 }
 
 const openSearchDialog = (book, server) => {
@@ -250,7 +236,6 @@ const getBookInfo = (book) => {
 }
 const getBooksMetadata = async (bookList, gap, callback) => {
   const server = setting.value.defaultScraper || 'exhentai'
-  const concurrency = normalizeMatchConcurrency(setting.value.matchConcurrency)
   serviceAvailable.value = true
   const timer = ms => new Promise(res => setTimeout(res, ms))
   const saveQueue = createSerialQueue()
@@ -265,7 +250,7 @@ const getBooksMetadata = async (bookList, gap, callback) => {
     }
   })
   try {
-    await runWithConcurrency(bookList, concurrency, async (book) => {
+    await runSerially(bookList, async (book) => {
       try {
         if (!serviceAvailable.value) return
         if (!book.url) {
