@@ -345,7 +345,7 @@ const prepareImportSqliteIndexes = async (sqlitePath) => {
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-const rmWithRetry = async (targetPath, options, retryCount = 8) => {
+const rmWithRetry = async (targetPath, options, retryCount = 20) => {
   const retryableErrors = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY'])
   for (let attempt = 0; attempt <= retryCount; attempt++) {
     try {
@@ -353,8 +353,16 @@ const rmWithRetry = async (targetPath, options, retryCount = 8) => {
       return
     } catch (error) {
       if (attempt >= retryCount || !retryableErrors.has(error?.code)) throw error
-      await wait(100 * (attempt + 1))
+      await wait(Math.min(250 * (attempt + 1), 2000))
     }
+  }
+}
+
+const cleanupScanTempFolder = async (tempPath) => {
+  try {
+    await rmWithRetry(tempPath, { recursive: true, force: true })
+  } catch (error) {
+    console.log(`Cleanup scan temp folder ${tempPath} failed because ${error}`)
   }
 }
 
@@ -556,15 +564,15 @@ const withScanTempFolder = async (task) => {
   try {
     return await task(tempPath)
   } finally {
-    await rmWithRetry(tempPath, { recursive: true, force: true })
+    await cleanupScanTempFolder(tempPath)
   }
 }
 
 const createBookFromCoverData = (filepath, type, coverData) => {
-  const { targetFilePath, coverPath, pageCount, bundleSize, mtime, coverHash } = coverData
+  const { targetFilePath, targetHash, coverPath, pageCount, bundleSize, mtime, coverHash } = coverData
   if (!targetFilePath || !coverPath) return null
 
-  const hash = createHash('sha1').update(fs.readFileSync(targetFilePath)).digest('hex')
+  const hash = targetHash || createHash('sha1').update(fs.readFileSync(targetFilePath)).digest('hex')
   return {
     title: path.basename(filepath),
     coverPath,
@@ -743,9 +751,9 @@ ipcMain.handle('patch-local-metadata', async (event, arg) => {
       const book = bookList[i]
       let { filepath, type } = book
       if (!type) type = 'archive'
-      const { targetFilePath, coverPath, pageCount, bundleSize, mtime, coverHash } = await geneCover(filepath, type)
+      const { targetFilePath, targetHash, coverPath, pageCount, bundleSize, mtime, coverHash } = await geneCover(filepath, type)
       if (targetFilePath && coverPath) {
-        const hash = createHash('sha1').update(fs.readFileSync(targetFilePath)).digest('hex')
+        const hash = targetHash || createHash('sha1').update(fs.readFileSync(targetFilePath)).digest('hex')
         _.assign(book, { type, coverPath, hash, pageCount, bundleSize, mtime: mtime.toJSON(), coverHash })
         await saveBookToDatabase(book)
       }
@@ -765,9 +773,9 @@ ipcMain.handle('patch-local-metadata-by-book', async (event, book) => {
   let { filepath, type } = book
   if (!type) type = 'archive'
   try {
-    const { targetFilePath, coverPath, pageCount, bundleSize, mtime, coverHash } = await geneCover(filepath, type)
+    const { targetFilePath, targetHash, coverPath, pageCount, bundleSize, mtime, coverHash } = await geneCover(filepath, type)
     if (targetFilePath && coverPath) {
-      const hash = createHash('sha1').update(fs.readFileSync(targetFilePath)).digest('hex')
+      const hash = targetHash || createHash('sha1').update(fs.readFileSync(targetFilePath)).digest('hex')
       await clearFolder(TEMP_PATH)
       return Promise.resolve({ coverPath, hash, pageCount, bundleSize, mtime: mtime.toJSON(), coverHash })
     }

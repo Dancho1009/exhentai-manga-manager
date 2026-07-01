@@ -61,11 +61,8 @@ const solveBookTypeZip = async (filepath, TEMP_PATH, COVER_PATH) => {
     throw new Error('compression package isnot include image')
   }
 
-  targetFilePath = path.join(TEMP_PATH, nanoid(8) + path.extname(targetFile))
-  await fs.promises.copyFile(path.join(tempFolder, targetFile), targetFilePath)
-
-  tempCoverPath = path.join(TEMP_PATH, nanoid(8) + path.extname(imageList[0]))
-  await fs.promises.copyFile(path.join(tempFolder, imageList[0]), tempCoverPath)
+  targetFilePath = path.join(tempFolder, targetFile)
+  tempCoverPath = path.join(tempFolder, coverFile)
 
   coverPath = path.join(COVER_PATH, nanoid() + '.webp')
 

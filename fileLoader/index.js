@@ -1,6 +1,5 @@
 const fs = require('fs')
 const path = require('node:path')
-const { nanoid } = require('nanoid')
 const { createHash } = require('crypto')
 const sharp = require('sharp')
 const { getFolderlist, solveBookTypeFolder, getImageListFromFolder, deleteImageFromFolder } = require('./folder.js')
@@ -41,16 +40,18 @@ const geneCover = async (filepath, type, options = {}) => {
       break
   }
 
-  const coverHash = createHash('sha1').update(fs.readFileSync(tempCoverPath)).digest('hex')
-  const copyTempCoverPath = path.join(tempPath, nanoid(8) + path.extname(tempCoverPath))
-  await fs.promises.copyFile(tempCoverPath, copyTempCoverPath)
-  await sharp(copyTempCoverPath, { failOnError: false })
+  const coverBuffer = await fs.promises.readFile(tempCoverPath)
+  const coverHash = createHash('sha1').update(coverBuffer).digest('hex')
+  await sharp(coverBuffer, { failOnError: false })
     .resize(500, 707, {
       fit: 'contain',
       background: '#303133'
     })
     .toFile(coverPath)
-  return { targetFilePath, coverPath, pageCount, bundleSize, mtime, coverHash }
+  const targetHash = createHash('sha1')
+    .update(await fs.promises.readFile(targetFilePath))
+    .digest('hex')
+  return { targetFilePath, targetHash, coverPath, pageCount, bundleSize, mtime, coverHash }
 }
 
 const getImageListByBook = async (filepath, type) => {
