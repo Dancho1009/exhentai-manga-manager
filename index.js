@@ -28,9 +28,28 @@ const {
   STORE_PATH, isPortable,
   TEMP_PATH, COVER_PATH, VIEWER_PATH,
   prepareSetting, prepareCollectionList, preparePath,
-  _mange_reader, normalizeMatchConcurrency
+  _mange_reader,
+  normalizeMatchConcurrency: normalizeMatchConcurrencyFromSetting,
+  normalizeScanConcurrency: normalizeScanConcurrencyFromSetting
 } = require('./modules/init_folder_setting.js')
 const { findSameFile } = require('./fileLoader/folder.js')
+
+const normalizeConcurrency = (value) => {
+  const number = Number.parseInt(value, 10)
+  return Number.isFinite(number) && number >= 1 ? number : 1
+}
+
+const normalizeMatchConcurrency = (value) => {
+  return typeof normalizeMatchConcurrencyFromSetting === 'function'
+    ? normalizeMatchConcurrencyFromSetting(value)
+    : normalizeConcurrency(value)
+}
+
+const normalizeScanConcurrency = (value) => {
+  return typeof normalizeScanConcurrencyFromSetting === 'function'
+    ? normalizeScanConcurrencyFromSetting(value)
+    : normalizeConcurrency(value)
+}
 
 preparePath()
 let setting = prepareSetting()
@@ -1125,6 +1144,7 @@ ipcMain.handle('load-setting', async (event, arg) => {
 
 ipcMain.handle('save-setting', async (event, receiveSetting) => {
   receiveSetting.matchConcurrency = normalizeMatchConcurrency(receiveSetting.matchConcurrency)
+  receiveSetting.scanConcurrency = normalizeScanConcurrency(receiveSetting.scanConcurrency)
   if (receiveSetting.proxy) {
     await session.defaultSession.setProxy({
       mode: 'fixed_servers',
