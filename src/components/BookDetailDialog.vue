@@ -197,7 +197,7 @@ const openBookDetail = (book, addToHistory = true) => {
   bookDetail.value = book
   dialogVisibleBookDetail.value = true
   comments.value = []
-  if (setting.value.showComment) getComments(book.url)
+  if (setting.value.showComment) getComments(book)
   if (addToHistory) emit('addToHistory', book.id)
 }
 const openUrl = (url) => {
@@ -272,11 +272,42 @@ const triggerShowComment = () => {
     setting.value.showComment = false
   } else {
     comments.value = []
-    getComments(bookDetail.value.url)
+    getComments(bookDetail.value)
     setting.value.showComment = true
   }
 }
-const getComments = (url) => {
+const isNhentaiUrl = (url) => {
+  return String(url || '').includes('nhentai.net/g/')
+}
+
+const isNhentaiMissingApiKeyError = (error) => {
+  return String(error?.message || '').includes('NHENTAI_API_KEY_MISSING')
+}
+
+const getNhentaiComments = async (book) => {
+  try {
+    const result = await ipcRenderer.invoke('nhentai-comments', {
+      url: book.url,
+      filepath: book.filepath,
+      title: book.title || book.title_jpn,
+      page: 1,
+      perPage: 50
+    })
+    comments.value = result.map(comment => ({
+      ...comment,
+      foundLink: _.uniqBy(linkify.find(String(comment.content || '').replace(/[<"]/gi, ' '), 'url'), 'href')
+    }))
+  } catch (err) {
+    comments.value = []
+    if (isNhentaiMissingApiKeyError(err)) {
+      printMessage('error', t('c.nhentaiMissingApiKey'))
+    } else {
+      console.log(err)
+    }
+  }
+}
+
+const getEhComments = (url) => {
   if (url) {
     ipcRenderer.invoke('get-ex-webpage', {
       url,
@@ -306,6 +337,18 @@ const getComments = (url) => {
   } else {
     comments.value = []
   }
+}
+
+const getComments = (book) => {
+  if (!book?.url) {
+    comments.value = []
+    return
+  }
+  if (isNhentaiUrl(book.url)) {
+    getNhentaiComments(book)
+    return
+  }
+  getEhComments(book.url)
 }
 
 const editingTag = ref(false)

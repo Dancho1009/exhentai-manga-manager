@@ -9,6 +9,7 @@ const EHTAG_DATABASE_URL = 'https://raw.githubusercontent.com/EhTagTranslation/D
 const EHTAG_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const SEARCH_PAGE_SIZE = 25
 const SEARCH_RESULT_LIMIT = 5
+const COMMENT_PAGE_SIZE = 50
 
 const MANAGER_TAG_GROUPS = [
   'artist',
@@ -187,6 +188,17 @@ const fetchSearch = async (query, setting) => {
   )
 }
 
+const fetchComments = async (galleryId, setting, page = 1, perPage = COMMENT_PAGE_SIZE) => {
+  assertNhentaiApiKey(setting)
+  return await fetchJson(
+    `${NHENTAI_BASE_URL}/api/v2/galleries/${galleryId}/comments?${buildQueryString({
+      page,
+      per_page: perPage
+    })}`,
+    createFetchOptions(setting)
+  )
+}
+
 const getEhtagCacheFile = (storePath) => {
   return path.join(storePath, 'nhentai', 'ehtag-db.json')
 }
@@ -354,6 +366,27 @@ const toTimestamp = (value) => {
   return Number.isFinite(time) ? Math.floor(time / 1000) : undefined
 }
 
+const stripHtmlToText = (value) => {
+  return String(value || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<.+?>/g, '')
+}
+
+const formatNhentaiCommentTime = (value) => {
+  const timestamp = toTimestamp(value)
+  return timestamp ? new Date(timestamp * 1000).toLocaleString('zh-CN') : ''
+}
+
+const normalizeNhentaiComments = (comments = []) => {
+  return comments.map(comment => ({
+    id: String(comment.id),
+    author: comment.poster?.username || '',
+    score: formatNhentaiCommentTime(comment.post_date),
+    content: stripHtmlToText(comment.body),
+    foundLink: []
+  }))
+}
+
 const toManagerMetadata = (gallery, ehtagDb) => {
   const metadata = {
     url: `${NHENTAI_BASE_URL}/g/${gallery.id}/`,
@@ -412,9 +445,18 @@ const getNhentaiMetadata = async ({ id, url, filepath, title, setting, storePath
   return toManagerMetadata(gallery, ehtagDb)
 }
 
+const getNhentaiComments = async ({ id, url, filepath, title, setting, page = 1, perPage = COMMENT_PAGE_SIZE } = {}) => {
+  const galleryId = resolveNhentaiId({ id, url, filepath, title })
+  if (!galleryId) return []
+
+  const result = await fetchComments(galleryId, setting, page, perPage)
+  return normalizeNhentaiComments(result?.result || [])
+}
+
 module.exports = {
   searchNhentai,
   getNhentaiMetadata,
+  getNhentaiComments,
   extractNhentaiId,
   toManagerMetadata,
   loadEhtagDb
