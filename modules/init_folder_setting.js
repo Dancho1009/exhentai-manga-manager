@@ -64,6 +64,10 @@ const prepareSetting = () => {
       setting.scanConcurrency = scanConcurrency
       changed = true
     }
+    if (setting.nhentaiApiKey === undefined) {
+      setting.nhentaiApiKey = ''
+      changed = true
+    }
     if (changed) {
       fs.writeFileSync(path.join(STORE_PATH, 'setting.json'), JSON.stringify(setting, null, '  '), { encoding: 'utf-8' })
     }
@@ -98,6 +102,7 @@ const prepareSetting = () => {
       keepReadingProgress: true,
       matchConcurrency: 1,
       scanConcurrency: 1,
+      nhentaiApiKey: '',
     }
     fs.writeFileSync(path.join(STORE_PATH, 'setting.json'), JSON.stringify(setting, null, '  '), { encoding: 'utf-8' })
   }

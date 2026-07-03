@@ -20,6 +20,7 @@ const { globSync } = require('glob')
 const { prepareMangaModel, prepareMetadataModel } = require('./modules/database')
 const { prepareTemplate } = require('./modules/prepare_menu.js')
 const { getRootPath } = require('./modules/utils.js')
+const { searchNhentai, getNhentaiMetadata } = require('./modules/nhentai.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
 const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
 const { getEhviewerDataFromZip } = require('./fileLoader/zip.js')
@@ -834,6 +835,14 @@ async function getEhviewerDataByPath(filepath, type) {
 
 ipcMain.handle('get-ehviewer-data', async (event, targetPath) => {
   return await getEhviewerDataByPath(targetPath)
+})
+
+ipcMain.handle('nhentai-search', async (event, { title, filepath }) => {
+  return await searchNhentai({ title, filepath, setting })
+})
+
+ipcMain.handle('nhentai-metadata', async (event, { id, url, filepath, title }) => {
+  return await getNhentaiMetadata({ id, url, filepath, title, setting, storePath: STORE_PATH })
 })
 
 ipcMain.handle('get-ex-webpage', async (event, { url, cookie }) => {

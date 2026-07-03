@@ -108,6 +108,9 @@ const resolveSearchResult = (bookId, url, type) => {
   } else if (type === 'e-hentai') {
     book.url = url
     getBookInfoFromEh(book)
+  } else if (type === 'nhentai') {
+    book.url = url
+    getBookInfoFromNhentai(book)
   }
   dialogVisibleEhSearch.value = false
 }
@@ -225,11 +228,61 @@ const getBookInfoFromEh = async (book) => {
   await fetchAndApplyBookInfoFromEh(book)
   await saveBook(book)
 }
+
+const isNhentaiMissingApiKeyError = (error) => {
+  return String(error?.message || '').includes('NHENTAI_API_KEY_MISSING')
+}
+
+const handleNhentaiError = (error) => {
+  if (isNhentaiMissingApiKeyError(error)) {
+    serviceAvailable.value = false
+    printMessage('error', t('c.nhentaiMissingApiKey'))
+  } else {
+    printMessage('error', t('c.getMetadataFailed'))
+  }
+}
+
+const applyBookInfoFromNhentai = (book, metadata) => {
+  _.assign(
+    book,
+    _.pick(metadata, ['tags', 'title', 'title_jpn', 'filecount', 'posted', 'category', 'url', 'status']),
+  )
+  if (book.filecount !== undefined) book.filecount = +book.filecount
+  if (book.posted !== undefined) book.posted = +book.posted
+  if (book.title) book.title = he.decode(book.title)
+  if (book.title_jpn) book.title_jpn = he.decode(book.title_jpn)
+  book.status = 'tagged'
+}
+
+const fetchAndApplyBookInfoFromNhentai = async (book) => {
+  try {
+    const metadata = await ipcRenderer.invoke('nhentai-metadata', {
+      url: book.url,
+      filepath: book.filepath,
+      title: returnTrimFileName(book)
+    })
+    if (!metadata) return false
+    applyBookInfoFromNhentai(book, metadata)
+    return true
+  } catch (error) {
+    handleNhentaiError(error)
+    throw error
+  }
+}
+
+const getBookInfoFromNhentai = async (book) => {
+  const changed = await fetchAndApplyBookInfoFromNhentai(book)
+  if (changed) await saveBook(book)
+}
+
 const getBookInfo = (book) => {
+  if (!book.url) return Promise.resolve()
   if (book.url.startsWith('https://hentag.com')) {
     return getBookInfoFromHentag(book)
   } else if (book.url.includes('exhentai') || book.url.includes('e-hentai')) {
     return getBookInfoFromEh(book)
+  } else if (book.url.includes('nhentai.net/g/')) {
+    return getBookInfoFromNhentai(book)
   }
   return Promise.resolve()
 }
@@ -291,6 +344,8 @@ const fetchAndApplyBookInfo = async (book) => {
   } else if (book.url.includes('exhentai') || book.url.includes('e-hentai')) {
     await fetchAndApplyBookInfoFromEh(book)
     return true
+  } else if (book.url.includes('nhentai.net/g/')) {
+    return await fetchAndApplyBookInfoFromNhentai(book)
   }
   return false
 }
@@ -304,6 +359,9 @@ const fetchAndApplySearchResult = async (book, url, type) => {
     book.url = url
     await fetchAndApplyBookInfoFromEh(book)
     return true
+  } else if (type === 'nhentai') {
+    book.url = url
+    return await fetchAndApplyBookInfoFromNhentai(book)
   }
   return false
 }
@@ -344,6 +402,16 @@ const getBookListFromWebRaw = async (bookHash, title, server = 'e-hentai', bookP
     .then(res => {
       return resolveHentagResult(res)
     })
+  } else if (server === 'nhentai') {
+    try {
+      resultList = await ipcRenderer.invoke('nhentai-search', {
+        title,
+        filepath: bookPath
+      })
+    } catch (error) {
+      handleNhentaiError(error)
+      resultList = []
+    }
   } else if (server === '.ehviewer') {
     const ehviewerData = await ipcRenderer.invoke('get-ehviewer-data', bookPath)
 
@@ -388,6 +456,9 @@ const redirectSearch = (bookHash, title, server = 'e-hentai') => {
       break
     case 'hentag':
       url = `https://hentag.com/?t=${encodeURI(title)}`
+      break
+    case 'nhentai':
+      url = `https://nhentai.net/search/?q=${encodeURI(title)}`
       break
   }
   ipcRenderer.invoke('open-url', url)

@@ -89,6 +89,19 @@
               </el-input>
             </div>
           </el-col>
+          <el-col :span="24">
+            <div class="setting-line">
+              <el-input
+                v-model="setting.nhentaiApiKey"
+                type="password"
+                show-password
+                @change="saveSetting"
+                :placeholder="$t('m.nhentaiApiKeyInfo')"
+              >
+                <template #prepend><span class="setting-label">{{$t('m.nhentaiApiKey')}}</span></template>
+              </el-input>
+            </div>
+          </el-col>
         </el-row>
       </el-tab-pane>
       <el-tab-pane :label="$t('m.internalViewer')" name="internalViewer">
@@ -550,6 +563,7 @@ onMounted(() => {
       if (res.defaultScraper === undefined) setting.value.defaultScraper = 'exhentai'
       if (res.defaultInsertEmptyPage === undefined) setting.value.defaultInsertEmptyPage = true
       if (res.viewerType === undefined) setting.value.viewerType = 'original'
+      if (res.nhentaiApiKey === undefined) setting.value.nhentaiApiKey = ''
       setting.value.matchConcurrency = normalizeMatchConcurrency(res.matchConcurrency)
       setting.value.scanConcurrency = normalizeScanConcurrency(res.scanConcurrency)
       saveSetting()
