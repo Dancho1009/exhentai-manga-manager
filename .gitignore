@@ -15,6 +15,7 @@ out
 data
 secret_key.json
 resources/extraResources/manga_reader.exe
+temp
 
 # Editor directories and files
 .vscode/*
