@@ -8,6 +8,7 @@ const { getRootPath } = require('../modules/utils.js')
 const { readEhviewerBuffer } = require('./ehviewer.js')
 
 const _7z = path.join(getRootPath(), 'resources/extraResources/7z.exe')
+const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif'])
 
 const pickEhviewerEntryName = (entryNames) => {
   const candidates = entryNames
@@ -19,6 +20,27 @@ const pickEhviewerEntryName = (entryNames) => {
 
   candidates.sort((a, b) => a.length - b.length || a.localeCompare(b))
   return candidates[0]
+}
+
+const get7zPathList = (output, excludeMacosx = false) => {
+  return output
+    .split(/\r?\n/)
+    .filter(line => line.startsWith('Path = ') && (!excludeMacosx || !line.includes('__MACOSX')))
+    .map(line => line.slice('Path = '.length))
+}
+
+const extractArchiveEntry = async (filepath, tempFolder, entryName) => {
+  const output = await spawnPromise(_7z, ['x', '-o' + tempFolder, '-p123456', '--', filepath, entryName])
+  const extractedFilePath = path.join(tempFolder, entryName)
+
+  try {
+    await fs.promises.access(extractedFilePath, fs.constants.R_OK)
+  } catch {
+    const detail = output.includes('No files to process') ? ' (7z reported no matching file)' : ''
+    throw new Error(`7z did not extract "${entryName}" from "${filepath}"${detail}`)
+  }
+
+  return extractedFilePath
 }
 
 const getArchivelist = async (libraryPath) => {
@@ -35,12 +57,8 @@ const getArchivelist = async (libraryPath) => {
 const solveBookTypeArchive = async (filepath, TEMP_PATH, COVER_PATH) => {
   const tempFolder = path.join(TEMP_PATH, nanoid(8))
   const output = await spawnPromise(_7z, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
-  let pathlist = _.filter(output.split(/\r\n/), s => _.startsWith(s, 'Path') && !_.includes(s, '__MACOSX'))
-  pathlist = pathlist.map(p => {
-    const match = /(?<== ).*$/.exec(p)
-    return match ? match[0] : ''
-  })
-  let imageList = _.filter(pathlist, p => ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif'].includes(path.extname(p).toLowerCase()))
+  const pathlist = get7zPathList(output, true)
+  let imageList = _.filter(pathlist, p => IMAGE_EXTENSIONS.has(path.extname(p).toLowerCase()))
   imageList = imageList.sort((a, b) => a.localeCompare(b, undefined, {numeric: true, sensitivity: 'base'}))
 
   let targetFile
@@ -51,17 +69,16 @@ const solveBookTypeArchive = async (filepath, TEMP_PATH, COVER_PATH) => {
   if (imageList.length > 8) {
     targetFile = imageList[7]
     coverFile = imageList[0]
-    await spawnPromise(_7z, ['x', '-o'+tempFolder, '-p123456', '--', filepath, targetFile])
-    await spawnPromise(_7z, ['x', '-o'+tempFolder, '-p123456', '--', filepath, coverFile])
   } else if (imageList.length > 0) {
     targetFile = imageList[0]
     coverFile = imageList[0]
-    await spawnPromise(_7z, ['x', '-o'+tempFolder, '-p123456', '--', filepath, targetFile])
   } else {
-    throw new Error('compression package isnot include image')
+    throw new Error('compression package does not include a supported image')
   }
-  targetFilePath = path.join(tempFolder, targetFile)
-  tempCoverPath = path.join(tempFolder, coverFile)
+  targetFilePath = await extractArchiveEntry(filepath, tempFolder, targetFile)
+  tempCoverPath = coverFile === targetFile
+    ? targetFilePath
+    : await extractArchiveEntry(filepath, tempFolder, coverFile)
 
   coverPath = path.join(COVER_PATH, nanoid() + '.webp')
 
@@ -93,17 +110,12 @@ const getEhviewerDataFromArchive = async (filepath, TEMP_PATH) => {
   const tempFolder = path.join(TEMP_PATH, nanoid(8))
   try {
     const output = await spawnPromise(_7z, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
-    let pathlist = _.filter(output.split(/\r\n/), s => _.startsWith(s, 'Path'))
-    pathlist = pathlist.map(p => {
-      const match = /(?<== ).*$/.exec(p)
-      return match ? match[0] : ''
-    })
+    const pathlist = get7zPathList(output)
 
     const targetEntry = pickEhviewerEntryName(pathlist)
     if (!targetEntry) return null
 
-    await spawnPromise(_7z, ['x', '-o' + tempFolder, '-p123456', '--', filepath, targetEntry])
-    const extractedFilePath = path.join(tempFolder, targetEntry)
+    const extractedFilePath = await extractArchiveEntry(filepath, tempFolder, targetEntry)
     const fileContent = await fs.promises.readFile(extractedFilePath)
     return readEhviewerBuffer(fileContent)
   } catch (error) {
@@ -122,25 +134,38 @@ const spawnPromise = (commmand, argument, timeoutMs = 30 * 1000) => {
   return new Promise((resolve, reject) => {
     const spawned = spawn(commmand, argument)
     const output = []
+    const errorOutput = []
+    let settled = false
     const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
       spawned.kill()
-      reject('7z return timeout')
+      reject(new Error('7z return timeout'))
     }, timeoutMs) // 默认30s超时
 
-    spawned.on('error', data => {
+    spawned.on('error', error => {
+      if (settled) return
+      settled = true
       clearTimeout(timeout)
-      reject(data)
+      reject(error)
     })
-    spawned.on('exit', code => {
+    spawned.on('close', code => {
+      if (settled) return
+      settled = true
       clearTimeout(timeout)
+      const stdout = Buffer.concat(output).toString('utf8')
       if (code === 0) {
-        setTimeout(() => resolve(String(output)), 50)
+        resolve(stdout)
       } else {
-        reject('close code is ' + code)
+        const stderr = Buffer.concat(errorOutput).toString('utf8').trim()
+        reject(new Error(`7z returned code ${code}${stderr ? `: ${stderr}` : ''}`))
       }
     })
     spawned.stdout.on('data', data => {
       output.push(data)
+    })
+    spawned.stderr.on('data', data => {
+      errorOutput.push(data)
     })
   })
 }

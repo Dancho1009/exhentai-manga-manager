@@ -17,25 +17,38 @@ const spawnPromise = (commmand, argument, timeoutMs = 30 * 1000) => {
   return new Promise((resolve, reject) => {
     const spawned = spawn(commmand, argument)
     const output = []
+    const errorOutput = []
+    let settled = false
     const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
       spawned.kill()
       reject(new Error('7z return timeout'))
     }, timeoutMs)
 
-    spawned.on('error', data => {
+    spawned.on('error', error => {
+      if (settled) return
+      settled = true
       clearTimeout(timeout)
-      reject(data)
+      reject(error)
     })
-    spawned.on('exit', code => {
+    spawned.on('close', code => {
+      if (settled) return
+      settled = true
       clearTimeout(timeout)
+      const stdout = Buffer.concat(output).toString('utf8')
       if (code === 0) {
-        resolve(Buffer.concat(output).toString())
+        resolve(stdout)
       } else {
-        reject(new Error('close code is ' + code))
+        const stderr = Buffer.concat(errorOutput).toString('utf8').trim()
+        reject(new Error(`7z returned code ${code}${stderr ? `: ${stderr}` : ''}`))
       }
     })
     spawned.stdout.on('data', data => {
       output.push(data)
+    })
+    spawned.stderr.on('data', data => {
+      errorOutput.push(data)
     })
   })
 }
@@ -56,7 +69,7 @@ const getEhviewerDataFromArchive = async (filepath) => {
   const tempFolder = path.join(tempPath, nanoid(8))
   try {
     const output = await spawnPromise(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
-    let pathlist = _.filter(output.split(/\r\n/), s => _.startsWith(s, 'Path'))
+    let pathlist = _.filter(output.split(/\r?\n/), s => _.startsWith(s, 'Path'))
     pathlist = pathlist.map(p => {
       const match = /(?<== ).*$/.exec(p)
       return match ? match[0] : ''

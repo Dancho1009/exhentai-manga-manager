@@ -40,7 +40,7 @@ const solveBookTypeZip = async (filepath, TEMP_PATH, COVER_PATH) => {
     return _.find(zipFileList, zFile => zFile.entryName == entryName)
   }
   const fileList = zipFileList.map(zFile => zFile.entryName)
-  let imageList = _.filter(fileList, filepath => _.includes(['.jpg', ',jpeg', '.png', '.webp', '.avif', '.gif'], path.extname(filepath).toLowerCase()))
+  let imageList = _.filter(fileList, filepath => _.includes(['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif'], path.extname(filepath).toLowerCase()))
   imageList = imageList.sort((a, b) => a.localeCompare(b, undefined, {numeric: true, sensitivity: 'base'}))
 
   let targetFile
@@ -58,7 +58,7 @@ const solveBookTypeZip = async (filepath, TEMP_PATH, COVER_PATH) => {
     coverFile = imageList[0]
     zip.extractEntryTo(findZFile(targetFile), tempFolder, true, true)
   } else {
-    throw new Error('compression package isnot include image')
+    throw new Error('compression package does not include a supported image')
   }
 
   targetFilePath = path.join(tempFolder, targetFile)

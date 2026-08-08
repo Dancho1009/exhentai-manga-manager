@@ -30,8 +30,7 @@ const geneCover = async (filepath, type, options = {}) => {
       try {
         ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeArchive(filepath, tempPath, coverPathRoot))
       } catch (e) {
-        console.log(e)
-        console.log(`reload ${filepath} use adm-zip`)
+        console.warn(`7z cover extraction failed for ${filepath}; retrying with adm-zip: ${e?.message || e}`)
         ;({ targetFilePath, coverPath, tempCoverPath, pageCount, bundleSize, mtime } = await solveBookTypeZip(filepath, tempPath, coverPathRoot))
       }
       break
