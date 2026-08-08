@@ -105,7 +105,7 @@
       @search="handleSearchString"
     />
     <el-row :gutter="20" class="book-card-area">
-      <el-col :span="24" v-if="!editTagView && !editCollectionView" class="book-card-list" :style="{height: setting.disableRandomTag ? 'calc(100vh - 96px)' : 'calc(100vh - 134px)'}">
+      <el-col :span="24" v-if="!editTagView && !editCollectionView" class="book-card-list" :style="{height: setting.disableRandomTag ? 'calc(100vh - 96px)' : 'calc(100vh - 134px)'}" @click.self="clearHomeBookSelection">
         <div
           v-for="(book, index) in visibleChunkDisplayBookList"
           :key="book.id"
@@ -119,6 +119,8 @@
               and book isn't hidden by folder select -->
             <BookCard
               :book="book"
+              selectable
+              :selected="isHomeBookSelected(book.id)"
               v-if="!book.isCollection && !book.collectionHide && (sortValue === 'hidden' || !book.hiddenBook) && !book.folderHide && visibilityMap[book.id]"
               @open-book-detail="$refs.BookDetailDialogRef.openBookDetail(book)"
               @handle-click-cover="handleClickCover(book)"
@@ -127,6 +129,7 @@
               @search-from-tag="searchFromTag"
               @open-local-book="$refs.BookDetailDialogRef.openLocalBook(book)"
               @view-manga="$refs.InternalViewerRef.viewManga(book)"
+              @toggle-book-selection="toggleHomeBookSelection"
             />
             <BookCardCollection
               :book="book"
@@ -234,6 +237,7 @@
 
 <script>
 import { defineComponent } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { Setting as SettingIcon, FullScreen, Edit } from '@element-plus/icons-vue'
 import { ArrowTrendingLines20Filled, Collections24Regular, Search32Filled, Save16Regular } from '@vicons/fluent'
 import { MdShuffle, MdRefresh, MdCodeDownload, MdExit } from '@vicons/ionicons4'
@@ -287,12 +291,15 @@ export default defineComponent({
       buttonLoadBookListLoading: false,
       buttonGetMetadatasLoading: false,
       actionHistory: [],
+      selectedHomeBookIds: [],
+      selectionAnchorId: null,
+      homeBatchActionRunning: false,
       // collection
       drawerVisibleCollection: false,
       openCollectionTitle: undefined,
       // move file
       moveFileDialogVisible: false,
-      moveFileTargetBook: null,
+      moveFileTargetBooks: [],
       moveFileTargetFolder: null,
     }
   },
@@ -336,6 +343,10 @@ export default defineComponent({
           }
         }
       }
+    },
+    selectedHomeBooks () {
+      const selectedIds = new Set(this.selectedHomeBookIds)
+      return this.bookList.filter(book => !book.isCollection && selectedIds.has(book.id))
     },
   },
   mounted () {
@@ -554,7 +565,9 @@ export default defineComponent({
           this.jumpMangeDetail(-1)
         }
       } else if (currentUIValue === 'home') {
-        if (event.key === 'Enter') {
+        if (event.key === 'Escape' && this.selectedHomeBookIds.length) {
+          this.clearHomeBookSelection()
+        } else if (event.key === 'Enter') {
           event.preventDefault()
           document.activeElement.querySelector('.book-cover').click()
         } else if (event.key === 'F5') {
@@ -666,6 +679,7 @@ export default defineComponent({
     },
     async loadBookList (scan) {
       try {
+        this.clearHomeBookSelection()
         this.buttonLoadBookListLoading = true
         const loadTask = async () => await ipcRenderer.invoke('load-book-list', scan)
         const res = scan
@@ -906,6 +920,7 @@ export default defineComponent({
       }
     },
     searchBook (addToHistory = true) {
+      this.clearHomeBookSelection()
       const checkCondition = (bookString, bookInfo) => {
         const searchStringArray = this.searchString ? this.searchString.split(/\s+(?=(?:[^\'"]*[\'"][^\'"]*[\'"])*[^\'"]*$)/) : []
         const orCondition = _.filter(searchStringArray, (str) => str.startsWith('~'))
@@ -1105,8 +1120,71 @@ export default defineComponent({
         this.$refs.SearchDialogRef.getBookInfo(book)
       }
     },
+    isHomeBookSelected (bookId) {
+      return this.selectedHomeBookIds.includes(bookId)
+    },
+    getHomeSelectableBooks () {
+      return this.visibleChunkDisplayBookList.filter(book => (
+        !book.isCollection &&
+        !book.collectionHide &&
+        (this.sortValue === 'hidden' || !book.hiddenBook) &&
+        !book.folderHide
+      ))
+    },
+    toggleHomeBookSelection (event, book) {
+      const selectableBooks = this.getHomeSelectableBooks()
+      const selectedIds = new Set(this.selectedHomeBookIds)
+      const shouldSelect = !selectedIds.has(book.id)
+
+      if (event.shiftKey && this.selectionAnchorId !== null) {
+        const anchorIndex = selectableBooks.findIndex(item => item.id === this.selectionAnchorId)
+        const bookIndex = selectableBooks.findIndex(item => item.id === book.id)
+        if (anchorIndex !== -1 && bookIndex !== -1) {
+          const start = Math.min(anchorIndex, bookIndex)
+          const end = Math.max(anchorIndex, bookIndex)
+          for (const item of selectableBooks.slice(start, end + 1)) {
+            if (shouldSelect) {
+              selectedIds.add(item.id)
+            } else {
+              selectedIds.delete(item.id)
+            }
+          }
+        } else if (shouldSelect) {
+          selectedIds.add(book.id)
+        } else {
+          selectedIds.delete(book.id)
+        }
+      } else if (shouldSelect) {
+        selectedIds.add(book.id)
+      } else {
+        selectedIds.delete(book.id)
+      }
+
+      this.selectedHomeBookIds = [...selectedIds]
+      this.selectionAnchorId = book.id
+    },
+    clearHomeBookSelection () {
+      this.selectedHomeBookIds = []
+      this.selectionAnchorId = null
+    },
+    pruneHomeBookSelection () {
+      const existingIds = new Set(this.bookList.filter(book => !book.isCollection).map(book => book.id))
+      this.selectedHomeBookIds = this.selectedHomeBookIds.filter(id => existingIds.has(id))
+      if (!existingIds.has(this.selectionAnchorId)) this.selectionAnchorId = null
+    },
     onBookContextMenu (e, book) {
       e.preventDefault()
+      if (this.currentUI() === 'home') {
+        if (!this.isHomeBookSelected(book.id)) {
+          this.selectedHomeBookIds = [book.id]
+          this.selectionAnchorId = book.id
+        }
+        const selectedBooks = [...this.selectedHomeBooks]
+        if (selectedBooks.length > 1) {
+          this.showHomeBatchContextMenu(e, selectedBooks)
+          return
+        }
+      }
       this.$contextmenu({
         x: e.x,
         y: e.y,
@@ -1169,28 +1247,190 @@ export default defineComponent({
       })
     },
 
-    handleMoveFile (book) {
-      this.moveFileTargetBook = book
+    showHomeBatchContextMenu (e, books) {
+      const disabled = this.homeBatchActionRunning
+      this.$contextmenu({
+        x: e.x,
+        y: e.y,
+        items: [
+          {
+            label: this.$t('c.selectedBooks', { count: books.length }),
+            disabled: true
+          },
+          {
+            label: this.$t('m.batchGetMetadata'),
+            disabled,
+            onClick: () => this.getHomeBooksMetadata(books)
+          },
+          {
+            label: this.$t('m.resetMetadata'),
+            disabled,
+            onClick: () => this.resetHomeBooksMetadata(books)
+          },
+          {
+            label: this.$t('m.moveFile'),
+            disabled,
+            onClick: () => this.handleMoveFile(books)
+          },
+          {
+            label: this.$t('m.deleteFile'),
+            disabled,
+            onClick: () => this.deleteHomeBooks(books)
+          },
+          {
+            label: this.$t('m.rescan'),
+            disabled,
+            onClick: () => this.rescanHomeBooks(books)
+          },
+          {
+            label: this.$t('m.hideManga'),
+            disabled,
+            onClick: () => this.setHomeBooksHidden(books, true)
+          },
+          {
+            label: this.$t('m.showManga'),
+            disabled,
+            onClick: () => this.setHomeBooksHidden(books, false)
+          },
+          {
+            label: this.$t('m.pasteTagClipboard'),
+            disabled,
+            onClick: () => this.pasteTagsToHomeBooks(books)
+          },
+          {
+            label: this.$t('c.clearSelection'),
+            onClick: () => this.clearHomeBookSelection()
+          }
+        ]
+      })
+    },
+
+    async runHomeBatchAction (task) {
+      if (this.homeBatchActionRunning) return
+      this.homeBatchActionRunning = true
+      try {
+        await task()
+      } catch (error) {
+        console.error(error)
+        this.printMessage('error', this.$t('c.applyError'))
+      } finally {
+        this.homeBatchActionRunning = false
+      }
+    },
+    async getHomeBooksMetadata (books) {
+      await this.runHomeBatchAction(async () => {
+        await this.$refs.SearchDialogRef.getBooksMetadata(books, this.setting.requireGap || 10000)
+      })
+    },
+    async resetHomeBooksMetadata (books) {
+      try {
+        await ElMessageBox.confirm(
+          this.$t('c.confirmResetSelectedMetadata', { count: books.length }),
+          '',
+          {}
+        )
+        await this.runHomeBatchAction(async () => {
+          for (const book of books) await this.resetMetadata(book)
+          this.printMessage('success', this.$t('c.applied'))
+        })
+      } catch (error) {
+        if (error !== 'cancel' && error !== 'close') console.error(error)
+      }
+    },
+    async deleteHomeBooks (books) {
+      try {
+        await ElMessageBox.confirm(
+          this.$t('c.confirmDeleteSelected', { count: books.length }),
+          '',
+          {}
+        )
+        await this.runHomeBatchAction(async () => {
+          for (const book of books) {
+            await ipcRenderer.invoke('delete-local-book', book.filepath)
+          }
+          const filepaths = new Set(books.map(book => book.filepath))
+          this.bookList = this.bookList.filter(book => !filepaths.has(book.filepath))
+          this.displayBookList = this.displayBookList.filter(book => !filepaths.has(book.filepath))
+          this.clearHomeBookSelection()
+          this.handleRemoveBookDisplay()
+        })
+      } catch (error) {
+        if (error !== 'cancel' && error !== 'close') console.error(error)
+      }
+    },
+    async rescanHomeBooks (books) {
+      await this.runHomeBatchAction(async () => {
+        await this.runWithTaskMessage({
+          message: this.$t('c.patchingLocalMetadata'),
+          task: async () => {
+            for (const book of books) {
+              const bookInfo = await ipcRenderer.invoke('patch-local-metadata-by-book', _.cloneDeep(book))
+              _.assign(book, bookInfo)
+              await this.saveBook(book)
+            }
+          }
+        })
+        this.printMessage('success', this.$t('c.rescanSuccess'))
+      })
+    },
+    async setHomeBooksHidden (books, hidden) {
+      await this.runHomeBatchAction(async () => {
+        for (const book of books) {
+          book.hiddenBook = hidden
+          await this.saveBook(book)
+        }
+        this.clearHomeBookSelection()
+      })
+    },
+    async pasteTagsToHomeBooks (books) {
+      await this.runHomeBatchAction(async () => {
+        try {
+          const text = await ipcRenderer.invoke('read-text-from-clipboard')
+          const metadata = JSON.parse(text)
+          for (const book of books) {
+            _.assign(book, _.cloneDeep(metadata))
+            await this.saveBook(book)
+          }
+          this.printMessage('success', this.$t('c.applied'))
+        } catch (error) {
+          console.error(error)
+          this.printMessage('error', this.$t('c.applyError'))
+        }
+      })
+    },
+
+    handleMoveFile (bookOrBooks) {
+      this.moveFileTargetBooks = Array.isArray(bookOrBooks) ? [...bookOrBooks] : [bookOrBooks]
       this.moveFileTargetFolder = null
       this.moveFileDialogVisible = true
     },
     async confirmMoveFile () {
-      if (!this.moveFileTargetBook || !this.moveFileTargetFolder) {
+      if (!this.moveFileTargetBooks.length || !this.moveFileTargetFolder) {
         this.printMessage('error', this.$t('c.moveError'))
         return
       }
-      try {
-        const newFilePath = await ipcRenderer.invoke('move-local-book', this.moveFileTargetBook.filepath, _.cloneDeep(this.moveFileTargetFolder))
-        if (newFilePath) {
-          this.moveFileTargetBook.filepath = newFilePath
-          await this.saveBook(this.moveFileTargetBook)
+      await this.runHomeBatchAction(async () => {
+        let failed = false
+        try {
+          for (const book of this.moveFileTargetBooks) {
+            const newFilePath = await ipcRenderer.invoke('move-local-book', book.filepath, _.cloneDeep(this.moveFileTargetFolder))
+            if (newFilePath) {
+              book.filepath = newFilePath
+              await this.saveBook(book)
+            } else {
+              failed = true
+            }
+          }
+          this.printMessage(failed ? 'error' : 'success', this.$t(failed ? 'c.moveError' : 'c.moveSuccess'))
+        } catch (error) {
+          console.error(error)
+          this.printMessage('error', this.$t('c.moveError'))
+        } finally {
+          this.moveFileDialogVisible = false
+          this.moveFileTargetBooks = []
+          this.moveFileTargetFolder = null
         }
-      } catch (e) {
-        console.error(e)
-      }
-      this.moveFileDialogVisible = false
-      this.moveFileTargetBook = null
-      this.moveFileTargetFolder = null
+      })
     },
 
     // collection view function
@@ -1287,6 +1527,7 @@ export default defineComponent({
       this.$refs.InternalViewerRef.viewManga(book)
     },
     handleRemoveBookDisplay () {
+      this.pruneHomeBookSelection()
       this.chunkDisplayBookList = this.customChunk(this.displayBookList, this.setting.pageSize, this.currentPage - 1)
     },
 

@@ -232,6 +232,10 @@
     "useTranslationCache": "使用翻譯快取",
     "moveSuccess": "移動成功",
     "moveError": "移動失敗",
+    "selectedBooks": "已選擇 {count} 本",
+    "clearSelection": "清除選擇",
+    "confirmDeleteSelected": "將選中的 {count} 本漫畫從應用中移除並刪除本地檔案，確定？",
+    "confirmResetSelectedMetadata": "將重置選中的 {count} 本漫畫的元數據，確定？",
     "noMoreActionHistory": "沒有更多操作歷史"
   },
   "ac": {

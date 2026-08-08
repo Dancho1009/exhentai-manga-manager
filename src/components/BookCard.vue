@@ -1,5 +1,5 @@
 <template>
-  <div class="book-card">
+  <div class="book-card" :class="{'book-card-selected': selected}">
     <p class="book-title"
       @click="$emit('openBookDetail')"
       @contextmenu="onMangaTitleContextMenu($event, book)"
@@ -8,8 +8,14 @@
     <img
       class="book-cover"
       :src="book.coverPath"
-      @click="$emit('handleClickCover')"
+      @click="handleClickCover"
       @contextmenu="$emit('onBookContextMenu', $event, book)"
+    />
+    <el-checkbox
+      v-if="selectable"
+      class="book-card-select"
+      :model-value="selected"
+      @click.stop="$emit('toggleBookSelection', $event, book)"
     />
     <el-tag class="book-card-language" size="small"
       :type="isChineseTranslatedManga(book) ? 'danger' : 'info'"
@@ -70,10 +76,19 @@ const emit = defineEmits([
   'searchFromTag',
   'openLocalBook',
   'viewManga',
+  'toggleBookSelection',
 ])
 
 const props = defineProps({
-  book: Object
+  book: Object,
+  selected: {
+    type: Boolean,
+    default: false
+  },
+  selectable: {
+    type: Boolean,
+    default: false
+  }
 })
 
 const bookRating = ref(props.book.rating)
@@ -81,6 +96,14 @@ const bookRating = ref(props.book.rating)
 watchEffect(() => {
   bookRating.value = props.book.rating
 })
+
+const handleClickCover = (event) => {
+  if (props.selectable && (event.ctrlKey || event.metaKey || event.shiftKey)) {
+    emit('toggleBookSelection', event, props.book)
+  } else {
+    emit('handleClickCover')
+  }
+}
 
 const filterCollectTag = (tagObject) => {
   if (setting.value.showCollectTag) {
@@ -142,6 +165,8 @@ const onMangaTitleContextMenu = (e, book) => {
       border-width: 0
       padding-left: 4px
       padding-right: 4px
+.book-card-selected
+  box-shadow: inset 0 0 0 2px var(--el-color-primary)
 .book-title
   height: 36px
   overflow-y: hidden
@@ -149,7 +174,7 @@ const onMangaTitleContextMenu = (e, book) => {
   font-size: 14px
   cursor: pointer
   line-height: 18px
-.book-card-mark, .book-card-language, .book-card-pagecount
+.book-card-mark, .book-card-language, .book-card-pagecount, .book-card-select
   position: absolute
   cursor: pointer
 .book-card-language
@@ -163,6 +188,16 @@ const onMangaTitleContextMenu = (e, book) => {
 .book-card-mark
   right: 4px
   top: 40px
+.book-card-select
+  right: 9px
+  top: 78px
+  z-index: 2
+  width: 22px
+  height: 22px
+  margin: 0
+  justify-content: center
+  border-radius: 3px
+  background-color: var(--el-bg-color-overlay)
 .book-cover
   border-radius: 4px
   width: 200px

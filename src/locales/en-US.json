@@ -232,6 +232,10 @@
     "useTranslationCache": "Use translation cache",
     "moveSuccess": "Move successful",
     "moveError": "Move failed",
+    "selectedBooks": "{count} books selected",
+    "clearSelection": "Clear selection",
+    "confirmDeleteSelected": "Remove the selected {count} books from the app and delete their local files?",
+    "confirmResetSelectedMetadata": "Reset metadata for the selected {count} books?",
     "noMoreActionHistory": "No more action history"
   },
   "ac": {
