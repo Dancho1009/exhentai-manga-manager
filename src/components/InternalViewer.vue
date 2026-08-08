@@ -425,7 +425,7 @@ const viewManga = (book, viewerHeight = '100%') => {
       initComicRead()
     }
     book.readCount += 1
-    saveBook(book)
+    ipcRenderer.invoke('increment-read-count', book.id)
   })
   .catch(err => {
     console.log(err)

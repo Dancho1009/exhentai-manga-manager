@@ -21,13 +21,13 @@
           <el-icon
             :size="30"
             :color="bookDetail.mark ? '#E6A23C' : '#666666'"
-            class="book-detail-star" @click="switchMark(bookDetail)"
+            class="book-detail-star" @click="!auditLocked && switchMark(bookDetail)"
           ><BookmarkTwotone /></el-icon>
           <div class="next-manga-pane" @click="$emit('jumpMangeDetail', 1)"><el-icon text><CaretRight20Regular /></el-icon></div>
           <div class="prev-manga-pane" @click="$emit('jumpMangeDetail', -1)"><el-icon text><CaretLeft20Regular /></el-icon></div>
         </el-row>
         <el-row :gutter="20" class="book-detail-rate">
-          <el-rate v-model="bookDetail.rating" size="large" allow-half @change="saveBook(bookDetail)"/>
+          <el-rate v-model="bookDetail.rating" size="large" allow-half :disabled="auditLocked" @change="saveBook(bookDetail)"/>
         </el-row>
         <el-row class="book-detail-function">
           <el-descriptions :column="1">
@@ -48,17 +48,17 @@
             <el-button type="success" style="padding-left: 0;" plain @click="$emit('openContentView', bookDetail)">{{$t('m.ad')}}</el-button>
           </el-button-group>
           <el-button plain @click="triggerShowComment">{{setting.showComment ? $t('m.hideComment') : $t('m.showComment')}}</el-button>
-          <el-button type="primary" plain @click="editTags">{{editingTag ? $t('m.showTag') : $t('m.editTag')}}</el-button>
+          <el-button type="primary" plain @click="editTags" :disabled="auditLocked">{{editingTag ? $t('m.showTag') : $t('m.editTag')}}</el-button>
         </el-row>
         <el-row class="book-detail-function">
           <el-button type="primary" plain
-            @click="$emit('openSearchDialog')"
+            @click="$emit('openSearchDialog')" :disabled="auditLocked"
           >{{$t('m.getMetadata')}}</el-button>
-          <el-button type="primary" plain @click="triggerHiddenBook(bookDetail)">{{bookDetail.hiddenBook ? $t('m.showManga') : $t('m.hideManga')}}</el-button>
+          <el-button type="primary" plain @click="triggerHiddenBook(bookDetail)" :disabled="auditLocked">{{bookDetail.hiddenBook ? $t('m.showManga') : $t('m.hideManga')}}</el-button>
         </el-row>
         <el-row class="book-detail-function">
-          <el-button type="danger" plain @click="deleteLocalBook(bookDetail)">{{$t('m.deleteFile')}}</el-button>
-          <el-button plain @click="rescanBook(bookDetail)">{{$t('m.rescan')}}</el-button>
+          <el-button type="danger" plain @click="deleteLocalBook(bookDetail)" :disabled="auditLocked">{{$t('m.deleteFile')}}</el-button>
+          <el-button plain @click="rescanBook(bookDetail)" :disabled="auditLocked">{{$t('m.rescan')}}</el-button>
           <el-button type="primary" plain @click="showFile(bookDetail.filepath)">{{$t('m.openMangaFileLocation')}}</el-button>
         </el-row>
       </el-col>
@@ -66,38 +66,38 @@
         <el-scrollbar class="book-tag-frame">
           <div v-if="editingTag">
             <div class="edit-line">
-              <el-input v-model="bookDetail.title_jpn" :placeholder="$t('m.title')" @change="saveBook(bookDetail)"></el-input>
+              <el-input v-model="bookDetail.title_jpn" :placeholder="$t('m.title')" :disabled="auditLocked" @change="saveBook(bookDetail)"></el-input>
             </div>
             <div class="edit-line">
-              <el-input v-model="bookDetail.title" :placeholder="$t('m.englishTitle')" @change="saveBook(bookDetail)"></el-input>
+              <el-input v-model="bookDetail.title" :placeholder="$t('m.englishTitle')" :disabled="auditLocked" @change="saveBook(bookDetail)"></el-input>
             </div>
             <div class="edit-line">
-              <el-select v-model="bookDetail.status" :placeholder="$t('m.metadataStatus')" @change="saveBook(bookDetail)">
+              <el-select v-model="bookDetail.status" :placeholder="$t('m.metadataStatus')" :disabled="auditLocked" @change="saveBook(bookDetail)">
                 <el-option v-for="status in statusOption" :value="status" :key="status" :label="status" />
               </el-select>
             </div>
             <div class="edit-line">
-              <el-input v-model="bookDetail.url" :placeholder="$t('m.ehexAddress')" @change="saveBook(bookDetail)"></el-input>
+              <el-input v-model="bookDetail.url" :placeholder="$t('m.ehexAddress')" :disabled="auditLocked" @change="saveBook(bookDetail)"></el-input>
             </div>
             <div class="edit-line">
-              <el-select v-model="bookDetail.category" :placeholder="$t('m.category')" @change="saveBook(bookDetail)" clearable>
+              <el-select v-model="bookDetail.category" :placeholder="$t('m.category')" :disabled="auditLocked" @change="saveBook(bookDetail)" clearable>
                 <el-option v-for="cat in categoryOption" :value="cat" :key="cat" :label="cat" />
               </el-select>
             </div>
             <div class="edit-line" v-for="(arr, key) in tagGroup" :key="key">
               <el-select-v2
                 v-model="bookDetail.tags[key]" :placeholder="key" @change="saveBookTags(bookDetail)"
-                filterable clearable allow-create multiple :reserve-keyword="false" :height="340"
+                filterable clearable allow-create multiple :reserve-keyword="false" :height="340" :disabled="auditLocked"
                 :options="arr"
               >
               </el-select-v2>
             </div>
             <el-space wrap class="tag-edit-buttons">
-              <el-button @click="addTagCat">{{$t('m.addCategory')}}</el-button>
-              <el-button @click="$emit('getBookInfo')">{{$t('m.getTagbyUrl')}}</el-button>
-              <el-button @click="resetMetadata(bookDetail)">{{$t('m.resetMetadata')}}</el-button>
+              <el-button @click="addTagCat" :disabled="auditLocked">{{$t('m.addCategory')}}</el-button>
+              <el-button @click="$emit('getBookInfo')" :disabled="auditLocked">{{$t('m.getTagbyUrl')}}</el-button>
+              <el-button @click="resetMetadata(bookDetail)" :disabled="auditLocked">{{$t('m.resetMetadata')}}</el-button>
               <el-button @click="copyTagClipboard(bookDetail)">{{$t('m.copyTagClipboard')}}</el-button>
-              <el-button @click="pasteTagClipboard(bookDetail)">{{$t('m.pasteTagClipboard')}}</el-button>
+              <el-button @click="pasteTagClipboard(bookDetail)" :disabled="auditLocked">{{$t('m.pasteTagClipboard')}}</el-button>
             </el-space>
           </div>
           <div v-else>
@@ -164,6 +164,7 @@ const {
   setting, bookDetail, resolvedTranslation,
   bookList, displayBookList, collectionList, openCollectionBookList,
   statusOption, categoryOption,
+  auditLocked,
   pathSep,
 } = storeToRefs(appStore)
 const {
@@ -220,7 +221,7 @@ const openLocalBook = (book) => {
   bookDetail.value = book
   if (setting.value.imageExplorer) {
     bookDetail.value.readCount += 1
-    saveBook(bookDetail.value)
+    ipcRenderer.invoke('increment-read-count', bookDetail.value.id)
     ipcRenderer.invoke('open-local-book', bookDetail.value.filepath)
   } else {
     emit('openContentView', book)

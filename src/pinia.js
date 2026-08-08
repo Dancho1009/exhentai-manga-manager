@@ -64,6 +64,7 @@ export const useAppStore = defineStore('appStore', {
     collectionList: [],
     openCollectionBookList: [],
     serviceAvailable: true,
+    auditLocked: false,
     sortValue: undefined,
     editCollectionView: false,
     editTagView: false,
@@ -266,6 +267,16 @@ export const useAppStore = defineStore('appStore', {
       await this.saveBook(book)
     },
     saveBook (book) {
+      if (this.auditLocked) {
+        const language = this.setting.language || 'zh-CN'
+        const message = language === 'en-US'
+          ? 'Library audit is running; changes are temporarily disabled'
+          : language === 'zh-TW'
+            ? '異常檢查執行中，修改操作已暫時停用'
+            : '异常检查运行中，修改操作已暂时禁用'
+        this.printMessage('warning', message)
+        return Promise.resolve(false)
+      }
       return ipcRenderer.invoke('save-book', _.cloneDeep(book))
     },
     async switchMark (book) {

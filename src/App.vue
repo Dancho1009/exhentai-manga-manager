@@ -6,7 +6,7 @@
       <el-col :span="1" :offset="2">
         <el-button type="primary" :icon="TreeViewAlt" plain @click="$refs.FolderTreeRef.openFolderTree()" :title="$t('m.folderTree')"></el-button>
       </el-col>
-      <el-col :span="8">
+      <el-col :span="7">
         <el-autocomplete
           :model-value="searchString"
           :fetch-suggestions="querySearch"
@@ -31,17 +31,20 @@
       </el-col>
       <el-col :span="1">
         <el-button type="primary" :icon="MdRefresh" plain :title="$t('m.manualScan')"
-          @click="loadBookList(true)" :loading="buttonLoadBookListLoading"></el-button>
+          @click="loadBookList(true)" :loading="buttonLoadBookListLoading" :disabled="auditLocked"></el-button>
       </el-col>
       <el-col :span="1">
         <el-button type="primary" :icon="MdCodeDownload" plain :title="$t('m.batchGetMetadata')"
-          @click="getBookListMetadata()" :loading="buttonGetMetadatasLoading"></el-button>
+          @click="getBookListMetadata()" :loading="buttonGetMetadatasLoading" :disabled="auditLocked"></el-button>
       </el-col>
       <el-col :span="1">
         <el-button :icon="ArrowTrendingLines20Filled" plain @click="$refs.TagGraphRef.displayTagGraph()" :title="$t('m.tagAnalysis')"></el-button>
       </el-col>
       <el-col :span="1">
-        <el-button :icon="SettingIcon" plain @click="$refs.SettingRef.dialogVisibleSetting = true" :title="$t('m.setting')"></el-button>
+        <el-button :icon="DataAnalysis" plain @click="openAuditWorkbench" :title="$t('m.auditWorkbench')"></el-button>
+      </el-col>
+      <el-col :span="1">
+        <el-button :icon="SettingIcon" plain @click="$refs.SettingRef.dialogVisibleSetting = true" :title="$t('m.setting')" :disabled="auditLocked"></el-button>
       </el-col>
       <el-col :span="3">
         <el-select :placeholder="$t('m.sort_filter')" @change="handleSortChange" clearable v-model="sortValue">
@@ -76,7 +79,7 @@
       <el-col :span="4">
         <el-row :gutter="20">
           <el-col :span="6"  v-if="!editTagView && !editCollectionView">
-            <el-button plain @click="$refs.EditViewRef.enterEditCollectionView()" :icon="CicsSystemGroup" :title="$t('m.manageCollection')"></el-button>
+            <el-button plain @click="$refs.EditViewRef.enterEditCollectionView()" :icon="CicsSystemGroup" :title="$t('m.manageCollection')" :disabled="auditLocked"></el-button>
           </el-col>
           <el-col :span="6" v-if="editCollectionView">
             <el-button type="primary" plain @click="$refs.EditViewRef.addCollection()" :icon="Collections24Regular" :title="$t('m.addCollection')"></el-button>
@@ -91,7 +94,7 @@
             <el-button type="primary" plain @click="$refs.EditViewRef.exitCollectionView()" :icon="MdExit" :title="$t('m.exit')"></el-button>
           </el-col>
           <el-col :span="6"  v-if="!editTagView && !editCollectionView">
-            <el-button plain @click="$refs.EditViewRef.enterEditTagView()" :icon="TagGroup" :title="$t('m.manageTag')"></el-button>
+            <el-button plain @click="$refs.EditViewRef.enterEditTagView()" :icon="TagGroup" :title="$t('m.manageTag')" :disabled="auditLocked"></el-button>
           </el-col>
           <el-col :span="6" v-if="editTagView">
             <el-button type="primary" plain @click="$refs.EditViewRef.exitEditTagView()" :icon="MdExit" :title="$t('m.exit')"></el-button>
@@ -238,7 +241,7 @@
 <script>
 import { defineComponent } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { Setting as SettingIcon, FullScreen, Edit } from '@element-plus/icons-vue'
+import { Setting as SettingIcon, FullScreen, Edit, DataAnalysis } from '@element-plus/icons-vue'
 import { ArrowTrendingLines20Filled, Collections24Regular, Search32Filled, Save16Regular } from '@vicons/fluent'
 import { MdShuffle, MdRefresh, MdCodeDownload, MdExit } from '@vicons/ionicons4'
 import { TreeViewAlt, CicsSystemGroup, TagGroup } from '@vicons/carbon'
@@ -274,7 +277,7 @@ export default defineComponent({
   },
   setup () {
     return {
-      SettingIcon, FullScreen, Edit,
+      SettingIcon, FullScreen, Edit, DataAnalysis,
       Collections24Regular, Search32Filled, ArrowTrendingLines20Filled, Save16Regular,
       MdRefresh, MdCodeDownload, MdExit, MdShuffle,
       TreeViewAlt, CicsSystemGroup, TagGroup
@@ -316,6 +319,7 @@ export default defineComponent({
       'collectionList',
       'openCollectionBookList',
       'serviceAvailable',
+      'auditLocked',
       'sortValue',
       'editCollectionView',
       'editTagView',
@@ -404,6 +408,19 @@ export default defineComponent({
           break
       }
     })
+    ipcRenderer.on('audit:lock-state', async (_event, value) => {
+      const wasLocked = this.auditLocked
+      this.auditLocked = Boolean(value?.auditRunning)
+      if (wasLocked && !this.auditLocked) await this.loadBookList(false)
+    })
+    ipcRenderer.on('audit:library-changed', async (_event, value) => {
+      if (value?.rendererState) {
+        localStorage.setItem('recentRead', JSON.stringify(value.rendererState.recentRead || []))
+        localStorage.setItem('viewerReadingProgress', JSON.stringify(value.rendererState.viewerReadingProgress || []))
+      }
+      await this.loadBookList(false)
+      await this.loadCollectionList()
+    })
   },
   beforeUnmount () {
     window.removeEventListener('keydown', this.resolveKey)
@@ -430,6 +447,9 @@ export default defineComponent({
     ]),
 
     // base function
+    async openAuditWorkbench () {
+      await ipcRenderer.invoke('audit:open-window')
+    },
     currentUI () {
       if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') {
         return 'inputing'
@@ -570,7 +590,7 @@ export default defineComponent({
         } else if (event.key === 'Enter') {
           event.preventDefault()
           document.activeElement.querySelector('.book-cover').click()
-        } else if (event.key === 'F5') {
+        } else if (event.key === 'F5' && !this.auditLocked) {
           this.loadBookList(true)
         } else if (event.key === 'F6' || (event.ctrlKey && event.key === 'l')) {
           document.querySelector('.search-input .el-input__inner').select()
@@ -678,6 +698,10 @@ export default defineComponent({
       }
     },
     async loadBookList (scan) {
+      if (scan && this.auditLocked) {
+        this.printMessage('warning', this.$t('c.auditLocked'))
+        return
+      }
       try {
         this.clearHomeBookSelection()
         this.buttonLoadBookListLoading = true
@@ -714,6 +738,10 @@ export default defineComponent({
 
     // home header
     async getBookListMetadata () {
+      if (this.auditLocked) {
+        this.printMessage('warning', this.$t('c.auditLocked'))
+        return
+      }
       try {
         this.buttonGetMetadatasLoading = true
         let bookList
@@ -1191,12 +1219,14 @@ export default defineComponent({
         items: [
           {
             label: this.$t('m.getMetadata'),
+            disabled: this.auditLocked,
             onClick: () => {
               this.$refs.SearchDialogRef.openSearchDialog(book)
             }
           },
           {
             label: this.$t('m.resetMetadata'),
+            disabled: this.auditLocked,
             onClick: () => {
               this.resetMetadata(book)
             }
@@ -1209,18 +1239,21 @@ export default defineComponent({
           },
           {
             label: this.$t('m.moveFile'),
+            disabled: this.auditLocked,
             onClick: () => {
               this.handleMoveFile(book)
             }
           },
           {
             label: this.$t('m.deleteFile'),
+            disabled: this.auditLocked,
             onClick: () => {
               this.$refs.BookDetailDialogRef.deleteLocalBook(book)
             }
           },
           {
             label: this.$t('m.hideManga') + "/" + this.$t('m.showManga'),
+            disabled: this.auditLocked,
             onClick: () => {
               this.$refs.BookDetailDialogRef.triggerHiddenBook(book)
             }
@@ -1233,12 +1266,14 @@ export default defineComponent({
           },
           {
             label: this.$t('m.pasteTagClipboard'),
+            disabled: this.auditLocked,
             onClick: () => {
               this.pasteTagClipboard(book)
             }
           },
           {
             label: this.$t('m.getMetadataFromClipboardLink'),
+            disabled: this.auditLocked,
             onClick: () => {
               this.getMetadataFromClipboardLink(book)
             }
@@ -1248,7 +1283,7 @@ export default defineComponent({
     },
 
     showHomeBatchContextMenu (e, books) {
-      const disabled = this.homeBatchActionRunning
+      const disabled = this.homeBatchActionRunning || this.auditLocked
       this.$contextmenu({
         x: e.x,
         y: e.y,

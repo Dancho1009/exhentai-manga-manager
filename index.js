@@ -21,6 +21,9 @@ const { prepareMangaModel, prepareMetadataModel } = require('./modules/database'
 const { prepareTemplate } = require('./modules/prepare_menu.js')
 const { getRootPath } = require('./modules/utils.js')
 const { searchNhentai, getNhentaiMetadata, getNhentaiComments } = require('./modules/nhentai.js')
+const { LibraryTaskCoordinator } = require('./modules/audit/task_coordinator.js')
+const { AuditJobManager } = require('./modules/audit/job_manager.js')
+const { executeApprovedActions } = require('./modules/audit/action_executor.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
 const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
 const { getEhviewerDataFromZip } = require('./fileLoader/zip.js')
@@ -64,12 +67,22 @@ if (setting.metadataPath) {
   metadataSqliteFile = path.join(STORE_PATH, './metadata.sqlite')
 }
 let Metadata = prepareMetadataModel(metadataSqliteFile)
+const libraryTaskCoordinator = new LibraryTaskCoordinator()
+const auditJobManager = new AuditJobManager({ storePath: STORE_PATH, coordinator: libraryTaskCoordinator })
+const sendAuditState = state => {
+  if (auditWindow && !auditWindow.isDestroyed()) auditWindow.webContents.send('audit:state', state)
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('audit:lock-state', state.lock)
+}
+auditJobManager.on('state', sendAuditState)
+auditJobManager.on('log', entry => {
+  if (auditWindow && !auditWindow.isDestroyed()) auditWindow.webContents.send('audit:log', entry)
+})
 const getColumns = async (sequelize, tableName) => {
   const query = `PRAGMA table_info(${tableName})`
   const [results] = await sequelize.query(query)
   return results.map(column => column.name)
 }
-;(async () => {
+const databaseReady = (async () => {
   const columns = await getColumns(Manga.sequelize, 'Mangas')
   if (['hiddenBook', 'readCount'].some(c => !columns.includes(c))) {
     await Manga.sync({ alter: true })
@@ -108,9 +121,11 @@ const sendMessageToWebContents = (message) => {
 }
 
 let mainWindow
+let auditWindow
 let tray
 let screenWidth
 let sendImageLock = false
+let appIsQuitting = false
 
 const createTray = () => {
   if (tray) return
@@ -149,8 +164,12 @@ const createTray = () => {
     },
     {
       label: 'exit',
-      click: () => {
-        mainWindow.destroy()
+      click: async () => {
+        appIsQuitting = true
+        await auditJobManager.interruptForExit()
+        if (auditWindow && !auditWindow.isDestroyed()) auditWindow.destroy()
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy()
+        app.quit()
       }
     }
   ])
@@ -224,18 +243,83 @@ const createWindow = () => {
   win.on('show', () => {
     win.setSkipTaskbar(false)
   })
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
+  })
+  return win
+}
+
+const createAuditWindow = () => {
+  if (auditWindow && !auditWindow.isDestroyed()) {
+    auditWindow.show()
+    auditWindow.focus()
+    return auditWindow
+  }
+  const auditWindowState = windowStateKeeper({
+    defaultWidth: 1320,
+    defaultHeight: 860,
+    file: 'audit-window-state.json'
+  })
+  const win = new BrowserWindow({
+    x: auditWindowState.x,
+    y: auditWindowState.y,
+    width: auditWindowState.width,
+    height: auditWindowState.height,
+    minWidth: 760,
+    minHeight: 600,
+    webPreferences: {
+      webSecurity: app.isPackaged,
+      preload: path.join(__dirname, 'audit-preload.js')
+    },
+    show: false
+  })
+  auditWindow = win
+  auditWindowState.manage(win)
+  win.setMenuBarVisibility(false)
+  win.setAutoHideMenuBar(true)
+  if (app.isPackaged) win.loadFile('dist/audit.html')
+  else win.loadURL('http://localhost:5374/audit.html')
+  win.once('ready-to-show', () => win.show())
+  win.webContents.on('did-finish-load', () => {
+    win.setTitle('exhentai-manga-manager | Library Audit')
+    win.webContents.send('audit:state', auditJobManager.getState())
+  })
+  let closePromptOpen = false
+  win.on('close', event => {
+    if (appIsQuitting || !['running', 'cancelling'].includes(auditJobManager.getState().status)) return
+    event.preventDefault()
+    if (closePromptOpen) return
+    closePromptOpen = true
+    dialog.showMessageBox(win, {
+      type: 'question',
+      title: '任务仍在进行',
+      message: '异常检查仍在后台运行。隐藏窗口并继续任务吗？',
+      buttons: ['隐藏并继续', '返回'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true
+    }).then(result => {
+      if (result.response === 0 && !win.isDestroyed()) win.hide()
+    }).finally(() => {
+      closePromptOpen = false
+    })
+  })
+  win.on('closed', () => {
+    if (auditWindow === win) auditWindow = null
+  })
   return win
 }
 
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=65536')
 // app.disableHardwareAcceleration()
 app.whenReady().then(async () => {
+  await auditJobManager.initialize()
   const primaryDisplay = screen.getPrimaryDisplay()
   screenWidth = Math.floor(primaryDisplay.workAreaSize.width * primaryDisplay.scaleFactor)
   mainWindow = createWindow()
 })
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = createWindow()
   }
 })
@@ -254,6 +338,13 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('before-quit', event => {
+  if (appIsQuitting || !['running', 'cancelling'].includes(auditJobManager.getState().status)) return
+  event.preventDefault()
+  appIsQuitting = true
+  auditJobManager.interruptForExit().finally(() => app.quit())
 })
 
 process.on('exit', () => {
@@ -295,14 +386,28 @@ const loadBookListFromDatabase = async () => {
   }
   let metadataList = await Metadata.findAll()
   metadataList = metadataList.map(m => m.toJSON())
+  const metadataMap = new Map(metadataList.map(metadata => [metadata.hash, metadata]))
+  const hashGroups = _.groupBy(bookList, 'hash')
+  const conflictingHashes = new Set(Object.entries(hashGroups)
+    .filter(([, books]) => {
+      if (books.length < 2) return false
+      const identities = new Set(books.map(book => {
+        const urlIdentity = String(book.url || '').match(/\/g\/(\d+)(?:\/([0-9a-z]+))?/i)
+        if (urlIdentity) return `url:${urlIdentity[1]}:${urlIdentity[2] || ''}`
+        const filenameIdentity = path.basename(book.filepath || '').match(/^(\d{4,})\b/)
+        return filenameIdentity ? `file:${filenameIdentity[1]}` : ''
+      }).filter(Boolean))
+      return identities.size !== 1
+    })
+    .map(([hash]) => hash))
   const bookListLength = bookList.length
   for (let i = 0; i < bookListLength; i++) {
     const book = bookList[i]
-    const findMetadata = metadataList.find(m => m.hash === book.hash)
-    if (findMetadata) {
-      if (book.status === 'non-tag' && findMetadata.status !== 'non-tag') await Manga.update(findMetadata, { where: { id: book.id } })
+    const findMetadata = metadataMap.get(book.hash)
+    if (findMetadata && !conflictingHashes.has(book.hash)) {
+      if (!libraryTaskCoordinator.getState().auditRunning && book.status === 'non-tag' && findMetadata.status !== 'non-tag') await Manga.update(findMetadata, { where: { id: book.id } })
       Object.assign(book, findMetadata)
-    } else {
+    } else if (!findMetadata && !libraryTaskCoordinator.getState().auditRunning) {
       setProgressBar((i + 1) / bookListLength)
       await Metadata.upsert(book)
     }
@@ -319,7 +424,14 @@ const saveBookListToDatabase = async (data) => {
 
 const saveBookToDatabase = async (book) => {
   await Manga.update(book, { where: { id: book.id } })
-  await Metadata.upsert(book)
+  const hashBooks = await Manga.findAll({ where: { hash: book.hash }, raw: true })
+  const identities = new Set(hashBooks.map(item => {
+    const urlIdentity = String(item.url || '').match(/\/g\/(\d+)(?:\/([0-9a-z]+))?/i)
+    if (urlIdentity) return `url:${urlIdentity[1]}:${urlIdentity[2] || ''}`
+    const filenameIdentity = path.basename(item.filepath || '').match(/^(\d{4,})\b/)
+    return filenameIdentity ? `file:${filenameIdentity[1]}` : ''
+  }).filter(Boolean))
+  if (hashBooks.length <= 1 || identities.size === 1) await Metadata.upsert(book)
   console.log(`Saved ${book.title}`)
 }
 
@@ -592,7 +704,7 @@ const createBookFromCoverData = (filepath, type, coverData) => {
 
 
 // library and metadata
-ipcMain.handle('load-book-list', async (event, scan) => {
+const handleLoadBookList = async scan => {
   if (scan) {
     sendMessageToWebContents('Start loading library')
     await clearFolder(TEMP_PATH)
@@ -695,9 +807,15 @@ ipcMain.handle('load-book-list', async (event, scan) => {
     setProgressBar(-1)
   }
   return await loadBookListFromDatabase()
+}
+
+ipcMain.handle('load-book-list', async (event, scan) => {
+  return scan
+    ? await libraryTaskCoordinator.runMutation('scan-library', () => handleLoadBookList(true))
+    : await handleLoadBookList(false)
 })
 
-ipcMain.handle('force-gene-book-list', async (event, arg) => {
+const handleForceGeneBookList = async () => {
   await Manga.destroy({ truncate: true })
   await clearFolder(TEMP_PATH)
   await clearFolder(COVER_PATH)
@@ -739,9 +857,13 @@ ipcMain.handle('force-gene-book-list', async (event, arg) => {
 
   setProgressBar(-1)
   return await loadBookListFromDatabase()
+}
+
+ipcMain.handle('force-gene-book-list', async () => {
+  return await libraryTaskCoordinator.runMutation('rebuild-library', handleForceGeneBookList)
 })
 
-ipcMain.handle('patch-local-metadata', async (event, arg) => {
+const handlePatchLocalMetadata = async () => {
   const bookList = await loadBookListFromDatabase()
   const bookListLength = bookList.length
   await clearFolder(TEMP_PATH)
@@ -768,9 +890,13 @@ ipcMain.handle('patch-local-metadata', async (event, arg) => {
   await clearFolder(TEMP_PATH)
   setProgressBar(-1)
   return bookList
+}
+
+ipcMain.handle('patch-local-metadata', async () => {
+  return await libraryTaskCoordinator.runMutation('patch-local-metadata', handlePatchLocalMetadata)
 })
 
-ipcMain.handle('patch-local-metadata-by-book', async (event, book) => {
+const handlePatchLocalMetadataByBook = async book => {
   let { filepath, type } = book
   if (!type) type = 'archive'
   try {
@@ -785,7 +911,7 @@ ipcMain.handle('patch-local-metadata-by-book', async (event, book) => {
     await clearFolder(TEMP_PATH)
     return Promise.reject()
   }
-})
+}
 
 async function getEhviewerDataManually(dir) {
   try {
@@ -835,6 +961,10 @@ async function getEhviewerDataByPath(filepath, type) {
 
 ipcMain.handle('get-ehviewer-data', async (event, targetPath) => {
   return await getEhviewerDataByPath(targetPath)
+})
+
+ipcMain.handle('patch-local-metadata-by-book', async (event, book) => {
+  return await libraryTaskCoordinator.runMutation('patch-local-metadata-by-book', () => handlePatchLocalMetadataByBook(book))
 })
 
 ipcMain.handle('nhentai-search', async (event, { title, filepath }) => {
@@ -912,7 +1042,13 @@ ipcMain.handle('post-data-ex', async (event, { url, data }) => {
 })
 
 ipcMain.handle('save-book', async (event, book) => {
-  return await saveBookToDatabase(book)
+  return await libraryTaskCoordinator.runMutation('save-book', () => saveBookToDatabase(book))
+})
+
+ipcMain.handle('increment-read-count', async (event, bookId) => {
+  if (!bookId) return false
+  await Manga.increment('readCount', { by: 1, where: { id: bookId } })
+  return true
 })
 
 // home
@@ -951,12 +1087,16 @@ ipcMain.handle('load-collection-list', async (event, arg) => {
   return collectionList
 })
 
-ipcMain.handle('save-collection-list', async (event, list) => {
+const saveCollectionListToFile = async list => {
   collectionList = list
   const targetPath = path.join(STORE_PATH, 'collectionList.json')
   const tempPath = path.join(STORE_PATH, 'collectionList.json.tmp')
   await fs.promises.writeFile(tempPath, JSON.stringify(list, null, '  '), { encoding: 'utf-8' })
   return await fs.promises.rename(tempPath, targetPath)
+}
+
+ipcMain.handle('save-collection-list', async (event, list) => {
+  return await libraryTaskCoordinator.runMutation('save-collection-list', () => saveCollectionListToFile(list))
 })
 
 // detail
@@ -969,20 +1109,22 @@ ipcMain.handle('show-file', async (event, filepath) => {
 })
 
 ipcMain.handle('use-new-cover', async (event, filepath) => {
-  const copyTempCoverPath = path.join(TEMP_PATH, nanoid(8) + path.extname(filepath))
-  const coverPath = path.join(COVER_PATH, nanoid() + path.extname(filepath))
-  try {
-    await fs.promises.copyFile(filepath, copyTempCoverPath)
-    await sharp(copyTempCoverPath, { failOnError: false })
-    .resize(500, 707, {
-      fit: 'contain',
-      background: '#303133'
-    })
-    .toFile(coverPath)
-    return coverPath
-  } catch (e) {
-    sendMessageToWebContents(`Generate cover from ${filepath} failed because ${e}`)
-  }
+  return await libraryTaskCoordinator.runMutation('use-new-cover', async () => {
+    const copyTempCoverPath = path.join(TEMP_PATH, nanoid(8) + path.extname(filepath))
+    const coverPath = path.join(COVER_PATH, nanoid() + path.extname(filepath))
+    try {
+      await fs.promises.copyFile(filepath, copyTempCoverPath)
+      await sharp(copyTempCoverPath, { failOnError: false })
+      .resize(500, 707, {
+        fit: 'contain',
+        background: '#303133'
+      })
+      .toFile(coverPath)
+      return coverPath
+    } catch (e) {
+      sendMessageToWebContents(`Generate cover from ${filepath} failed because ${e}`)
+    }
+  })
 })
 
 ipcMain.handle('open-local-book', async (event, filepath) => {
@@ -998,7 +1140,8 @@ ipcMain.handle('get-default-manga-reader', async (event, arg) => {
 })
 
 ipcMain.handle('delete-local-book', async (event, filepath) => {
-  if (filepath.startsWith(setting.library)) {
+  return await libraryTaskCoordinator.runMutation('delete-local-book', async () => {
+    if (filepath.startsWith(setting.library)) {
     try {
       const stats = await fs.promises.stat(filepath)
       if (stats.isDirectory()) {
@@ -1027,11 +1170,13 @@ ipcMain.handle('delete-local-book', async (event, filepath) => {
       sendMessageToWebContents(`Delete ${filepath} failed because ${e}`)
     }
     await Manga.destroy({ where: { filepath: filepath } })
-  }
+    }
+  })
 })
 
 ipcMain.handle('move-local-book', async (event, oldPath, folderArr) => {
-  try {
+  return await libraryTaskCoordinator.runMutation('move-local-book', async () => {
+    try {
     const pathSep = require('path').sep
     const folderPath = Array.isArray(folderArr) && folderArr.length > 0 ? folderArr.join(pathSep) : ''
     const newFilePath = path.join(path.dirname(setting.library), folderPath, path.basename(oldPath))
@@ -1043,10 +1188,11 @@ ipcMain.handle('move-local-book', async (event, oldPath, folderArr) => {
       sendMessageToWebContents(`Move ${oldPath} failed because the new path is the same as the old path`)
       return false
     }
-  } catch (e) {
-    sendMessageToWebContents(`Move ${oldPath} failed because ${e}`)
-    return false
-  }
+    } catch (e) {
+      sendMessageToWebContents(`Move ${oldPath} failed because ${e}`)
+      return false
+    }
+  })
 })
 
 // viewer
@@ -1130,7 +1276,7 @@ ipcMain.handle('release-sendimagelock', () => {
 })
 
 ipcMain.handle('delete-image', async (event, filename, filepath, type) => {
-  return await deleteImageFromBook(filename, filepath, type)
+  return await libraryTaskCoordinator.runMutation('delete-image', () => deleteImageFromBook(filename, filepath, type))
 })
 
 // setting
@@ -1164,6 +1310,7 @@ ipcMain.handle('load-setting', async (event, arg) => {
 })
 
 ipcMain.handle('save-setting', async (event, receiveSetting) => {
+  return await libraryTaskCoordinator.runMutation('save-setting', async () => {
   receiveSetting.matchConcurrency = normalizeMatchConcurrency(receiveSetting.matchConcurrency)
   receiveSetting.scanConcurrency = normalizeScanConcurrency(receiveSetting.scanConcurrency)
   if (receiveSetting.proxy) {
@@ -1200,7 +1347,8 @@ ipcMain.handle('save-setting', async (event, receiveSetting) => {
   const targetPath = path.join(STORE_PATH, 'setting.json')
   const tempPath = path.join(STORE_PATH, 'setting.json.tmp')
   await fs.promises.writeFile(tempPath, JSON.stringify(setting, null, '  '), { encoding: 'utf-8' })
-  return await fs.promises.rename(tempPath, targetPath)
+    return await fs.promises.rename(tempPath, targetPath)
+  })
 })
 
 ipcMain.handle('export-database', async (event, folder) => {
@@ -1215,19 +1363,22 @@ ipcMain.handle('export-database', async (event, folder) => {
 })
 
 ipcMain.handle('import-database', async (event, arg) => {
-  const { collectionListPath, metadataSqlitePath } = arg
-  if (collectionListPath && metadataSqlitePath) {
-    await Metadata.sequelize.close()
-    await fs.promises.copyFile(collectionListPath, path.join(STORE_PATH, 'collectionList.json'))
-    await fs.promises.copyFile(metadataSqlitePath, metadataSqliteFile)
-    app.relaunch()
-    app.exit(0)
-  } else {
-    sendMessageToWebContents('Import failed because the source folder is empty')
-  }
+  return await libraryTaskCoordinator.runMutation('import-database', async () => {
+    const { collectionListPath, metadataSqlitePath } = arg
+    if (collectionListPath && metadataSqlitePath) {
+      await Metadata.sequelize.close()
+      await fs.promises.copyFile(collectionListPath, path.join(STORE_PATH, 'collectionList.json'))
+      await fs.promises.copyFile(metadataSqlitePath, metadataSqliteFile)
+      app.relaunch()
+      app.exit(0)
+    } else {
+      sendMessageToWebContents('Import failed because the source folder is empty')
+    }
+  })
 })
 
 ipcMain.handle('import-sqlite', async (event, bookList, sqlitePath) => {
+  return await libraryTaskCoordinator.runMutation('import-sqlite', async () => {
   if (!sqlitePath) {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openFile'],
@@ -1266,10 +1417,97 @@ ipcMain.handle('import-sqlite', async (event, bookList, sqlitePath) => {
     }
   }
 
-  return {
-    success: false,
-    canceled: true
+    return {
+      success: false,
+      canceled: true
+    }
+  })
+})
+
+// audit workbench
+const getMainRendererState = async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return { recentRead: [], viewerReadingProgress: [] }
+  try {
+    return await mainWindow.webContents.executeJavaScript(`(() => {
+      const parse = (key) => {
+        try { return JSON.parse(localStorage.getItem(key) || '[]') } catch { return [] }
+      }
+      return { recentRead: parse('recentRead'), viewerReadingProgress: parse('viewerReadingProgress') }
+    })()`)
+  } catch {
+    return { recentRead: [], viewerReadingProgress: [] }
   }
+}
+
+ipcMain.handle('audit:open-window', async () => {
+  createAuditWindow()
+  return auditJobManager.getState()
+})
+
+ipcMain.handle('audit:get-state', async () => auditJobManager.getState())
+ipcMain.handle('audit:get-report', async () => await auditJobManager.getReport())
+ipcMain.handle('audit:get-review', async () => await auditJobManager.getReview())
+
+ipcMain.handle('audit:start', async (event, request = {}) => {
+  await databaseReady
+  const mode = request.mode === 'deep' ? 'deep' : 'quick'
+  const deepScope = ['changed', 'anomalies', 'all'].includes(request.deepScope) ? request.deepScope : 'anomalies'
+  return await auditJobManager.start({
+    mode,
+    deepScope,
+    library: setting.library,
+    databasePath: path.join(STORE_PATH, 'database.sqlite'),
+    metadataPath: metadataSqliteFile,
+    auditStorePath: path.join(STORE_PATH, 'audit'),
+    excludeFile: setting.excludeFile,
+    sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe')
+  })
+})
+
+ipcMain.handle('audit:cancel', async () => await auditJobManager.cancel())
+ipcMain.handle('audit:save-review', async (event, review) => await auditJobManager.saveReview(review || {}))
+
+ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
+  const defaultQuarantine = path.join(path.dirname(setting.library), 'DedupeReview')
+  const quarantineRoot = request.quarantineRoot || defaultQuarantine
+  const rendererState = await getMainRendererState()
+  const result = await executeApprovedActions({
+    jobManager: auditJobManager,
+    coordinator: libraryTaskCoordinator,
+    Manga,
+    Metadata,
+    databasePath: path.join(STORE_PATH, 'database.sqlite'),
+    metadataPath: metadataSqliteFile,
+    collectionList,
+    saveCollectionList: saveCollectionListToFile,
+    library: setting.library,
+    quarantineRoot,
+    rendererState
+  })
+  collectionList = result.collectionList
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('audit:library-changed', { rendererState: result.rendererState })
+  }
+  return result
+})
+
+ipcMain.handle('audit:show-file', async (event, filepath) => {
+  if (filepath) shell.showItemInFolder(filepath)
+})
+
+ipcMain.handle('audit:open-url', async (event, url) => {
+  const parsedUrl = new URL(String(url || ''))
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('UNSUPPORTED_URL_PROTOCOL')
+  await shell.openExternal(parsedUrl.toString())
+})
+
+ipcMain.handle('audit:select-quarantine', async (event, defaultPath) => {
+  const result = await dialog.showOpenDialog(auditWindow || mainWindow, {
+    title: '选择隔离目录',
+    defaultPath: defaultPath || path.dirname(setting.library),
+    properties: ['openDirectory', 'createDirectory']
+  })
+  return result.canceled ? null : result.filePaths[0]
 })
 
 
