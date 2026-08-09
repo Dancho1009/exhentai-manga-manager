@@ -1,15 +1,37 @@
 const fs = require('fs')
 const path = require('path')
-const { createHash } = require('crypto')
+const { createHash, randomUUID } = require('crypto')
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif'])
 const ARCHIVE_EXTENSIONS = new Set(['.zip', '.cbz', '.rar', '.cbr', '.7z', '.cb7'])
+const ATOMIC_RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 const atomicWriteJson = async (filepath, value) => {
-  await fs.promises.mkdir(path.dirname(filepath), { recursive: true })
-  const tempPath = `${filepath}.tmp`
-  await fs.promises.writeFile(tempPath, JSON.stringify(value, null, 2), 'utf8')
-  await fs.promises.rename(tempPath, filepath)
+  const directory = path.dirname(filepath)
+  await fs.promises.mkdir(directory, { recursive: true })
+  const tempPath = path.join(directory, `.${path.basename(filepath)}.${process.pid}.${randomUUID()}.tmp`)
+  const payload = JSON.stringify(value, null, 2)
+  let handle
+  try {
+    handle = await fs.promises.open(tempPath, 'wx')
+    await handle.writeFile(payload, 'utf8')
+    await handle.sync()
+    await handle.close()
+    handle = null
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await fs.promises.rename(tempPath, filepath)
+        return
+      } catch (error) {
+        if (!ATOMIC_RENAME_RETRY_CODES.has(error.code) || attempt >= 7) throw error
+        await wait(Math.min(25 * (2 ** attempt), 1000))
+      }
+    }
+  } finally {
+    await handle?.close().catch(() => {})
+    await fs.promises.rm(tempPath, { force: true }).catch(() => {})
+  }
 }
 
 const readJson = async (filepath, fallback = null) => {

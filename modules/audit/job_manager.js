@@ -13,6 +13,9 @@ class AuditJobManager extends EventEmitter {
     this.logPath = path.join(this.storePath, 'audit-log.jsonl')
     this.coordinator = coordinator
     this.worker = null
+    this.stateWriteQueue = Promise.resolve()
+    this.pendingProgress = null
+    this.progressFlushPromise = null
     this.state = {
       jobId: null,
       status: 'idle',
@@ -50,14 +53,42 @@ class AuditJobManager extends EventEmitter {
 
   async persistState() {
     if (!this.state.jobId) return
-    this.state.updatedAt = new Date().toISOString()
-    await atomicWriteJson(path.join(this.jobsPath, this.state.jobId, 'state.json'), this.state)
+    const snapshot = { ...this.state, updatedAt: new Date().toISOString() }
+    this.state = snapshot
+    await atomicWriteJson(path.join(this.jobsPath, snapshot.jobId, 'state.json'), snapshot)
   }
 
-  async setState(patch) {
-    this.state = { ...this.state, ...patch, updatedAt: new Date().toISOString() }
-    await this.persistState()
-    this.emit('state', this.getState())
+  setState(patch) {
+    const operation = this.stateWriteQueue.then(async () => {
+      this.state = { ...this.state, ...patch, updatedAt: new Date().toISOString() }
+      await this.persistState()
+      const state = this.getState()
+      this.emit('state', state)
+      return state
+    })
+    this.stateWriteQueue = operation.catch(() => {})
+    return operation
+  }
+
+  queueProgress(patch) {
+    this.pendingProgress = { ...(this.pendingProgress || {}), ...patch }
+    if (!this.progressFlushPromise) {
+      this.progressFlushPromise = (async () => {
+        while (this.pendingProgress) {
+          const nextProgress = this.pendingProgress
+          this.pendingProgress = null
+          await this.setState(nextProgress)
+        }
+      })().finally(() => {
+        this.progressFlushPromise = null
+        if (this.pendingProgress) this.queueProgress({})
+      })
+    }
+    return this.progressFlushPromise
+  }
+
+  async flushProgress() {
+    await this.progressFlushPromise
   }
 
   async appendLog(message, level = 'info') {
@@ -70,6 +101,7 @@ class AuditJobManager extends EventEmitter {
   async start(options) {
     if (this.worker || this.state.status === 'running') throw new Error('AUDIT_ALREADY_RUNNING')
     const jobId = `${new Date().toISOString().replace(/[:.]/g, '-')}_${nanoid(8)}`
+    const previousReportPath = this.state.reportPath || this.state.previousReportPath || null
     this.coordinator.beginAudit(jobId)
     let worker
     try {
@@ -82,13 +114,17 @@ class AuditJobManager extends EventEmitter {
         completed: 0,
         total: 0,
         reportPath: null,
+        previousReportPath,
         error: null,
         summary: null,
         startedAt: new Date().toISOString(),
         mode: options.mode,
-        deepScope: options.deepScope
+        deepScope: options.deepScope,
+        onlineScope: options.onlineScope,
+        onlineTargetCount: Array.isArray(options.onlineBookIds) ? options.onlineBookIds.length : 0
       })
-      await this.appendLog(`启动${options.mode === 'deep' ? '深度' : '快速'}检查`)
+      const modeLabel = options.mode === 'deep' ? '深度' : options.mode === 'online' ? '在线来源' : '快速'
+      await this.appendLog(`启动${modeLabel}检查`)
       worker = new Worker(path.join(__dirname, 'audit_worker.js'), {
         workerData: { jobId, jobDir, options }
       })
@@ -100,21 +136,25 @@ class AuditJobManager extends EventEmitter {
     let workerFinished = false
     worker.on('message', async message => {
       if (message.type === 'progress') {
-        await this.setState({ phase: message.phase, completed: message.completed, total: message.total })
+        if (workerFinished || this.state.status !== 'running') return
+        await this.queueProgress({ phase: message.phase, completed: message.completed, total: message.total })
       } else if (message.type === 'log') {
         await this.appendLog(message.message)
       } else if (message.type === 'completed') {
         workerFinished = true
+        await this.flushProgress()
         await this.setState({ status: 'completed', phase: 'completed', reportPath: message.reportPath, summary: message.summary, completedAt: new Date().toISOString() })
         await this.appendLog('检查完成')
         this.finishWorker(jobId)
       } else if (message.type === 'cancelled') {
         workerFinished = true
+        await this.flushProgress()
         await this.setState({ status: 'interrupted', phase: 'cancelled', completedAt: new Date().toISOString() })
         await this.appendLog('检查已停止', 'warning')
         this.finishWorker(jobId)
       } else if (message.type === 'failed') {
         workerFinished = true
+        await this.flushProgress()
         await this.setState({ status: 'failed', phase: 'failed', error: message.error, completedAt: new Date().toISOString() })
         await this.appendLog(message.error, 'error')
         this.finishWorker(jobId)
@@ -123,6 +163,7 @@ class AuditJobManager extends EventEmitter {
     worker.on('error', async error => {
       if (workerFinished) return
       workerFinished = true
+      await this.flushProgress()
       await this.setState({ status: 'failed', phase: 'failed', error: error.stack || error.message })
       await this.appendLog(error.stack || error.message, 'error')
       this.finishWorker(jobId)
@@ -130,6 +171,7 @@ class AuditJobManager extends EventEmitter {
     worker.on('exit', async code => {
       if (!workerFinished && code !== 0) {
         workerFinished = true
+        await this.flushProgress()
         await this.setState({ status: 'failed', phase: 'failed', error: `Audit worker exited with code ${code}` })
         this.finishWorker(jobId)
       }
@@ -145,6 +187,7 @@ class AuditJobManager extends EventEmitter {
 
   async cancel() {
     if (!this.worker || this.state.status !== 'running') return this.getState()
+    await this.flushProgress()
     await this.setState({ status: 'cancelling', phase: 'cancelling' })
     this.worker.postMessage({ type: 'cancel' })
     return this.getState()
@@ -153,6 +196,7 @@ class AuditJobManager extends EventEmitter {
   async interruptForExit(timeoutMs = 5000) {
     if (!this.worker) return
     this.worker.postMessage({ type: 'cancel' })
+    await this.flushProgress()
     const worker = this.worker
     await Promise.race([
       new Promise(resolve => worker.once('exit', resolve)),
@@ -169,8 +213,9 @@ class AuditJobManager extends EventEmitter {
   }
 
   async getReport() {
-    if (!this.state.reportPath) return null
-    return await readJson(this.state.reportPath)
+    const reportPath = this.state.reportPath || this.state.previousReportPath
+    if (!reportPath) return null
+    return await readJson(reportPath)
   }
 
   async saveReview(review) {

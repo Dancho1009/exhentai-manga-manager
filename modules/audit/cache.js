@@ -22,9 +22,14 @@ class AuditCache {
         mtimeMs REAL NOT NULL,
         version INTEGER NOT NULL,
         archiveSha256 TEXT,
-        inspection TEXT
+        inspection TEXT,
+        ehviewerInspection TEXT
       )
     `)
+    const columns = await db.all('PRAGMA table_info(cache_entries)')
+    if (!columns.some(column => column.name === 'ehviewerInspection')) {
+      await db.exec('ALTER TABLE cache_entries ADD COLUMN ehviewerInspection TEXT')
+    }
     return new AuditCache(db)
   }
 
@@ -33,7 +38,8 @@ class AuditCache {
     if (!row || row.version !== CACHE_VERSION || row.size !== stat.size || Math.abs(row.mtimeMs - stat.mtimeMs) > 1) return null
     return {
       archiveSha256: row.archiveSha256 || null,
-      inspection: row.inspection ? JSON.parse(row.inspection) : null
+      inspection: row.inspection ? JSON.parse(row.inspection) : null,
+      ehviewerInspection: row.ehviewerInspection ? JSON.parse(row.ehviewerInspection) : null
     }
   }
 
@@ -41,21 +47,23 @@ class AuditCache {
     const previous = await this.get(book, stat) || {}
     const next = { ...previous, ...patch }
     await this.db.run(`
-      INSERT INTO cache_entries(filepath, size, mtimeMs, version, archiveSha256, inspection)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO cache_entries(filepath, size, mtimeMs, version, archiveSha256, inspection, ehviewerInspection)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(filepath) DO UPDATE SET
         size = excluded.size,
         mtimeMs = excluded.mtimeMs,
         version = excluded.version,
         archiveSha256 = excluded.archiveSha256,
-        inspection = excluded.inspection
+        inspection = excluded.inspection,
+        ehviewerInspection = excluded.ehviewerInspection
     `, [
       normalizePath(book.filepath),
       stat.size,
       stat.mtimeMs,
       CACHE_VERSION,
       next.archiveSha256 || null,
-      next.inspection ? JSON.stringify(next.inspection) : null
+      next.inspection ? JSON.stringify(next.inspection) : null,
+      next.ehviewerInspection ? JSON.stringify(next.ehviewerInspection) : null
     ])
     return next
   }

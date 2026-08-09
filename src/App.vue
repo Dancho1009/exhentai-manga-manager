@@ -147,7 +147,7 @@
         @preview-manga="previewManga"
         @search-from-tag="searchFromTag"
         @load-book-list="loadBookList"
-        @get-books-metadata="(bookList, gap, callback) => $refs.SearchDialogRef.getBooksMetadata(bookList, gap, callback)"
+        @get-books-metadata="(bookList, gap, callback, options) => $refs.SearchDialogRef.getBooksMetadata(bookList, gap, callback, options)"
         @handle-remove-book-display="handleRemoveBookDisplay"
       />
     </el-row>

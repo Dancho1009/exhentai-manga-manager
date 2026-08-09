@@ -102,7 +102,8 @@ const executeApprovedActions = async ({
   saveCollectionList,
   library,
   quarantineRoot,
-  rendererState
+  rendererState,
+  verifyRepairAction
 }) => {
   const report = await jobManager.getReport()
   const review = await jobManager.getReview()
@@ -153,8 +154,14 @@ const executeApprovedActions = async ({
 
     const totalActions = approvedAnomalies.length + duplicateActions.reduce((sum, action) => sum + action.quarantineItems.length, 0)
     await jobManager.setState({ phase: 'validating-approvals', total: totalActions, completed: 0 })
+    const preparedRepairs = new Map()
     for (const anomaly of approvedAnomalies) {
       await ensureExpectedFile({ filepath: anomaly.action.filepath, size: anomaly.action.expectedSize, mtimeMs: anomaly.action.expectedMtimeMs })
+      if (anomaly.action.type === 'repair-url' && verifyRepairAction) {
+        const prepared = await verifyRepairAction(anomaly.action)
+        if (!prepared?.valid) throw new Error(prepared?.error || `REPAIR_AVAILABILITY_CHANGED: ${anomaly.id}`)
+        preparedRepairs.set(anomaly.id, prepared)
+      }
     }
     for (const action of duplicateActions) {
       await ensureExpectedFile(action.keep)
@@ -187,10 +194,14 @@ const executeApprovedActions = async ({
       for (const anomaly of approvedAnomalies) {
         const book = await Manga.findByPk(anomaly.action.bookId, { transaction })
         if (!book) throw new Error(`BOOK_MISSING: ${anomaly.action.bookId}`)
-        await book.update({ url: anomaly.action.newUrl }, { transaction })
+        const prepared = preparedRepairs.get(anomaly.id)
+        await book.update({
+          ...(prepared?.metadata || {}),
+          url: prepared?.newUrl || anomaly.action.newUrl
+        }, { transaction })
         completed += 1
         await jobManager.setState({ phase: 'writing-metadata', completed, total: totalActions })
-        await writeActionLog({ status: 'manga-written', type: 'repair-url', bookId: book.id, oldUrl: anomaly.action.currentUrl, newUrl: anomaly.action.newUrl })
+        await writeActionLog({ status: 'manga-written', type: 'repair-url', bookId: book.id, oldUrl: anomaly.action.currentUrl, newUrl: prepared?.newUrl || anomaly.action.newUrl })
       }
 
       for (const action of duplicateActions) {

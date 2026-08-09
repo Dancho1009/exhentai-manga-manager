@@ -106,6 +106,49 @@
               <el-descriptions-item :label="$t('m.englishTitle')+':'">{{bookDetail.title}}</el-descriptions-item>
               <el-descriptions-item :label="$t('m.filename')+':'">{{returnFileNameWithExt(bookDetail.filepath)}}</el-descriptions-item>
               <el-descriptions-item :label="$t('m.fileLocation')+':'">{{returnDirname(bookDetail.filepath)}}</el-descriptions-item>
+              <el-descriptions-item v-if="showEhAvailability()" :label="$t('audit.sourceAvailability')+':'">
+                <div class="source-availability">
+                  <div class="source-availability-toolbar">
+                    <el-button
+                      text circle :icon="Refresh" :loading="availabilityLoading"
+                      :title="$t('audit.refreshAvailability')"
+                      @click="refreshEhAvailability(bookDetail, true)"
+                    />
+                  </div>
+                  <div v-if="ehSources.current.url" class="source-availability-group">
+                    <div class="source-url url-link" @click="openUrl(ehSources.current.url)">
+                      {{$t('audit.currentUrl')}}: {{ehSources.current.url}}
+                    </div>
+                    <div v-if="ehSources.current.preferredUrl && ehSources.current.preferredUrl !== ehSources.current.url" class="source-url url-link" @click="openUrl(ehSources.current.preferredUrl)">
+                      {{$t('audit.preferredUrl')}}: {{ehSources.current.preferredUrl}}
+                    </div>
+                    <div class="source-site-list">
+                      <span v-for="site in ehSiteNames" :key="`current-${site}`">
+                        {{siteLabel(site)}}
+                        <el-tag size="small" :type="availabilityTagType(ehSources.current.availability?.sites?.[site]?.status)">
+                          {{availabilityLabel(ehSources.current.availability?.sites?.[site])}}
+                        </el-tag>
+                      </span>
+                    </div>
+                  </div>
+                  <div v-if="ehSources.ehviewer.url && !sameEhIdentity(ehSources.current.url, ehSources.ehviewer.url)" class="source-availability-group">
+                    <div class="source-url url-link" @click="openUrl(ehSources.ehviewer.url)">
+                      {{$t('audit.ehviewerUrl')}}: {{ehSources.ehviewer.url}}
+                    </div>
+                    <div v-if="ehSources.ehviewer.preferredUrl && ehSources.ehviewer.preferredUrl !== ehSources.ehviewer.url" class="source-url url-link" @click="openUrl(ehSources.ehviewer.preferredUrl)">
+                      {{$t('audit.preferredUrl')}}: {{ehSources.ehviewer.preferredUrl}}
+                    </div>
+                    <div class="source-site-list">
+                      <span v-for="site in ehSiteNames" :key="`ehviewer-${site}`">
+                        {{siteLabel(site)}}
+                        <el-tag size="small" :type="availabilityTagType(ehSources.ehviewer.availability?.sites?.[site]?.status)">
+                          {{availabilityLabel(ehSources.ehviewer.availability?.sites?.[site])}}
+                        </el-tag>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </el-descriptions-item>
               <el-descriptions-item :label="$t('m.category')+':'">
                 <el-tag type="info" class="book-tag" @click="$emit('searchFromTag', `cat:${bookDetail.category}`)">{{bookDetail.category}}</el-tag>
               </el-descriptions-item>
@@ -135,6 +178,7 @@
       </el-col>
       <el-col :span="8" v-if="setting.showComment">
         <el-scrollbar class="book-comment-frame">
+          <el-empty v-if="commentNotice" :description="commentNotice" :image-size="64" />
           <div class="book-comment" v-for="comment in comments" :key="comment.id">
             <div class="book-comment-postby">{{comment.author}}<span class="book-comment-score">{{comment.score}}</span></div>
             <p class="book-comment-content" @contextmenu="onMangaCommentContextMenu($event, comment)">{{comment.content}}</p>
@@ -149,6 +193,7 @@
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
+import { Refresh } from '@element-plus/icons-vue'
 import { CaretRight20Regular, CaretLeft20Regular } from '@vicons/fluent'
 import { BookmarkTwotone } from '@vicons/material'
 import { nanoid } from 'nanoid'
@@ -193,16 +238,109 @@ const emit = defineEmits([
 ])
 
 const dialogVisibleBookDetail = ref(false)
+const ehSiteNames = ['ehentai', 'exhentai']
+const emptyEhSource = () => ({ url: null, preferredUrl: null, availability: null })
+const ehSources = ref({ current: emptyEhSource(), ehviewer: emptyEhSource() })
+const availabilityLoading = ref(false)
+const commentNotice = ref('')
+let availabilityRequestId = 0
+
+const isEhentaiUrl = url => /(?:e-hentai\.org|exhentai\.org)\/g\/\d+\/[0-9a-z]+/i.test(String(url || ''))
+const showEhAvailability = () => isEhentaiUrl(bookDetail.value?.url) || Boolean(ehSources.value.ehviewer.url)
+
+const sameEhIdentity = (first, second) => {
+  const getIdentity = value => String(value || '').match(/\/g\/(\d+)\/([0-9a-z]+)/i)?.slice(1).map(part => part.toLowerCase())
+  const firstIdentity = getIdentity(first)
+  const secondIdentity = getIdentity(second)
+  return Boolean(firstIdentity && secondIdentity && firstIdentity[0] === secondIdentity[0] && firstIdentity[1] === secondIdentity[1])
+}
+
+const siteLabel = site => site === 'ehentai' ? 'E-Hentai' : 'ExHentai'
+const availabilityTagType = status => ({
+  available: 'success',
+  copyright: 'danger',
+  'generic-unavailable': 'danger',
+  'gallery-not-found': 'danger',
+  'geo-blocked': 'warning',
+  'auth-required': 'warning',
+  'ip-banned': 'warning',
+  'service-unavailable': 'warning',
+  'network-error': 'info',
+  unknown: 'info',
+  unchecked: 'info'
+})[status] || 'info'
+
+const availabilityLabel = site => {
+  const status = site?.status || 'unchecked'
+  const detail = site?.claimant || site?.region
+  const label = t(`audit.availability_${status}`)
+  return detail ? `${label}: ${detail}` : label
+}
+
+const getPreferredAvailableUrl = availability => {
+  if (!availability) return null
+  return ehSiteNames.some(site => availability.sites?.[site]?.status === 'available')
+    ? availability.preferredUrl
+    : null
+}
+
+const refreshEhAvailability = async (book, force = false) => {
+  const requestId = ++availabilityRequestId
+  availabilityLoading.value = true
+  try {
+    const currentUrl = isEhentaiUrl(book?.url) ? book.url : null
+    const ehviewer = await ipcRenderer.invoke('get-ehviewer-data', book?.filepath)
+    const ehviewerUrl = ehviewer?.gid && ehviewer?.token
+      ? `https://exhentai.org/g/${ehviewer.gid}/${ehviewer.token}/`
+      : null
+    const currentAvailability = currentUrl
+      ? await ipcRenderer.invoke('ehentai:get-availability', { url: currentUrl, strategy: 'both', force })
+      : null
+    const ehviewerAvailability = ehviewerUrl
+      ? sameEhIdentity(currentUrl, ehviewerUrl)
+        ? currentAvailability
+        : await ipcRenderer.invoke('ehentai:get-availability', { url: ehviewerUrl, strategy: 'both', force })
+      : null
+    if (requestId !== availabilityRequestId) return ehSources.value
+    ehSources.value = {
+      current: {
+        url: currentUrl,
+        preferredUrl: getPreferredAvailableUrl(currentAvailability),
+        availability: currentAvailability
+      },
+      ehviewer: {
+        url: ehviewerUrl,
+        preferredUrl: getPreferredAvailableUrl(ehviewerAvailability),
+        availability: ehviewerAvailability
+      }
+    }
+    return ehSources.value
+  } catch (error) {
+    if (requestId === availabilityRequestId) {
+      ehSources.value = {
+        current: { url: isEhentaiUrl(book?.url) ? book.url : null, preferredUrl: null, availability: null },
+        ehviewer: emptyEhSource()
+      }
+    }
+    console.log(error)
+    return ehSources.value
+  } finally {
+    if (requestId === availabilityRequestId) availabilityLoading.value = false
+  }
+}
 
 const openBookDetail = (book, addToHistory = true) => {
   bookDetail.value = book
   dialogVisibleBookDetail.value = true
   comments.value = []
-  if (setting.value.showComment) getComments(book)
+  commentNotice.value = ''
+  ehSources.value = { current: emptyEhSource(), ehviewer: emptyEhSource() }
+  if (setting.value.showComment && (isEhentaiUrl(book?.url) || isNhentaiUrl(book?.url))) getComments(book)
+  else if (!isNhentaiUrl(book?.url)) refreshEhAvailability(book)
   if (addToHistory) emit('addToHistory', book.id)
 }
 const openUrl = (url) => {
-  ipcRenderer.invoke('open-url', url)
+  if (url) ipcRenderer.invoke('open-url', url)
 }
 const triggerHiddenBook = async (book) => {
   book.hiddenBook = !book.hiddenBook
@@ -273,6 +411,7 @@ const triggerShowComment = () => {
     setting.value.showComment = false
   } else {
     comments.value = []
+    commentNotice.value = ''
     getComments(bookDetail.value)
     setting.value.showComment = true
   }
@@ -308,20 +447,24 @@ const getNhentaiComments = async (book) => {
   }
 }
 
-const getEhComments = (url) => {
+const getEhComments = async (url) => {
   if (url) {
-    ipcRenderer.invoke('get-ex-webpage', {
-      url,
-      cookie: appStore.cookie
-    })
-    .then(res => {
+    try {
+      const page = await ipcRenderer.invoke('ehentai:get-page', { url })
       comments.value = []
-      const commentElements = new DOMParser().parseFromString(res, 'text/html').querySelectorAll('#cdiv>.c1')
+      if (page?.status !== 'available') {
+        commentNotice.value = page?.status === 'copyright'
+          ? t('audit.commentsCopyright', { claimant: page.claimant || t('audit.unknownClaimant') })
+          : t('audit.commentsUnavailable', { status: availabilityLabel(page) })
+        return
+      }
+      if (!page.html) throw new Error('EMPTY_GALLERY_RESPONSE')
+      const commentElements = new DOMParser().parseFromString(page.html, 'text/html').querySelectorAll('#cdiv>.c1')
       commentElements.forEach(e => {
-        const author = e.querySelector('.c2 .c3').textContent
+        const author = e.querySelector('.c2 .c3')?.textContent || ''
         const scoreTail = e.querySelectorAll('.c2 .nosel')
-        const score = scoreTail[scoreTail.length - 1].textContent
-        let content = e.querySelector('.c6').innerHTML
+        const score = scoreTail[scoreTail.length - 1]?.textContent || ''
+        let content = e.querySelector('.c6')?.innerHTML || ''
         const foundLink = _.uniqBy(linkify.find(content.replace(/[<"]/gi, ' '), 'url'), 'href')
         content = content.replace(/<br>/gi, '\n')
         content = content.replace(/<.+?>/gi, '')
@@ -330,26 +473,47 @@ const getEhComments = (url) => {
           author, score, content, id: nanoid(), foundLink
         })
       })
-    })
-    .catch(err => {
+    } catch (err) {
       comments.value = []
       console.log(err)
-    })
+    }
   } else {
     comments.value = []
   }
 }
 
-const getComments = (book) => {
+const availabilityNotice = availability => {
+  const sites = Object.values(availability?.sites || {})
+  const copyright = sites.find(site => site.status === 'copyright')
+  if (copyright) return t('audit.commentsCopyright', { claimant: copyright.claimant || t('audit.unknownClaimant') })
+  const geo = sites.find(site => site.status === 'geo-blocked')
+  if (geo) return t('audit.commentsUnavailable', { status: availabilityLabel(geo) })
+  const known = sites.find(site => site.status && site.status !== 'unchecked')
+  return t('audit.commentsUnavailable', { status: availabilityLabel(known) })
+}
+
+const getComments = async (book) => {
+  commentNotice.value = ''
   if (!book?.url) {
     comments.value = []
     return
   }
   if (isNhentaiUrl(book.url)) {
-    getNhentaiComments(book)
+    await getNhentaiComments(book)
     return
   }
-  getEhComments(book.url)
+  if (isEhentaiUrl(book.url)) {
+    const sources = await refreshEhAvailability(book)
+    const current = sources.current
+    if (!current.preferredUrl) {
+      comments.value = []
+      commentNotice.value = availabilityNotice(current.availability)
+      return
+    }
+    await getEhComments(current.preferredUrl)
+    return
+  }
+  await getEhComments(book.url)
 }
 
 const editingTag = ref(false)
@@ -552,6 +716,28 @@ defineExpose({
   overflow-y: auto
   padding-right: 10px
   text-align: left
+.source-availability
+  position: relative
+  width: 100%
+  .source-availability-toolbar
+    position: absolute
+    right: 0
+    top: -8px
+  .source-availability-group
+    padding-right: 32px
+    margin-bottom: 8px
+  .source-url
+    overflow-wrap: anywhere
+    color: var(--el-color-primary)
+    margin-bottom: 4px
+  .source-site-list
+    display: flex
+    flex-wrap: wrap
+    gap: 8px 12px
+    span
+      display: inline-flex
+      align-items: center
+      gap: 4px
 .book-tag
   margin: 4px 6px
   cursor: pointer

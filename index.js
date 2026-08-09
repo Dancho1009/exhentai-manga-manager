@@ -21,6 +21,18 @@ const { prepareMangaModel, prepareMetadataModel } = require('./modules/database'
 const { prepareTemplate } = require('./modules/prepare_menu.js')
 const { getRootPath } = require('./modules/utils.js')
 const { searchNhentai, getNhentaiMetadata, getNhentaiComments } = require('./modules/nhentai.js')
+const {
+  checkGallerySites,
+  getGalleryPage: getEhentaiGalleryPage,
+  getGalleryMetadata: getEhentaiGalleryMetadata,
+  extractGalleryIdentity: extractEhentaiIdentity,
+  getSiteFromUrl: getEhentaiSiteFromUrl,
+  isIdentityWebAvailable,
+  hasUncertainSiteStatus,
+  buildCookie: buildEhentaiCookie,
+  toManagerMetadata: toEhentaiManagerMetadata
+} = require('./modules/ehentai.js')
+const { EhentaiAvailabilityCache } = require('./modules/ehentai_availability_cache.js')
 const { LibraryTaskCoordinator } = require('./modules/audit/task_coordinator.js')
 const { AuditJobManager } = require('./modules/audit/job_manager.js')
 const { executeApprovedActions } = require('./modules/audit/action_executor.js')
@@ -58,6 +70,15 @@ const normalizeScanConcurrency = (value) => {
 preparePath()
 let setting = prepareSetting()
 let collectionList = prepareCollectionList()
+
+const withEhentaiAvailabilityCache = async task => {
+  const cache = await EhentaiAvailabilityCache.open(path.join(STORE_PATH, 'audit'))
+  try {
+    return await task(cache)
+  } finally {
+    await cache.close()
+  }
+}
 
 const Manga = prepareMangaModel(path.join(STORE_PATH, './database.sqlite'))
 let metadataSqliteFile
@@ -979,11 +1000,45 @@ ipcMain.handle('nhentai-comments', async (event, { id, url, filepath, title, pag
   return await getNhentaiComments({ id, url, filepath, title, page, perPage, setting })
 })
 
+ipcMain.handle('ehentai:get-availability', async (event, request = {}) => {
+  const identity = request.gid && request.token
+    ? { gid: request.gid, token: request.token }
+    : extractEhentaiIdentity(request.url)
+  if (!identity) throw new Error('INVALID_EHENTAI_URL')
+  return await withEhentaiAvailabilityCache(cache => checkGallerySites({
+    ...identity,
+    preferredSite: request.preferredSite || getEhentaiSiteFromUrl(request.url),
+    strategy: request.strategy === 'both' ? 'both' : 'fallback',
+    force: Boolean(request.force),
+    setting,
+    cache
+  }))
+})
+
+ipcMain.handle('ehentai:get-metadata', async (event, request = {}) => {
+  return await withEhentaiAvailabilityCache(cache => getEhentaiGalleryMetadata({
+    url: request.url,
+    gid: request.gid,
+    token: request.token,
+    preferredSite: request.preferredSite,
+    forceAvailability: Boolean(request.forceAvailability),
+    setting,
+    cache
+  }))
+})
+
+ipcMain.handle('ehentai:get-page', async (event, request = {}) => {
+  return await getEhentaiGalleryPage({ url: request.url, setting })
+})
+
 ipcMain.handle('get-ex-webpage', async (event, { url, cookie }) => {
+  const requestCookie = /(?:e-hentai\.org|exhentai\.org)/i.test(String(url || ''))
+    ? buildEhentaiCookie(setting)
+    : cookie
   if (setting.proxy) {
     return await fetch(url, {
       headers: {
-        Cookie: cookie
+        Cookie: requestCookie
       },
       agent: new HttpsProxyAgent(setting.proxy)
     })
@@ -998,7 +1053,7 @@ ipcMain.handle('get-ex-webpage', async (event, { url, cookie }) => {
   } else {
     return await fetch(url, {
       headers: {
-        Cookie: cookie
+        Cookie: requestCookie
       }
     })
     .then(async res => {
@@ -1447,20 +1502,54 @@ ipcMain.handle('audit:open-window', async () => {
 ipcMain.handle('audit:get-state', async () => auditJobManager.getState())
 ipcMain.handle('audit:get-report', async () => await auditJobManager.getReport())
 ipcMain.handle('audit:get-review', async () => await auditJobManager.getReview())
+ipcMain.handle('audit:get-book-preview', async (event, bookId) => {
+  await databaseReady
+  const normalizedBookId = String(bookId || '').trim()
+  if (!normalizedBookId || normalizedBookId.length > 128) return null
+  const manga = await Manga.findByPk(normalizedBookId)
+  if (!manga) return null
+  const raw = manga.toJSON()
+  const shared = raw.hash ? await Metadata.findByPk(raw.hash) : null
+  const effective = { ...raw, ...(shared?.toJSON() || {}) }
+  return {
+    id: raw.id,
+    title: effective.title || raw.title || '',
+    title_jpn: effective.title_jpn || raw.title_jpn || '',
+    coverPath: raw.coverPath || null
+  }
+})
 
 ipcMain.handle('audit:start', async (event, request = {}) => {
   await databaseReady
-  const mode = request.mode === 'deep' ? 'deep' : 'quick'
+  const mode = ['deep', 'online'].includes(request.mode) ? request.mode : 'quick'
   const deepScope = ['changed', 'anomalies', 'all'].includes(request.deepScope) ? request.deepScope : 'anomalies'
+  const onlineScope = ['conflicts', 'urls', 'ehviewer'].includes(request.onlineScope) ? request.onlineScope : 'conflicts'
+  const onlineBookIds = Array.isArray(request.onlineBookIds)
+    ? [...new Set(request.onlineBookIds
+      .filter(value => typeof value === 'string' || typeof value === 'number')
+      .map(value => String(value).trim())
+      .filter(value => value && value.length <= 128))].slice(0, 20000)
+    : []
   return await auditJobManager.start({
     mode,
     deepScope,
+    onlineScope,
+    onlineBookIds,
+    forceOnline: Boolean(request.forceOnline),
     library: setting.library,
     databasePath: path.join(STORE_PATH, 'database.sqlite'),
     metadataPath: metadataSqliteFile,
     auditStorePath: path.join(STORE_PATH, 'audit'),
     excludeFile: setting.excludeFile,
-    sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe')
+    sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe'),
+    ehentaiSetting: {
+      proxy: setting.proxy,
+      requireGap: setting.requireGap,
+      igneous: setting.igneous,
+      ipb_pass_hash: setting.ipb_pass_hash,
+      ipb_member_id: setting.ipb_member_id,
+      star: setting.star
+    }
   })
 })
 
@@ -1482,7 +1571,50 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
     saveCollectionList: saveCollectionListToFile,
     library: setting.library,
     quarantineRoot,
-    rendererState
+    rendererState,
+    verifyRepairAction: async action => await withEhentaiAvailabilityCache(async cache => {
+      const candidateIdentity = extractEhentaiIdentity(action.newUrl)
+      if (!candidateIdentity) return { valid: false, error: 'INVALID_REPAIR_CANDIDATE_URL' }
+      const candidate = await checkGallerySites({
+        ...candidateIdentity,
+        preferredSite: getEhentaiSiteFromUrl(action.newUrl) || 'exhentai',
+        strategy: 'both',
+        force: true,
+        setting,
+        cache
+      })
+      if (!isIdentityWebAvailable(candidate)) return { valid: false, error: 'REPAIR_CANDIDATE_UNAVAILABLE' }
+      const currentIdentity = extractEhentaiIdentity(action.currentUrl)
+      const identityChanged = currentIdentity && (
+        currentIdentity.gid !== candidateIdentity.gid || currentIdentity.token !== candidateIdentity.token
+      )
+      if (identityChanged) {
+        const current = await checkGallerySites({
+          ...currentIdentity,
+          preferredSite: getEhentaiSiteFromUrl(action.currentUrl) || 'exhentai',
+          strategy: 'both',
+          force: true,
+          setting,
+          cache
+        })
+        if (isIdentityWebAvailable(current) || hasUncertainSiteStatus(current)) {
+          return { valid: false, error: 'CURRENT_GALLERY_IS_AVAILABLE_OR_UNCERTAIN' }
+        }
+      }
+      const metadataResult = await getEhentaiGalleryMetadata({
+        ...candidateIdentity,
+        preferredSite: candidate.preferredSite,
+        forceAvailability: false,
+        setting,
+        cache
+      })
+      if (metadataResult.gdata.status !== 'available') return { valid: false, error: 'REPAIR_GDATA_UNAVAILABLE' }
+      return {
+        valid: true,
+        newUrl: metadataResult.preferredUrl,
+        metadata: toEhentaiManagerMetadata(metadataResult.gdata.metadata)
+      }
+    })
   })
   collectionList = result.collectionList
   if (mainWindow && !mainWindow.isDestroyed()) {

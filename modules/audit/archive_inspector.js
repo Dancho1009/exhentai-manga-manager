@@ -202,4 +202,88 @@ const inspectBookContent = async (book, options = {}) => {
   }
 }
 
-module.exports = { inspectBookContent }
+const inspectZipEhviewer = async filepath => {
+  const zipfile = await openZip(filepath)
+  const entries = []
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    const fail = error => {
+      if (settled) return
+      settled = true
+      try { zipfile.close() } catch {}
+      reject(error)
+    }
+    zipfile.on('error', fail)
+    zipfile.on('entry', async entry => {
+      try {
+        const entryPath = normalizeEntryPath(entry.fileName)
+        if (!entryPath.includes('__MACOSX') && path.posix.basename(entryPath) === '.ehviewer') {
+          const stream = await openZipEntry(zipfile, entry)
+          const digest = await digestStream(stream, true)
+          entries.push({ path: entryPath, ehviewerBuffer: digest.buffer })
+        }
+        zipfile.readEntry()
+      } catch (error) {
+        fail(error)
+      }
+    })
+    zipfile.on('end', () => {
+      if (settled) return
+      settled = true
+      resolve(resolveEhviewer(entries))
+    })
+    zipfile.readEntry()
+  })
+}
+
+const inspect7zEhviewer = async (filepath, sevenZipPath) => {
+  if (!sevenZipPath) throw new Error('7z executable is unavailable')
+  const output = await run7z(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
+  const markerIndex = output.indexOf('----------')
+  const detail = markerIndex >= 0 ? output.slice(markerIndex) : output
+  const candidates = detail.split(/\r?\n\r?\n/).map(block => {
+    const record = {}
+    for (const line of block.split(/\r?\n/)) {
+      const separator = line.indexOf(' = ')
+      if (separator > 0) record[line.slice(0, separator)] = line.slice(separator + 3)
+    }
+    return record
+  }).filter(record => record.Path && record.Folder !== '+')
+    .map(record => normalizeEntryPath(record.Path))
+    .filter(entryPath => !entryPath.includes('__MACOSX') && path.posix.basename(entryPath) === '.ehviewer')
+  const entries = []
+  for (const entryPath of candidates) {
+    entries.push({
+      path: entryPath,
+      ehviewerBuffer: await run7z(sevenZipPath, ['x', '-so', '-p123456', '--', filepath, entryPath], true)
+    })
+  }
+  return resolveEhviewer(entries)
+}
+
+const inspectFolderEhviewer = async folderpath => {
+  const entries = []
+  const walk = async (current, relative = '') => {
+    const dirents = await fs.promises.readdir(current, { withFileTypes: true })
+    for (const dirent of dirents) {
+      if (dirent.name === '__MACOSX') continue
+      const nextRelative = normalizeEntryPath(path.posix.join(relative, dirent.name))
+      const nextPath = path.join(current, dirent.name)
+      if (dirent.isDirectory()) await walk(nextPath, nextRelative)
+      else if (dirent.isFile() && dirent.name === '.ehviewer') {
+        entries.push({ path: nextRelative, ehviewerBuffer: await fs.promises.readFile(nextPath) })
+      }
+    }
+  }
+  await walk(folderpath)
+  return resolveEhviewer(entries)
+}
+
+const inspectEhviewerIdentity = async (book, options = {}) => {
+  const extension = path.extname(book.filepath).toLowerCase()
+  if (book.type === 'folder') return await inspectFolderEhviewer(book.filepath)
+  if (extension === '.zip' || extension === '.cbz') return await inspectZipEhviewer(book.filepath)
+  return await inspect7zEhviewer(book.filepath, options.sevenZipPath)
+}
+
+module.exports = { inspectBookContent, inspectEhviewerIdentity }

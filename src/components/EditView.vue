@@ -530,13 +530,9 @@ const groupReGetMetadata = async () => {
     try {
       updateTagsLoading.value = true
       const bookList = _.compact(selectBookList.value.map(id => _.find(displayBookList.value, { id })))
-      for (const book of bookList) {
-        book.url = ''
-        await saveBook(book)
-      }
       emit('getBooksMetadata', bookList, setting.value.requireGap || 15000, () => {
         updateTagsLoading.value = false
-      })
+      }, { forceSearch: true })
     } catch (error) {
       console.error(error)
       updateTagsLoading.value = false

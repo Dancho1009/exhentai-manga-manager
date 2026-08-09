@@ -100,17 +100,16 @@ const openSearchDialog = (book, server) => {
 
 
 
-const resolveSearchResult = (bookId, url, type) => {
+const resolveSearchResult = async (bookId, url, type) => {
   const book = _.find(bookList.value, {id: bookId})
   if (type === 'hentag') {
     book.url = url
-    getBookInfoFromHentag(book)
+    await getBookInfoFromHentag(book)
   } else if (type === 'e-hentai') {
-    book.url = url
-    getBookInfoFromEh(book)
+    await getBookInfoFromEh(book, url)
   } else if (type === 'nhentai') {
     book.url = url
-    getBookInfoFromNhentai(book)
+    await getBookInfoFromNhentai(book)
   }
   dialogVisibleEhSearch.value = false
 }
@@ -193,40 +192,57 @@ const applyBookInfoFromEh = (book, metadata) => {
   book.status = 'tagged'
 }
 
-const applyBookInfoFromEhFailure = (book, res) => {
-  if (_.includes(res, 'Your IP address has been')) {
-    book.status = 'non-tag'
+const summarizeEhResult = result => {
+  const statuses = Object.values(result?.sites || {}).map(site => site.status)
+  if (['network-error', 'service-unavailable', 'unknown'].includes(result?.gdata?.status)) return 'network'
+  if (statuses.includes('available')) return 'success'
+  if (statuses.includes('auth-required') || statuses.includes('ip-banned')) return 'blocked'
+  if (statuses.some(status => ['network-error', 'service-unavailable', 'unknown'].includes(status))) return 'network'
+  if (statuses.includes('copyright')) return 'copyright'
+  return 'unavailable'
+}
+
+const applyBookInfoFromEhFailure = (result, silent = false) => {
+  const statuses = Object.values(result?.sites || {}).map(site => site.status)
+  if (statuses.includes('ip-banned')) {
     printMessage('error', t('c.ipBanned'))
     serviceAvailable.value = false
-  } else {
-    book.status = 'tag-failed'
+  } else if (statuses.includes('auth-required')) {
+    if (!silent) printMessage('error', t('c.ehentaiAuthRequired'))
+    serviceAvailable.value = false
+  } else if (!silent) {
     printMessage('error', t('c.getMetadataFailed'))
   }
 }
 
-const fetchAndApplyBookInfoFromEh = async (book) => {
-  const match = /(\d+)\/([a-z0-9]+)/.exec(book.url)
-  const res = await ipcRenderer.invoke('post-data-ex', {
-    url: 'https://api.e-hentai.org/api.php',
-    data: {
-      'method': 'gdata',
-      'gidlist': [
-          [+match[1], match[2]]
-      ],
-      'namespace': 1
-    }
+const fetchAndApplyBookInfoFromEh = async (book, candidateUrl = book.url, { silent = false } = {}) => {
+  const result = await ipcRenderer.invoke('ehentai:get-metadata', {
+    url: candidateUrl
   })
-  try {
-    applyBookInfoFromEh(book, JSON.parse(res).gmetadata[0])
-  } catch (e) {
-    console.log(e)
-    applyBookInfoFromEhFailure(book, res)
+  const status = summarizeEhResult(result)
+  const hasAvailablePage = Object.values(result?.sites || {}).some(site => site.status === 'available')
+  const hasUncertainPage = Object.values(result?.sites || {}).some(site =>
+    ['auth-required', 'ip-banned', 'service-unavailable', 'network-error', 'unknown'].includes(site.status)
+  )
+  if (result?.gdata?.status !== 'available' || !result.gdata.metadata || (!hasAvailablePage && hasUncertainPage)) {
+    applyBookInfoFromEhFailure(result, silent)
+    return { changed: false, status, result }
   }
+  const nextBook = _.cloneDeep(book)
+  nextBook.url = result.preferredUrl || candidateUrl
+  applyBookInfoFromEh(nextBook, result.gdata.metadata)
+  _.assign(book, nextBook)
+  if (!silent && status === 'copyright') {
+    const claimant = Object.values(result.sites).find(site => site.status === 'copyright')?.claimant || ''
+    printMessage('warning', t('c.ehentaiCopyright', { claimant }))
+  }
+  return { changed: true, status, result }
 }
 
-const getBookInfoFromEh = async (book) => {
-  await fetchAndApplyBookInfoFromEh(book)
-  await saveBook(book)
+const getBookInfoFromEh = async (book, candidateUrl = book.url) => {
+  const outcome = await fetchAndApplyBookInfoFromEh(book, candidateUrl)
+  if (outcome.changed) await saveBook(book)
+  return outcome
 }
 
 const isNhentaiMissingApiKeyError = (error) => {
@@ -286,12 +302,13 @@ const getBookInfo = (book) => {
   }
   return Promise.resolve()
 }
-const getBooksMetadata = async (bookList, gap, callback) => {
+const getBooksMetadata = async (bookList, gap, callback, options = {}) => {
   const server = setting.value.defaultScraper || 'exhentai'
   serviceAvailable.value = true
   const timer = ms => new Promise(res => setTimeout(res, ms))
   const saveQueue = createSerialQueue()
   let completedCount = 0
+  const stats = { success: 0, copyright: 0, unavailable: 0, blocked: 0, network: 0 }
   try {
     await runWithTaskMessage({
       message: t('c.gettingMetadata'),
@@ -303,7 +320,8 @@ const getBooksMetadata = async (bookList, gap, callback) => {
         await runSerially(bookList, async (book) => {
           try {
             if (!serviceAvailable.value) return
-            if (!book.url) {
+            let outcome = { changed: false, status: 'unavailable' }
+            if (!book.url || options.forceSearch) {
               const resultList = await getBookListFromWebRaw(
                 book.hash.toUpperCase(),
                 returnTrimFileName(book),
@@ -311,17 +329,17 @@ const getBooksMetadata = async (bookList, gap, callback) => {
                 book.filepath
               )
               if (resultList?.[0]) {
-                const changed = await fetchAndApplySearchResult(book, resultList[0].url, resultList[0].type)
-                if (changed) await saveQueue(() => saveBook(book))
+                outcome = await fetchAndApplySearchResult(book, resultList[0].url, resultList[0].type, { silent: true })
+                if (outcome.changed) await saveQueue(() => saveBook(book))
               }
             } else {
-              const changed = await fetchAndApplyBookInfo(book)
-              if (changed) await saveQueue(() => saveBook(book))
+              outcome = await fetchAndApplyBookInfo(book, { silent: true })
+              if (outcome.changed) await saveQueue(() => saveBook(book))
             }
+            stats[outcome.status] = (stats[outcome.status] || 0) + 1
             await timer(gap)
           } catch (error) {
-            book.status = 'tag-failed'
-            await saveQueue(() => saveBook(book))
+            stats.network += 1
             console.error(error)
           } finally {
             completedCount += 1
@@ -330,40 +348,39 @@ const getBooksMetadata = async (bookList, gap, callback) => {
         }, () => serviceAvailable.value)
       }
     })
-    printMessage('success', t('c.getMetadataComplete'))
+    printMessage('success', t('c.metadataBatchSummary', stats))
   } finally {
     ipcRenderer.invoke('set-progress-bar', -1)
     if (callback) callback()
   }
 }
 
-const fetchAndApplyBookInfo = async (book) => {
+const fetchAndApplyBookInfo = async (book, options = {}) => {
   if (book.url.startsWith('https://hentag.com')) {
     await fetchAndApplyBookInfoFromHentag(book)
-    return true
+    return { changed: true, status: 'success' }
   } else if (book.url.includes('exhentai') || book.url.includes('e-hentai')) {
-    await fetchAndApplyBookInfoFromEh(book)
-    return true
+    return await fetchAndApplyBookInfoFromEh(book, book.url, options)
   } else if (book.url.includes('nhentai.net/g/')) {
-    return await fetchAndApplyBookInfoFromNhentai(book)
+    const changed = await fetchAndApplyBookInfoFromNhentai(book)
+    return { changed, status: changed ? 'success' : 'unavailable' }
   }
-  return false
+  return { changed: false, status: 'unavailable' }
 }
 
-const fetchAndApplySearchResult = async (book, url, type) => {
+const fetchAndApplySearchResult = async (book, url, type, options = {}) => {
   if (type === 'hentag') {
     book.url = url
     await fetchAndApplyBookInfoFromHentag(book)
-    return true
+    return { changed: true, status: 'success' }
   } else if (type === 'e-hentai') {
-    book.url = url
-    await fetchAndApplyBookInfoFromEh(book)
-    return true
+    return await fetchAndApplyBookInfoFromEh(book, url, options)
   } else if (type === 'nhentai') {
     book.url = url
-    return await fetchAndApplyBookInfoFromNhentai(book)
+    const changed = await fetchAndApplyBookInfoFromNhentai(book)
+    return { changed, status: changed ? 'success' : 'unavailable' }
   }
-  return false
+  return { changed: false, status: 'unavailable' }
 }
 
 const getBookListFromWebRaw = async (bookHash, title, server = 'e-hentai', bookPath = '') => {
