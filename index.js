@@ -20,6 +20,7 @@ const { globSync } = require('glob')
 const { prepareMangaModel, prepareMetadataModel } = require('./modules/database')
 const {
   createBookDetailService,
+  createBookDetailWindowRegistry,
   normalizeBookId,
   normalizeBookDetailContext
 } = require('./modules/book_detail.js')
@@ -100,7 +101,7 @@ const auditJobManager = new AuditJobManager({ storePath: STORE_PATH, coordinator
 const sendAuditState = state => {
   if (auditWindow && !auditWindow.isDestroyed()) auditWindow.webContents.send('audit:state', state)
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('audit:lock-state', state.lock)
-  if (bookDetailWindow && !bookDetailWindow.isDestroyed()) bookDetailWindow.webContents.send('book-detail:lock-state', state.lock)
+  bookDetailWindowRegistry?.broadcast('book-detail:lock-state', state.lock)
 }
 auditJobManager.on('state', sendAuditState)
 auditJobManager.on('log', entry => {
@@ -156,18 +157,14 @@ const sendMessageToWebContents = (message, targetWebContents = null) => {
 
 let mainWindow
 let auditWindow
-let bookDetailWindow
-let pendingBookDetailContext
+let bookDetailWindowRegistry
 let tray
 let screenWidth
 const viewerSessions = new Map()
 let appIsQuitting = false
 
 const isWindowAvailable = win => Boolean(win && !win.isDestroyed())
-
-const sendToWindow = (win, channel, payload) => {
-  if (isWindowAvailable(win)) win.webContents.send(channel, payload)
-}
+bookDetailWindowRegistry = createBookDetailWindowRegistry({ isWindowAvailable })
 
 const notifyBookChanged = async ({ bookId, type = 'updated', sourceWebContents = null }) => {
   const normalizedBookId = normalizeBookId(bookId)
@@ -178,9 +175,7 @@ const notifyBookChanged = async ({ bookId, type = 'updated', sourceWebContents =
   if (isWindowAvailable(mainWindow) && mainWindow.webContents !== sourceWebContents) {
     mainWindow.webContents.send('book-detail:book-changed', payload)
   }
-  if (isWindowAvailable(bookDetailWindow) && bookDetailWindow.webContents !== sourceWebContents) {
-    bookDetailWindow.webContents.send('book-detail:book-changed', payload)
-  }
+  bookDetailWindowRegistry.broadcast('book-detail:book-changed', payload, { excludeSender: sourceWebContents })
   return payload
 }
 
@@ -189,7 +184,7 @@ const notifyLibraryChanged = ({ sourceWebContents = null } = {}) => {
   if (isWindowAvailable(mainWindow) && mainWindow.webContents !== sourceWebContents) {
     mainWindow.webContents.send('book-detail:library-changed', payload)
   }
-  sendToWindow(bookDetailWindow, 'book-detail:library-changed', payload)
+  bookDetailWindowRegistry.broadcast('book-detail:library-changed', payload)
 }
 
 const openExternalHttpUrl = async value => {
@@ -248,7 +243,7 @@ const createTray = () => {
         appIsQuitting = true
         await auditJobManager.interruptForExit()
         if (auditWindow && !auditWindow.isDestroyed()) auditWindow.destroy()
-        if (bookDetailWindow && !bookDetailWindow.isDestroyed()) bookDetailWindow.destroy()
+        bookDetailWindowRegistry.destroyAll()
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy()
         app.quit()
       }
@@ -391,29 +386,48 @@ const createAuditWindow = () => {
   return win
 }
 
-const sendPendingBookDetailContext = () => {
-  if (!isWindowAvailable(bookDetailWindow) || !pendingBookDetailContext) return
-  if (bookDetailWindow.webContents.isLoadingMainFrame()) return
-  bookDetailWindow.webContents.send('book-detail:open', pendingBookDetailContext)
+const focusBookDetailWindow = win => {
+  if (!isWindowAvailable(win)) return false
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+  return true
 }
 
-const createBookDetailWindow = () => {
-  if (isWindowAvailable(bookDetailWindow)) {
-    if (bookDetailWindow.isMinimized()) bookDetailWindow.restore()
-    bookDetailWindow.show()
-    bookDetailWindow.focus()
-    sendPendingBookDetailContext()
-    return bookDetailWindow
-  }
+const sendBookDetailContext = win => {
+  const entry = bookDetailWindowRegistry.getByWindow(win)
+  if (!entry || win.webContents.isLoadingMainFrame()) return false
+  win.webContents.send('book-detail:open', entry.context)
+  return true
+}
 
+const getCascadedBookDetailPosition = (windowState, windowIndex) => {
+  if (!Number.isInteger(windowState.x) || !Number.isInteger(windowState.y)) return {}
+  const offset = (windowIndex % 8) * 28
+  const desiredBounds = {
+    x: windowState.x + offset,
+    y: windowState.y + offset,
+    width: windowState.width,
+    height: windowState.height
+  }
+  const workArea = screen.getDisplayMatching(desiredBounds).workArea
+  const maxX = Math.max(workArea.x, workArea.x + workArea.width - desiredBounds.width)
+  const maxY = Math.max(workArea.y, workArea.y + workArea.height - desiredBounds.height)
+  return {
+    x: Math.min(Math.max(desiredBounds.x, workArea.x), maxX),
+    y: Math.min(Math.max(desiredBounds.y, workArea.y), maxY)
+  }
+}
+
+const createBookDetailWindow = context => {
   const detailWindowState = windowStateKeeper({
     defaultWidth: 1280,
     defaultHeight: 860,
     file: 'book-detail-window-state.json'
   })
+  const position = getCascadedBookDetailPosition(detailWindowState, bookDetailWindowRegistry.size)
   const win = new BrowserWindow({
-    x: detailWindowState.x,
-    y: detailWindowState.y,
+    ...position,
     width: detailWindowState.width,
     height: detailWindowState.height,
     minWidth: 900,
@@ -427,7 +441,7 @@ const createBookDetailWindow = () => {
     },
     show: false
   })
-  bookDetailWindow = win
+  bookDetailWindowRegistry.register(win, context)
   detailWindowState.manage(win)
   win.setMenuBarVisibility(false)
   win.setAutoHideMenuBar(true)
@@ -436,11 +450,11 @@ const createBookDetailWindow = () => {
   win.once('ready-to-show', () => win.show())
   win.webContents.on('did-finish-load', () => {
     win.setTitle('exhentai-manga-manager | Book Detail')
-    sendPendingBookDetailContext()
+    sendBookDetailContext(win)
     win.webContents.send('book-detail:lock-state', libraryTaskCoordinator.getState())
   })
   win.on('closed', () => {
-    if (bookDetailWindow === win) bookDetailWindow = null
+    bookDetailWindowRegistry.unregister(win)
   })
   return win
 }
@@ -1303,9 +1317,15 @@ ipcMain.handle('book-detail:open-window', async (event, request = {}) => {
   const context = normalizeBookDetailContext(request)
   const book = await bookDetailService.getEffectiveBookById(context.bookId)
   if (!book) throw new Error('BOOK_NOT_FOUND')
-  pendingBookDetailContext = context
-  createBookDetailWindow()
-  return { success: true, context }
+  const existing = bookDetailWindowRegistry.findByBookId(context.bookId)
+  if (existing) {
+    existing.context = context
+    focusBookDetailWindow(existing.window)
+    sendBookDetailContext(existing.window)
+    return { success: true, reused: true, windowId: existing.window.id, context }
+  }
+  const detailWindow = createBookDetailWindow(context)
+  return { success: true, reused: false, windowId: detailWindow.id, context }
 })
 
 ipcMain.handle('book-detail:get-bootstrap', async () => ({
@@ -1315,14 +1335,17 @@ ipcMain.handle('book-detail:get-bootstrap', async () => ({
   lock: libraryTaskCoordinator.getState()
 }))
 
-ipcMain.handle('book-detail:get-context', async () => pendingBookDetailContext || null)
+ipcMain.handle('book-detail:get-context', async event => {
+  return bookDetailWindowRegistry.getBySender(event.sender)?.context || null
+})
 
 ipcMain.handle('book-detail:get-book', async (event, bookId) => {
   await databaseReady
   const book = await bookDetailService.getEffectiveBookById(bookId)
-  if (book && isWindowAvailable(bookDetailWindow) && event.sender === bookDetailWindow.webContents) {
+  const detailEntry = bookDetailWindowRegistry.getBySender(event.sender)
+  if (book && detailEntry) {
     const title = String(book.title_jpn || book.title || path.basename(book.filepath || '') || 'Book Detail')
-    bookDetailWindow.setTitle(`${title.slice(0, 100)} | exhentai-manga-manager`)
+    detailEntry.window.setTitle(`${title.slice(0, 100)} | exhentai-manga-manager`)
   }
   return book
 })
@@ -1339,12 +1362,16 @@ ipcMain.handle('book-detail:search-books', async (event, request = {}) => {
 
 ipcMain.handle('book-detail:navigate', async (event, request = {}) => {
   const context = normalizeBookDetailContext(request)
-  pendingBookDetailContext = context
+  if (!bookDetailWindowRegistry.updateContextBySender(event.sender, context)) {
+    throw new Error('BOOK_DETAIL_WINDOW_NOT_FOUND')
+  }
   return context
 })
 
-ipcMain.handle('book-detail:close-window', async () => {
-  if (isWindowAvailable(bookDetailWindow)) bookDetailWindow.close()
+ipcMain.handle('book-detail:close-window', async event => {
+  const detailEntry = bookDetailWindowRegistry.getBySender(event.sender)
+  if (!detailEntry) return false
+  detailEntry.window.close()
   return true
 })
 
@@ -1651,8 +1678,8 @@ ipcMain.handle('save-setting', async (event, receiveSetting) => {
     })
   }
   setting = receiveSetting
-  sendToWindow(bookDetailWindow, 'book-detail:setting-changed', setting)
-  if (isWindowAvailable(bookDetailWindow)) bookDetailWindow.setBackgroundColor(getThemeBackgroundColor(setting.theme))
+  bookDetailWindowRegistry.broadcast('book-detail:setting-changed', setting)
+  bookDetailWindowRegistry.forEachWindow(win => win.setBackgroundColor(getThemeBackgroundColor(setting.theme)))
   if (tray && !setting.minimizeToTray && !setting.closeToTray) {
     tray.destroy()
     tray = null
@@ -2025,7 +2052,7 @@ const formatTags = (tags) => {
 
 ipcMain.handle('update-tag-translation', async (event, _tagTranslation) => {
   tagTranslation = _tagTranslation
-  sendToWindow(bookDetailWindow, 'book-detail:translation-changed', tagTranslation || {})
+  bookDetailWindowRegistry.broadcast('book-detail:translation-changed', tagTranslation || {})
 })
 
 LANBrowsing.get('/api/search', async (req, res) => {
