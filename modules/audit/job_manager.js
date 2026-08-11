@@ -15,7 +15,9 @@ class AuditJobManager extends EventEmitter {
     this.worker = null
     this.stateWriteQueue = Promise.resolve()
     this.pendingProgress = null
-    this.progressFlushPromise = null
+    this.progressFlushTimer = null
+    this.progressFlushInFlight = Promise.resolve()
+    this.progressIntervalMs = 100
     this.state = {
       jobId: null,
       status: 'idle',
@@ -72,23 +74,32 @@ class AuditJobManager extends EventEmitter {
 
   queueProgress(patch) {
     this.pendingProgress = { ...(this.pendingProgress || {}), ...patch }
-    if (!this.progressFlushPromise) {
-      this.progressFlushPromise = (async () => {
-        while (this.pendingProgress) {
-          const nextProgress = this.pendingProgress
-          this.pendingProgress = null
-          await this.setState(nextProgress)
-        }
-      })().finally(() => {
-        this.progressFlushPromise = null
-        if (this.pendingProgress) this.queueProgress({})
-      })
+    if (!this.progressFlushTimer) {
+      this.progressFlushTimer = setTimeout(() => {
+        this.progressFlushTimer = null
+        void this.flushPendingProgress().catch(error => console.error('Flush audit progress failed because', error))
+      }, this.progressIntervalMs)
     }
-    return this.progressFlushPromise
+    return Promise.resolve()
+  }
+
+  flushPendingProgress() {
+    const nextProgress = this.pendingProgress
+    this.pendingProgress = null
+    if (!nextProgress) return this.progressFlushInFlight
+    const operation = this.progressFlushInFlight
+      .catch(() => {})
+      .then(() => this.setState(nextProgress))
+    this.progressFlushInFlight = operation
+    return operation
   }
 
   async flushProgress() {
-    await this.progressFlushPromise
+    if (this.progressFlushTimer) {
+      clearTimeout(this.progressFlushTimer)
+      this.progressFlushTimer = null
+    }
+    await this.flushPendingProgress()
   }
 
   async appendLog(message, level = 'info') {

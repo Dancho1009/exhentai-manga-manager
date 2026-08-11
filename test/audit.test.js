@@ -110,6 +110,28 @@ test('audit state updates are serialized and persist the latest patch', async t 
   assert.equal(manager.getState().completed, 49)
 })
 
+test('audit progress updates are throttled and flush the latest value', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-progress-throttle-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const manager = new AuditJobManager({ storePath: root, coordinator: new LibraryTaskCoordinator() })
+  manager.progressIntervalMs = 1000
+  manager.state = { ...manager.state, jobId: 'progress-job', status: 'running' }
+  let emittedStates = 0
+  manager.on('state', () => { emittedStates += 1 })
+
+  for (let index = 0; index < 100; index += 1) {
+    manager.queueProgress({ completed: index, total: 100, phase: `phase-${index}` })
+  }
+  await manager.flushProgress()
+
+  const statePath = path.join(root, 'audit', 'jobs', 'progress-job', 'state.json')
+  const persisted = JSON.parse(await fs.promises.readFile(statePath, 'utf8'))
+  assert.equal(persisted.completed, 99)
+  assert.equal(persisted.phase, 'phase-99')
+  assert.equal(manager.getState().completed, 99)
+  assert.equal(emittedStates, 1)
+})
+
 test('audit manager keeps the previous report readable while a new task is running', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-previous-report-'))
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
