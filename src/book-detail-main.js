@@ -12,6 +12,7 @@ import BookDetailWindow from './BookDetailWindow.vue'
 import zhCn from './locales/zh-CN.json'
 import zhTw from './locales/zh-TW.json'
 import enUs from './locales/en-US.json'
+import { installLazyDirective } from './lazy.js'
 
 const messages = { 'zh-CN': zhCn, 'zh-TW': zhTw, 'en-US': enUs }
 
@@ -36,6 +37,7 @@ const bootstrap = async () => {
   app.use(ElementPlus)
   app.use(ContextMenu)
   app.use(createI18n({ locale, fallbackLocale: 'zh-CN', globalInjection: true, legacy: false, messages }))
+  installLazyDirective(app)
   app.mount('#book-detail-app')
 }
 
