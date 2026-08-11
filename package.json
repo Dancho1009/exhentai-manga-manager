@@ -25,6 +25,7 @@
     "files": [
       "dist/index.html",
       "dist/audit.html",
+      "dist/book-detail.html",
       "dist/assets/*",
       "dist/icon.png",
       "fileLoader/*",
@@ -32,7 +33,8 @@
       "modules/**/*",
       "index.js",
       "preload.js",
-      "audit-preload.js"
+      "audit-preload.js",
+      "book-detail-preload.js"
     ],
     "extraResources": [
       {

@@ -18,6 +18,11 @@ const express = require('express')
 const { globSync } = require('glob')
 
 const { prepareMangaModel, prepareMetadataModel } = require('./modules/database')
+const {
+  createBookDetailService,
+  normalizeBookId,
+  normalizeBookDetailContext
+} = require('./modules/book_detail.js')
 const { prepareTemplate } = require('./modules/prepare_menu.js')
 const { getRootPath } = require('./modules/utils.js')
 const { searchNhentai, getNhentaiMetadata, getNhentaiComments } = require('./modules/nhentai.js')
@@ -70,6 +75,7 @@ const normalizeScanConcurrency = (value) => {
 preparePath()
 let setting = prepareSetting()
 let collectionList = prepareCollectionList()
+let tagTranslation
 
 const withEhentaiAvailabilityCache = async task => {
   const cache = await EhentaiAvailabilityCache.open(path.join(STORE_PATH, 'audit'))
@@ -88,11 +94,13 @@ if (setting.metadataPath) {
   metadataSqliteFile = path.join(STORE_PATH, './metadata.sqlite')
 }
 let Metadata = prepareMetadataModel(metadataSqliteFile)
+const bookDetailService = createBookDetailService({ Manga, getMetadata: () => Metadata })
 const libraryTaskCoordinator = new LibraryTaskCoordinator()
 const auditJobManager = new AuditJobManager({ storePath: STORE_PATH, coordinator: libraryTaskCoordinator })
 const sendAuditState = state => {
   if (auditWindow && !auditWindow.isDestroyed()) auditWindow.webContents.send('audit:state', state)
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('audit:lock-state', state.lock)
+  if (bookDetailWindow && !bookDetailWindow.isDestroyed()) bookDetailWindow.webContents.send('book-detail:lock-state', state.lock)
 }
 auditJobManager.on('state', sendAuditState)
 auditJobManager.on('log', entry => {
@@ -138,15 +146,64 @@ process
 
 const sendMessageToWebContents = (message) => {
   console.log(message)
-  mainWindow.webContents.send('send-message', message)
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('send-message', message)
 }
 
 let mainWindow
 let auditWindow
+let bookDetailWindow
+let pendingBookDetailContext
 let tray
 let screenWidth
 let sendImageLock = false
 let appIsQuitting = false
+
+const isWindowAvailable = win => Boolean(win && !win.isDestroyed())
+
+const sendToWindow = (win, channel, payload) => {
+  if (isWindowAvailable(win)) win.webContents.send(channel, payload)
+}
+
+const notifyBookChanged = async ({ bookId, type = 'updated', sourceWebContents = null }) => {
+  const normalizedBookId = normalizeBookId(bookId)
+  if (!normalizedBookId) return null
+  const book = type === 'deleted' ? null : await bookDetailService.getEffectiveBookById(normalizedBookId)
+  const payload = { type: book ? 'updated' : 'deleted', bookId: normalizedBookId, book }
+
+  if (isWindowAvailable(mainWindow) && mainWindow.webContents !== sourceWebContents) {
+    mainWindow.webContents.send('book-detail:book-changed', payload)
+  }
+  if (
+    isWindowAvailable(bookDetailWindow) &&
+    pendingBookDetailContext?.bookId === normalizedBookId
+  ) {
+    bookDetailWindow.webContents.send('book-detail:book-changed', payload)
+  }
+  return payload
+}
+
+const notifyLibraryChanged = ({ sourceWebContents = null } = {}) => {
+  const payload = { changedAt: Date.now() }
+  if (isWindowAvailable(mainWindow) && mainWindow.webContents !== sourceWebContents) {
+    mainWindow.webContents.send('book-detail:library-changed', payload)
+  }
+  sendToWindow(bookDetailWindow, 'book-detail:library-changed', payload)
+}
+
+const openExternalHttpUrl = async value => {
+  const parsedUrl = new URL(String(value || ''))
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('UNSUPPORTED_URL_PROTOCOL')
+  await shell.openExternal(parsedUrl.toString())
+  return true
+}
+
+const getThemeBackgroundColor = theme => {
+  const classes = new Set(String(theme || '').split(/\s+/).filter(Boolean))
+  if (classes.has('exhentai')) return '#34353b'
+  if (classes.has('e-hentai')) return '#e2e0d2'
+  if (classes.has('nhentai')) return '#0d0d0d'
+  return classes.has('light') ? '#ffffff' : '#141414'
+}
 
 const createTray = () => {
   if (tray) return
@@ -189,6 +246,7 @@ const createTray = () => {
         appIsQuitting = true
         await auditJobManager.interruptForExit()
         if (auditWindow && !auditWindow.isDestroyed()) auditWindow.destroy()
+        if (bookDetailWindow && !bookDetailWindow.isDestroyed()) bookDetailWindow.destroy()
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy()
         app.quit()
       }
@@ -327,6 +385,60 @@ const createAuditWindow = () => {
   })
   win.on('closed', () => {
     if (auditWindow === win) auditWindow = null
+  })
+  return win
+}
+
+const sendPendingBookDetailContext = () => {
+  if (!isWindowAvailable(bookDetailWindow) || !pendingBookDetailContext) return
+  if (bookDetailWindow.webContents.isLoadingMainFrame()) return
+  bookDetailWindow.webContents.send('book-detail:open', pendingBookDetailContext)
+}
+
+const createBookDetailWindow = () => {
+  if (isWindowAvailable(bookDetailWindow)) {
+    if (bookDetailWindow.isMinimized()) bookDetailWindow.restore()
+    bookDetailWindow.show()
+    bookDetailWindow.focus()
+    sendPendingBookDetailContext()
+    return bookDetailWindow
+  }
+
+  const detailWindowState = windowStateKeeper({
+    defaultWidth: 1280,
+    defaultHeight: 860,
+    file: 'book-detail-window-state.json'
+  })
+  const win = new BrowserWindow({
+    x: detailWindowState.x,
+    y: detailWindowState.y,
+    width: detailWindowState.width,
+    height: detailWindowState.height,
+    minWidth: 900,
+    minHeight: 640,
+    backgroundColor: getThemeBackgroundColor(setting.theme),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: app.isPackaged,
+      preload: path.join(__dirname, 'book-detail-preload.js')
+    },
+    show: false
+  })
+  bookDetailWindow = win
+  detailWindowState.manage(win)
+  win.setMenuBarVisibility(false)
+  win.setAutoHideMenuBar(true)
+  if (app.isPackaged) win.loadFile('dist/book-detail.html')
+  else win.loadURL('http://localhost:5374/book-detail.html')
+  win.once('ready-to-show', () => win.show())
+  win.webContents.on('did-finish-load', () => {
+    win.setTitle('exhentai-manga-manager | Book Detail')
+    sendPendingBookDetailContext()
+    win.webContents.send('book-detail:lock-state', libraryTaskCoordinator.getState())
+  })
+  win.on('closed', () => {
+    if (bookDetailWindow === win) bookDetailWindow = null
   })
   return win
 }
@@ -1155,8 +1267,80 @@ ipcMain.handle('save-collection-list', async (event, list) => {
 })
 
 // detail
+ipcMain.handle('book-detail:open-window', async (event, request = {}) => {
+  await databaseReady
+  const context = normalizeBookDetailContext(request)
+  const book = await bookDetailService.getEffectiveBookById(context.bookId)
+  if (!book) throw new Error('BOOK_NOT_FOUND')
+  pendingBookDetailContext = context
+  createBookDetailWindow()
+  return { success: true, context }
+})
+
+ipcMain.handle('book-detail:get-bootstrap', async () => ({
+  setting,
+  locale: app.getLocale(),
+  translation: tagTranslation || {},
+  lock: libraryTaskCoordinator.getState()
+}))
+
+ipcMain.handle('book-detail:get-context', async () => pendingBookDetailContext || null)
+
+ipcMain.handle('book-detail:get-book', async (event, bookId) => {
+  await databaseReady
+  const book = await bookDetailService.getEffectiveBookById(bookId)
+  if (book && isWindowAvailable(bookDetailWindow) && event.sender === bookDetailWindow.webContents) {
+    const title = String(book.title_jpn || book.title || path.basename(book.filepath || '') || 'Book Detail')
+    bookDetailWindow.setTitle(`${title.slice(0, 100)} | exhentai-manga-manager`)
+  }
+  return book
+})
+
+ipcMain.handle('book-detail:get-tag-catalog', async () => {
+  await databaseReady
+  return await bookDetailService.getTagCatalog()
+})
+
+ipcMain.handle('book-detail:navigate', async (event, request = {}) => {
+  const context = normalizeBookDetailContext(request)
+  pendingBookDetailContext = context
+  return context
+})
+
+ipcMain.handle('book-detail:close-window', async () => {
+  if (isWindowAvailable(bookDetailWindow)) bookDetailWindow.close()
+  return true
+})
+
+ipcMain.handle('book-detail:request-main-action', async (event, request = {}) => {
+  const action = String(request.action || '')
+  const allowedActions = new Set(['openContentView', 'openThumbnailView', 'openLocalBook', 'searchFromTag'])
+  if (!allowedActions.has(action)) throw new Error('UNSUPPORTED_BOOK_DETAIL_ACTION')
+  const bookId = normalizeBookId(request.bookId)
+  if (action !== 'searchFromTag' && !bookId) throw new Error('INVALID_BOOK_ID')
+  const payload = action === 'searchFromTag'
+    ? {
+        tag: String(request.payload?.tag || '').slice(0, 512),
+        cat: String(request.payload?.cat || '').slice(0, 128)
+      }
+    : undefined
+  const message = { action, bookId, payload }
+
+  if (!isWindowAvailable(mainWindow)) mainWindow = createWindow()
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.setSkipTaskbar(false)
+  mainWindow.focus()
+  if (mainWindow.webContents.isLoadingMainFrame()) {
+    mainWindow.webContents.once('did-finish-load', () => mainWindow.webContents.send('book-detail:main-action', message))
+  } else {
+    mainWindow.webContents.send('book-detail:main-action', message)
+  }
+  return true
+})
+
 ipcMain.handle('open-url', async (event, url) => {
-  shell.openExternal(url)
+  return await openExternalHttpUrl(url)
 })
 
 ipcMain.handle('show-file', async (event, filepath) => {
@@ -1395,6 +1579,8 @@ ipcMain.handle('save-setting', async (event, receiveSetting) => {
     })
   }
   setting = receiveSetting
+  sendToWindow(bookDetailWindow, 'book-detail:setting-changed', setting)
+  if (isWindowAvailable(bookDetailWindow)) bookDetailWindow.setBackgroundColor(getThemeBackgroundColor(setting.theme))
   if (tray && !setting.minimizeToTray && !setting.closeToTray) {
     tray.destroy()
     tray = null
@@ -1628,9 +1814,7 @@ ipcMain.handle('audit:show-file', async (event, filepath) => {
 })
 
 ipcMain.handle('audit:open-url', async (event, url) => {
-  const parsedUrl = new URL(String(url || ''))
-  if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('UNSUPPORTED_URL_PROTOCOL')
-  await shell.openExternal(parsedUrl.toString())
+  return await openExternalHttpUrl(url)
 })
 
 ipcMain.handle('audit:select-quarantine', async (event, defaultPath) => {
@@ -1721,7 +1905,6 @@ fs.mkdirSync(staticFilePath, { recursive: true })
 LANBrowsing.use('/static', express.static(staticFilePath))
 
 let mangas = []
-let tagTranslation = undefined
 
 // sort
 function compareItems(a, b, sortKey, ascending = false) {
@@ -1760,6 +1943,7 @@ const formatTags = (tags) => {
 
 ipcMain.handle('update-tag-translation', async (event, _tagTranslation) => {
   tagTranslation = _tagTranslation
+  sendToWindow(bookDetailWindow, 'book-detail:translation-changed', tagTranslation || {})
 })
 
 LANBrowsing.get('/api/search', async (req, res) => {

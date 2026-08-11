@@ -1,7 +1,10 @@
 <template>
   <el-dialog v-model="dialogVisibleBookDetail"
     fullscreen
-    class="dialog-detail"
+    :class="['dialog-detail', {'dialog-detail-standalone': standalone}]"
+    :show-close="!standalone"
+    :close-on-click-modal="!standalone"
+    :close-on-press-escape="!standalone"
   >
     <template #header>
       <p class="detail-book-title">
@@ -225,6 +228,13 @@ const {
 
 const { t } = useI18n()
 
+const props = defineProps({
+  standalone: {
+    type: Boolean,
+    default: false
+  }
+})
+
 const emit = defineEmits([
   'openContentView',
   'openThumbnailView',
@@ -235,6 +245,7 @@ const emit = defineEmits([
   'searchFromTag',
   'jumpMangeDetail',
   'addToHistory',
+  'requestMainAction',
 ])
 
 const dialogVisibleBookDetail = ref(false)
@@ -356,6 +367,10 @@ const showFile = (filepath) => {
   ipcRenderer.invoke('show-file', filepath)
 }
 const openLocalBook = (book) => {
+  if (props.standalone) {
+    emit('requestMainAction', 'openLocalBook', book)
+    return
+  }
   bookDetail.value = book
   if (setting.value.imageExplorer) {
     bookDetail.value.readCount += 1

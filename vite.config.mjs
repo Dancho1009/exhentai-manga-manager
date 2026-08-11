@@ -13,7 +13,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(process.cwd(), 'index.html'),
-        audit: resolve(process.cwd(), 'audit.html')
+        audit: resolve(process.cwd(), 'audit.html'),
+        bookDetail: resolve(process.cwd(), 'book-detail.html')
       }
     }
   }

@@ -421,6 +421,37 @@ export default defineComponent({
       await this.loadBookList(false)
       await this.loadCollectionList()
     })
+    ipcRenderer.on('book-detail:book-changed', async (_event, payload) => {
+      if (!payload?.bookId) return
+      if (payload.type === 'deleted' || !payload.book) {
+        this.bookList = this.bookList.filter(book => book.id !== payload.bookId)
+        this.displayBookList = this.displayBookList.filter(book => book.id !== payload.bookId)
+        this.selectedHomeBookIds = this.selectedHomeBookIds.filter(id => id !== payload.bookId)
+        await this.loadCollectionList()
+        return
+      }
+      const currentBook = this.bookList.find(book => book.id === payload.bookId)
+      if (currentBook) Object.assign(currentBook, payload.book)
+    })
+    ipcRenderer.on('book-detail:library-changed', async () => {
+      await this.loadBookList(false)
+      await this.loadCollectionList()
+    })
+    ipcRenderer.on('book-detail:main-action', async (_event, request) => {
+      if (request?.action === 'searchFromTag') {
+        this.searchFromTag(request.payload?.tag, request.payload?.cat)
+        return
+      }
+      let book = this.bookList.find(item => item.id === request?.bookId)
+      if (!book) {
+        await this.loadBookList(false)
+        book = this.bookList.find(item => item.id === request?.bookId)
+      }
+      if (!book) return
+      if (request.action === 'openContentView') this.openContentView(book)
+      else if (request.action === 'openThumbnailView') this.openThumbnailView(book)
+      else if (request.action === 'openLocalBook') this.$refs.BookDetailDialogRef.openLocalBook(book)
+    })
   },
   beforeUnmount () {
     window.removeEventListener('keydown', this.resolveKey)
@@ -1097,6 +1128,23 @@ export default defineComponent({
           break
       }
     },
+    getBookDetailNavigationIds () {
+      const activeBooks = this.drawerVisibleCollection
+        ? this.openCollectionBookList
+        : _.filter(this.displayBookList, book => this.isBook(book) && this.isVisibleBook(book))
+      return activeBooks.map(book => book.id).filter(Boolean)
+    },
+    async openBookDetailWindow (book) {
+      try {
+        await ipcRenderer.invoke('book-detail:open-window', {
+          bookId: book.id,
+          navigationIds: this.getBookDetailNavigationIds()
+        })
+      } catch (error) {
+        console.error(error)
+        this.printMessage('error', this.$t('c.bookDetailOpenFailed'))
+      }
+    },
     addBookToHistory (id) {
       if (id) this.actionHistory.push({type: 'openBook', value: id})
     },
@@ -1229,6 +1277,12 @@ export default defineComponent({
             disabled: this.auditLocked,
             onClick: () => {
               this.resetMetadata(book)
+            }
+          },
+          {
+            label: this.$t('m.openBookDetailWindow'),
+            onClick: () => {
+              this.openBookDetailWindow(book)
             }
           },
           {
