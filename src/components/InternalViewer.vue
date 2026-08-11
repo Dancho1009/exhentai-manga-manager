@@ -381,6 +381,11 @@ onMounted(() => {
     }
   })
 
+  ipcRenderer.on('manga-load-error', (event, arg) => {
+    viewerLoading?.close()
+    printMessage('error', String(arg?.message || 'Load manga failed'))
+  })
+
   showViewerSide.value = localStorage.getItem('showViewerSide') === 'true'
 
   window.addEventListener('resize', handleWindowResize)

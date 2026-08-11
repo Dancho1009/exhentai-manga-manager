@@ -144,9 +144,14 @@ process
     process.exit(1)
   })
 
-const sendMessageToWebContents = (message) => {
+const sendMessageToWebContents = (message, targetWebContents = null) => {
   console.log(message)
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('send-message', message)
+  const recipient = targetWebContents && !targetWebContents.isDestroyed()
+    ? targetWebContents
+    : isWindowAvailable(mainWindow)
+      ? mainWindow.webContents
+      : null
+  if (recipient) recipient.send('send-message', message)
 }
 
 let mainWindow
@@ -155,7 +160,7 @@ let bookDetailWindow
 let pendingBookDetailContext
 let tray
 let screenWidth
-let sendImageLock = false
+const viewerSessions = new Map()
 let appIsQuitting = false
 
 const isWindowAvailable = win => Boolean(win && !win.isDestroyed())
@@ -447,6 +452,7 @@ app.commandLine.appendSwitch('js-flags', '--max-old-space-size=65536')
 // app.disableHardwareAcceleration()
 app.whenReady().then(async () => {
   await auditJobManager.initialize()
+  await clearFolder(VIEWER_PATH)
   const primaryDisplay = screen.getPrimaryDisplay()
   screenWidth = Math.floor(primaryDisplay.workAreaSize.width * primaryDisplay.scaleFactor)
   mainWindow = createWindow()
@@ -748,9 +754,10 @@ const runImportSqliteWorkers = async ({ sqlitePath, bookList }) => {
   }
 }
 
-const setProgressBar = (progress) => {
-  mainWindow.setProgressBar(progress)
-  mainWindow.webContents.send('send-action', {
+const setProgressBar = (progress, targetWindow = mainWindow) => {
+  if (!isWindowAvailable(targetWindow)) return
+  targetWindow.setProgressBar(progress)
+  targetWindow.webContents.send('send-action', {
     action: 'send-progress',
     progress
   })
@@ -1037,7 +1044,7 @@ ipcMain.handle('patch-local-metadata', async event => {
   return result
 })
 
-const handlePatchLocalMetadataByBook = async book => {
+const handlePatchLocalMetadataByBook = async (book, targetWebContents = null) => {
   let { filepath, type } = book
   if (!type) type = 'archive'
   try {
@@ -1048,7 +1055,7 @@ const handlePatchLocalMetadataByBook = async book => {
       return Promise.resolve({ coverPath, hash, pageCount, bundleSize, mtime: mtime.toJSON(), coverHash })
     }
   } catch (e) {
-    sendMessageToWebContents(`Patch ${book.filepath} failed because ${e}`)
+    sendMessageToWebContents(`Patch ${book.filepath} failed because ${e}`, targetWebContents)
     await clearFolder(TEMP_PATH)
     return Promise.reject()
   }
@@ -1105,7 +1112,7 @@ ipcMain.handle('get-ehviewer-data', async (event, targetPath) => {
 })
 
 ipcMain.handle('patch-local-metadata-by-book', async (event, book) => {
-  return await libraryTaskCoordinator.runMutation('patch-local-metadata-by-book', () => handlePatchLocalMetadataByBook(book))
+  return await libraryTaskCoordinator.runMutation('patch-local-metadata-by-book', () => handlePatchLocalMetadataByBook(book, event.sender))
 })
 
 ipcMain.handle('nhentai-search', async (event, { title, filepath }) => {
@@ -1168,7 +1175,7 @@ ipcMain.handle('get-ex-webpage', async (event, { url, cookie }) => {
       return result
     })
     .catch(e => {
-      sendMessageToWebContents(`Get ex page failed because ${e}`)
+      sendMessageToWebContents(`Get ex page failed because ${e}`, event.sender)
     })
   } else {
     return await fetch(url, {
@@ -1182,7 +1189,7 @@ ipcMain.handle('get-ex-webpage', async (event, { url, cookie }) => {
       return result
     })
     .catch(e => {
-      sendMessageToWebContents(`Get ex page failed because ${e}`)
+      sendMessageToWebContents(`Get ex page failed because ${e}`, event.sender)
     })
   }
 })
@@ -1199,7 +1206,7 @@ ipcMain.handle('post-data-ex', async (event, { url, data }) => {
     })
     .then(res => res.text())
     .catch(e => {
-      sendMessageToWebContents(`Get ex data failed because ${e}`)
+      sendMessageToWebContents(`Get ex data failed because ${e}`, event.sender)
     })
   } else {
     return await fetch(url, {
@@ -1211,7 +1218,7 @@ ipcMain.handle('post-data-ex', async (event, { url, data }) => {
     })
     .then(res => res.text())
     .catch(e => {
-      sendMessageToWebContents(`Get ex data failed because ${e}`)
+      sendMessageToWebContents(`Get ex data failed because ${e}`, event.sender)
     })
   }
 })
@@ -1388,7 +1395,7 @@ ipcMain.handle('use-new-cover', async (event, filepath) => {
       .toFile(coverPath)
       return coverPath
     } catch (e) {
-      sendMessageToWebContents(`Generate cover from ${filepath} failed because ${e}`)
+      sendMessageToWebContents(`Generate cover from ${filepath} failed because ${e}`, event.sender)
     }
   })
 })
@@ -1432,7 +1439,7 @@ ipcMain.handle('delete-local-book', async (event, filepath) => {
         await shell.trashItem(filepath)
       }
     } catch (e) {
-      sendMessageToWebContents(`Delete ${filepath} failed because ${e}`)
+      sendMessageToWebContents(`Delete ${filepath} failed because ${e}`, event.sender)
     }
     await Manga.destroy({ where: { filepath } })
     for (const book of deletedBooks) {
@@ -1466,83 +1473,140 @@ ipcMain.handle('move-local-book', async (event, oldPath, folderArr) => {
 })
 
 // viewer
-ipcMain.handle('load-manga-image-list', async (event, book) => {
-  await clearFolder(VIEWER_PATH)
+const isViewerSessionActive = session => (
+  viewerSessions.get(session.senderId) === session &&
+  !session.cancelled &&
+  !session.sender.isDestroyed()
+)
 
-  const { filepath, type, id: bookId } = book
-  const list = await getImageListByBook(filepath, type)
+const releaseViewerSession = async (senderId, expectedSession = viewerSessions.get(senderId)) => {
+  const session = expectedSession
+  if (!session) return
+  session.cancelled = true
+  if (viewerSessions.get(senderId) === session) viewerSessions.delete(senderId)
+  if (!session.sender.isDestroyed() && session.destroyedHandler) {
+    session.sender.removeListener('destroyed', session.destroyedHandler)
+  }
+  if (session.loadPromise) await session.loadPromise.catch(() => {})
+  if (session.producer) await session.producer.catch(() => {})
+  await rmWithRetry(session.tempPath, { recursive: true, force: true }).catch(error => {
+    console.log(`Cleanup viewer session ${session.tempPath} failed because ${error}`)
+  })
+}
 
-  sendImageLock = true
-  ;(async () => {
-    // 384 is the default 4K screen width divided by the default number of thumbnail columns
-    const thumbnailWidth = _.isFinite(screenWidth / setting.thumbnailColumn) ? Math.floor(screenWidth / setting.thumbnailColumn) : 384
-    const widthLimit = _.isNumber(setting.widthLimit) ? Math.ceil(setting.widthLimit) : screenWidth
-    for (let index = 1; index <= list.length; index++) {
-      if (sendImageLock) {
-        let imageFilepath = list[index - 1].absolutePath
-        const extname = path.extname(imageFilepath)
-        if (imageFilepath.search(/[%#]/) >= 0 || type === 'folder') {
-          const newFilepath = path.join(VIEWER_PATH, `rename_${nanoid(8)}${extname}`)
-          await fs.promises.copyFile(imageFilepath, newFilepath)
-          imageFilepath = newFilepath
-        }
-        let { width, height } = await sharp(imageFilepath, { failOnError: false }).metadata()
-        if (widthLimit !== 0 && width > widthLimit) {
-          height = Math.floor(height * (widthLimit / width))
-          width = widthLimit
-          const resizedFilepath = path.join(VIEWER_PATH, `resized_${nanoid(8)}.jpg`)
-          switch (extname) {
-            case '.gif':
-              break
-            default:
-              await sharp(imageFilepath, { failOnError: false })
-                .resize({ width })
-                .toFile(resizedFilepath)
-              imageFilepath = resizedFilepath
-              break
-          }
-        }
-        mainWindow.webContents.send('manga-image', {
-          id: `${bookId}_${index}`,
-          index,
-          relativePath: list[index - 1].relativePath,
-          filepath: imageFilepath,
-          width, height,
-          total: list.length
-        })
-        if (setting.viewerType !== 'comicread') {
-          ;(async () => {
-            let thumbnailPath = path.join(VIEWER_PATH, `thumb_${nanoid(8)}.jpg`)
-            switch (extname) {
-              case '.gif':
-                thumbnailPath = imageFilepath
-                break
-              default:
-                await sharp(imageFilepath, { failOnError: false })
-                  .resize({ width: thumbnailWidth })
-                  .toFile(thumbnailPath)
-                break
-            }
-            mainWindow.webContents.send('manga-thumbnail-image', {
-              id: `${bookId}_${index}`,
-              thumbId: `thumb_${bookId}_${index}`,
-              index,
-              relativePath: list[index - 1].relativePath,
-              filepath: imageFilepath,
-              thumbnailPath,
-              total: list.length
-            })
-          })()
-        }
+const streamViewerImages = async (session, book, list) => {
+  const { type, id: bookId } = book
+  const thumbnailWidth = _.isFinite(screenWidth / setting.thumbnailColumn)
+    ? Math.floor(screenWidth / setting.thumbnailColumn)
+    : 384
+  const widthLimit = _.isNumber(setting.widthLimit) ? Math.ceil(setting.widthLimit) : screenWidth
+  const thumbnailTasks = new Set()
+
+  const scheduleThumbnail = async task => {
+    const promise = task().catch(error => console.log(`Generate viewer thumbnail failed because ${error}`))
+    thumbnailTasks.add(promise)
+    promise.finally(() => thumbnailTasks.delete(promise))
+    if (thumbnailTasks.size >= 4) await Promise.race(thumbnailTasks)
+  }
+
+  for (let index = 1; index <= list.length; index++) {
+    if (!isViewerSessionActive(session)) break
+    let imageFilepath = list[index - 1].absolutePath
+    const extname = path.extname(imageFilepath)
+    if (imageFilepath.search(/[%#]/) >= 0 || type === 'folder') {
+      const newFilepath = path.join(session.tempPath, `rename_${nanoid(8)}${extname}`)
+      await fs.promises.copyFile(imageFilepath, newFilepath)
+      imageFilepath = newFilepath
+    }
+    let { width, height } = await sharp(imageFilepath, { failOnError: false }).metadata()
+    if (widthLimit !== 0 && width > widthLimit) {
+      height = Math.floor(height * (widthLimit / width))
+      width = widthLimit
+      if (extname !== '.gif') {
+        const resizedFilepath = path.join(session.tempPath, `resized_${nanoid(8)}.jpg`)
+        await sharp(imageFilepath, { failOnError: false })
+          .resize({ width })
+          .toFile(resizedFilepath)
+        imageFilepath = resizedFilepath
       }
     }
-  })()
+    if (!isViewerSessionActive(session)) break
+    session.sender.send('manga-image', {
+      id: `${bookId}_${index}`,
+      index,
+      relativePath: list[index - 1].relativePath,
+      filepath: imageFilepath,
+      width, height,
+      total: list.length
+    })
+    if (setting.viewerType !== 'comicread') {
+      const thumbnailSource = imageFilepath
+      await scheduleThumbnail(async () => {
+        let thumbnailPath = path.join(session.tempPath, `thumb_${nanoid(8)}.jpg`)
+        if (extname === '.gif') {
+          thumbnailPath = thumbnailSource
+        } else {
+          await sharp(thumbnailSource, { failOnError: false })
+            .resize({ width: thumbnailWidth })
+            .toFile(thumbnailPath)
+        }
+        if (!isViewerSessionActive(session)) return
+        session.sender.send('manga-thumbnail-image', {
+          id: `${bookId}_${index}`,
+          thumbId: `thumb_${bookId}_${index}`,
+          index,
+          relativePath: list[index - 1].relativePath,
+          filepath: thumbnailSource,
+          thumbnailPath,
+          total: list.length
+        })
+      })
+    }
+  }
+  await Promise.allSettled([...thumbnailTasks])
+}
 
-  return list
+ipcMain.handle('load-manga-image-list', async (event, book) => {
+  const senderId = event.sender.id
+  await releaseViewerSession(senderId)
+
+  const session = {
+    senderId,
+    sender: event.sender,
+    tempPath: path.join(VIEWER_PATH, `window_${senderId}_${nanoid(8)}`),
+    cancelled: false,
+    loadPromise: null,
+    producer: null,
+    destroyedHandler: null
+  }
+  await fs.promises.mkdir(session.tempPath, { recursive: true })
+  viewerSessions.set(senderId, session)
+  session.destroyedHandler = () => {
+    void releaseViewerSession(senderId, session)
+  }
+  event.sender.once('destroyed', session.destroyedHandler)
+
+  try {
+    const { filepath, type } = book
+    session.loadPromise = getImageListByBook(filepath, type, session.tempPath)
+    const list = await session.loadPromise
+    if (!isViewerSessionActive(session)) return []
+    session.producer = streamViewerImages(session, book, list).catch(error => {
+      if (isViewerSessionActive(session)) {
+        session.sender.send('manga-load-error', { message: String(error?.message || error) })
+      }
+      console.log(`Load viewer images from ${filepath} failed because ${error}`)
+    })
+    return list
+  } catch (error) {
+    await releaseViewerSession(senderId, session)
+    throw error
+  }
 })
 
-ipcMain.handle('release-sendimagelock', () => {
-  sendImageLock = false
+ipcMain.handle('release-sendimagelock', async event => {
+  await releaseViewerSession(event.sender.id)
+  return true
 })
 
 ipcMain.handle('delete-image', async (event, filename, filepath, type) => {
@@ -1867,7 +1931,7 @@ ipcMain.handle('audit:select-quarantine', async (event, defaultPath) => {
 // tools
 
 ipcMain.handle('set-progress-bar', async (event, progress) => {
-  setProgressBar(progress)
+  setProgressBar(progress, BrowserWindow.fromWebContents(event.sender) || mainWindow)
 })
 
 ipcMain.handle('get-locale', async (event, arg) => {
@@ -1889,15 +1953,21 @@ ipcMain.handle('read-text-from-clipboard', async () => {
 ipcMain.handle('update-window-title', async (event, title) => {
   const name = require('./package.json').name
   const version = require('./package.json').version
+  const targetWindow = BrowserWindow.fromWebContents(event.sender) || mainWindow
+  if (!isWindowAvailable(targetWindow)) return false
   if (title) {
-    mainWindow.setTitle(name + ' ' + version + ' | ' + title)
+    targetWindow.setTitle(name + ' ' + version + ' | ' + title)
   } else {
-    mainWindow.setTitle(name + ' ' + version)
+    targetWindow.setTitle(name + ' ' + version)
   }
+  return true
 })
 
 ipcMain.handle('switch-fullscreen', async (event, arg) => {
-  mainWindow.setFullScreen(!mainWindow.isFullScreen())
+  const targetWindow = BrowserWindow.fromWebContents(event.sender) || mainWindow
+  if (!isWindowAvailable(targetWindow)) return false
+  targetWindow.setFullScreen(!targetWindow.isFullScreen())
+  return true
 })
 
 ipcMain.on('get-path-sep', async (event, arg) => {
@@ -2128,6 +2198,7 @@ let existBook = {
   hash: null,
   imageList: []
 }
+const lanViewerPath = path.join(VIEWER_PATH, 'lan')
 
 // 处理章节列表请求
 LANBrowsing.get('/api/archives/:hash/files', async (req, res) => {
@@ -2141,9 +2212,9 @@ LANBrowsing.get('/api/archives/:hash/files', async (req, res) => {
       return res.status(404).send('Manga not found')
     }
 
-    await clearFolder(VIEWER_PATH)
+    await clearFolder(lanViewerPath)
     await clearFolder(staticFilePath)
-    const imageList = await getImageListByBook(manga.filepath, manga.type)
+    const imageList = await getImageListByBook(manga.filepath, manga.type, lanViewerPath)
 
     existBook = {
       hash: manga.hash,
@@ -2180,9 +2251,9 @@ LANBrowsing.get('/api/archives/:hash/page', async (req, res) => {
     if (manga.hash === existBook.hash) {
       imageList = existBook.imageList
     } else {
-      await clearFolder(VIEWER_PATH)
+      await clearFolder(lanViewerPath)
       await clearFolder(staticFilePath)
-      imageList = await getImageListByBook(manga.filepath, manga.type)
+      imageList = await getImageListByBook(manga.filepath, manga.type, lanViewerPath)
       imageList = imageList.map(p => p.absolutePath)
       existBook.hash = manga.hash
       existBook.imageList = imageList

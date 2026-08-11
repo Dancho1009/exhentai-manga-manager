@@ -53,15 +53,15 @@ const geneCover = async (filepath, type, options = {}) => {
   return { targetFilePath, targetHash, coverPath, pageCount, bundleSize, mtime, coverHash }
 }
 
-const getImageListByBook = async (filepath, type) => {
+const getImageListByBook = async (filepath, type, viewerPath = VIEWER_PATH) => {
   switch (type) {
     case 'folder':
-      return await getImageListFromFolder(filepath, VIEWER_PATH)
+      return await getImageListFromFolder(filepath, viewerPath)
     case 'zip':
     case 'archive':
-      return await getImageListFromArchive(filepath, VIEWER_PATH)
+      return await getImageListFromArchive(filepath, viewerPath)
     default:
-      return await getImageListFromArchive(filepath, VIEWER_PATH)
+      return await getImageListFromArchive(filepath, viewerPath)
   }
 }
 
