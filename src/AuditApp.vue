@@ -179,7 +179,7 @@
         </el-tab-pane>
       </el-tabs>
 
-      <el-collapse class="log-pane" @click.stop>
+      <el-collapse v-model="activeLogPanels" class="log-pane" @click.stop>
         <el-collapse-item name="logs">
           <template #title>
             <span class="log-title">
@@ -188,7 +188,7 @@
               <el-tag size="small" type="info" effect="plain">{{ logs.length }}</el-tag>
             </span>
           </template>
-          <pre>{{ logs.map(item => `[${item.at}] ${item.message}`).join('\n') }}</pre>
+          <pre v-if="activeLogPanels.includes('logs')">{{ logText }}</pre>
         </el-collapse-item>
       </el-collapse>
 
@@ -242,7 +242,7 @@
           </el-descriptions>
             </div>
           </div>
-          <pre class="evidence-block">{{ stringify(selectedAnomaly.evidence) }}</pre>
+          <pre class="evidence-block">{{ selectedAnomalyEvidenceText }}</pre>
         </template>
       </el-drawer>
 
@@ -264,7 +264,7 @@
             <el-table-column prop="filepath" :label="$t('audit.filepath')" min-width="340" show-overflow-tooltip />
             <el-table-column prop="url" label="URL" min-width="210" show-overflow-tooltip />
           </el-table>
-          <pre class="evidence-block">{{ stringify(selectedDuplicate.evidence) }}</pre>
+          <pre class="evidence-block">{{ selectedDuplicateEvidenceText }}</pre>
           <div class="drawer-footer"><el-button type="primary" :disabled="running" @click="applyDuplicateDraft">{{ $t('audit.approveSelection') }}</el-button></div>
         </template>
       </el-drawer>
@@ -273,7 +273,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Connection, DocumentChecked, FolderOpened, Picture, Refresh, Search, Select, Tickets, TopRight, VideoPause, VideoPlay } from '@element-plus/icons-vue'
@@ -285,9 +285,10 @@ const props = defineProps({ initialSetting: { type: Object, required: true } })
 const { t, te, locale } = useI18n()
 const initialSetting = props.initialSetting
 const state = reactive({ jobId: null, status: 'idle', phase: 'idle', completed: 0, total: 0, error: null })
-const report = ref(null)
+const report = shallowRef(null)
 const review = reactive({ anomalyActionIds: [], duplicateSelections: {} })
-const logs = ref([])
+const logs = shallowRef([])
+const activeLogPanels = ref([])
 const activeTab = ref('anomalies')
 const scanMode = ref('quick')
 const deepScope = ref('anomalies')
@@ -301,10 +302,10 @@ const duplicateSearch = ref('')
 const duplicateKindFilter = ref('')
 const anomalyDrawer = ref(false)
 const duplicateDrawer = ref(false)
-const selectedAnomaly = ref(null)
-const anomalyBookPreview = ref(null)
+const selectedAnomaly = shallowRef(null)
+const anomalyBookPreview = shallowRef(null)
 const anomalyPreviewLoading = ref(false)
-const selectedDuplicate = ref(null)
+const selectedDuplicate = shallowRef(null)
 const duplicateDraft = reactive({ keepId: null, quarantineIds: [] })
 const quarantineRoot = ref(`${String(initialSetting.library).replace(/[\\/][^\\/]+[\\/]?$/, '')}\\DedupeReview`)
 const severities = ['critical', 'high', 'medium', 'low']
@@ -372,22 +373,36 @@ const pendingOnlineBookIds = computed(() => {
     .map(item => String(item.bookId)))]
 })
 const approvedCount = computed(() => review.anomalyActionIds.length + Object.keys(review.duplicateSelections).length)
+const logText = computed(() => logs.value.map(item => `[${item.at}] ${item.message}`).join('\n'))
+const selectedAnomalyEvidenceText = computed(() => JSON.stringify(selectedAnomaly.value?.evidence || {}, null, 2))
+const selectedDuplicateEvidenceText = computed(() => JSON.stringify(selectedDuplicate.value?.evidence || {}, null, 2))
 
 let removeStateListener
 let removeLogListener
 let lastReportPath = null
 let selectVerifiedActions = false
 let anomalyPreviewRequest = 0
+let stateFrame = null
+let pendingState = null
+let reloadPromise = null
+let reloadRequested = false
 
-const assignState = value => Object.assign(state, value || {})
-const reloadReport = async () => {
+const assignState = value => {
+  if (!value) return false
+  const currentUpdatedAt = Date.parse(state.updatedAt || '')
+  const nextUpdatedAt = Date.parse(value.updatedAt || '')
+  if (Number.isFinite(currentUpdatedAt) && Number.isFinite(nextUpdatedAt) && nextUpdatedAt < currentUpdatedAt) return false
+  Object.assign(state, value)
+  return true
+}
+const loadReportSnapshot = async () => {
   const [nextState, nextReport, nextReview] = await Promise.all([
     window.auditApi.getState(),
     window.auditApi.getReport(),
     window.auditApi.getReview()
   ])
   assignState(nextState)
-  report.value = nextReport
+  report.value = nextReport ? markRaw(nextReport) : null
   if (nextReview) {
     review.anomalyActionIds = nextReview.anomalyActionIds || []
     review.duplicateSelections = nextReview.duplicateSelections || {}
@@ -401,6 +416,32 @@ const reloadReport = async () => {
     ElMessage[count ? 'success' : 'info'](t(count ? 'audit.verifiedActionsSelected' : 'audit.noVerifiedActions', { count }))
   }
   lastReportPath = nextState?.reportPath || null
+}
+const reloadReport = () => {
+  reloadRequested = true
+  if (reloadPromise) return reloadPromise
+  reloadPromise = (async () => {
+    while (reloadRequested) {
+      reloadRequested = false
+      await loadReportSnapshot()
+    }
+  })().finally(() => { reloadPromise = null })
+  return reloadPromise
+}
+const scheduleStateUpdate = value => {
+  pendingState = { ...(pendingState || {}), ...(value || {}) }
+  if (stateFrame !== null) return
+  stateFrame = window.requestAnimationFrame(() => {
+    stateFrame = null
+    const nextState = pendingState
+    pendingState = null
+    if (!assignState(nextState)) return
+    if (['failed', 'interrupted'].includes(nextState.status)) selectVerifiedActions = false
+    if (nextState.reportPath && nextState.reportPath !== lastReportPath && nextState.status === 'completed') {
+      lastReportPath = nextState.reportPath
+      void reloadReport().catch(error => console.log(error))
+    }
+  })
 }
 const launchAudit = async request => {
   try {
@@ -499,7 +540,6 @@ const selectQuarantine = async () => {
 }
 const locate = filepath => filepath && window.auditApi.showFile(filepath)
 const openExternalUrl = url => url && window.auditApi.openUrl(url)
-const stringify = value => JSON.stringify(value || {}, null, 2)
 const auditTypeLabel = value => {
   if (!value) return ''
   const key = `audit.type_${value}`
@@ -525,15 +565,17 @@ const formatBytes = value => {
 }
 
 onMounted(async () => {
-  await reloadReport()
-  removeStateListener = window.auditApi.onState(async value => {
-    assignState(value)
-    if (['failed', 'interrupted'].includes(value.status)) selectVerifiedActions = false
-    if (value.reportPath && value.reportPath !== lastReportPath && value.status === 'completed') await reloadReport()
+  removeStateListener = window.auditApi.onState(scheduleStateUpdate)
+  removeLogListener = window.auditApi.onLog(entry => {
+    logs.value = [...logs.value.slice(-199), markRaw(entry)]
   })
-  removeLogListener = window.auditApi.onLog(entry => { logs.value = [...logs.value.slice(-199), entry] })
+  await reloadReport()
 })
-onBeforeUnmount(() => { removeStateListener?.(); removeLogListener?.() })
+onBeforeUnmount(() => {
+  removeStateListener?.()
+  removeLogListener?.()
+  if (stateFrame !== null) window.cancelAnimationFrame(stateFrame)
+})
 </script>
 
 <style scoped>
