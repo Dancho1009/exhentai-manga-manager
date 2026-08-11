@@ -62,8 +62,60 @@ const appendTags = (catalog, tags) => {
   }
 }
 
+const toPlainRow = row => row?.toJSON ? row.toJSON() : { ...row }
+
+const matchesBookSearch = (book, request = {}) => {
+  if (request.readCount !== undefined) {
+    return Number(book?.readCount || 0) === Number(request.readCount)
+  }
+  if (request.pageDiff) {
+    return Number.isInteger(book?.filecount) &&
+      Number.isInteger(book?.pageCount) &&
+      Math.abs(book.filecount - book.pageCount) > 5
+  }
+
+  const rawTag = String(request.tag || '').trim()
+  const namespace = String(request.cat || '').trim()
+  if (!rawTag) return false
+
+  if (!namespace && rawTag.startsWith('cat:')) {
+    return String(book?.category || '') === rawTag.slice(4)
+  }
+  if (!namespace && ['non-tag', 'tagged', 'tag-failed'].includes(rawTag)) {
+    return book?.status === rawTag
+  }
+  if (namespace) {
+    return Array.isArray(book?.tags?.[namespace]) && book.tags[namespace].includes(rawTag)
+  }
+  return Object.values(book?.tags || {}).some(values => Array.isArray(values) && values.includes(rawTag))
+}
+
 const createBookDetailService = ({ Manga, getMetadata }) => {
   let tagCatalogCache = null
+
+  const getEffectiveBooks = async () => {
+    const Metadata = getMetadata()
+    const [mangaRows, metadataRows] = await Promise.all([
+      Manga.findAll({ raw: true }),
+      Metadata.findAll({ raw: true })
+    ])
+    const mangas = mangaRows.map(toPlainRow)
+    const metadataMap = new Map(metadataRows.map(row => {
+      const metadata = toPlainRow(row)
+      return [metadata.hash, metadata]
+    }))
+    const hashPeers = new Map()
+    for (const manga of mangas) {
+      if (!manga.hash) continue
+      if (!hashPeers.has(manga.hash)) hashPeers.set(manga.hash, [])
+      hashPeers.get(manga.hash).push(manga)
+    }
+    return mangas.map(manga => mergeEffectiveBook({
+      manga,
+      metadata: manga.hash ? metadataMap.get(manga.hash) : null,
+      hashPeers: manga.hash ? hashPeers.get(manga.hash) : []
+    }))
+  }
 
   const getEffectiveBookById = async value => {
     const bookId = normalizeBookId(value)
@@ -104,7 +156,12 @@ const createBookDetailService = ({ Manga, getMetadata }) => {
     tagCatalogCache = null
   }
 
-  return { getEffectiveBookById, getTagCatalog, invalidateTagCatalog }
+  const searchEffectiveBooks = async request => {
+    const books = await getEffectiveBooks()
+    return books.filter(book => matchesBookSearch(book, request))
+  }
+
+  return { getEffectiveBookById, getEffectiveBooks, getTagCatalog, searchEffectiveBooks, invalidateTagCatalog }
 }
 
 module.exports = {
@@ -114,5 +171,6 @@ module.exports = {
   getBookIdentity,
   hasConflictingHashIdentities,
   mergeEffectiveBook,
+  matchesBookSearch,
   createBookDetailService
 }

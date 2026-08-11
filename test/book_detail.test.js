@@ -6,7 +6,8 @@ const {
   createBookDetailService,
   normalizeBookDetailContext,
   hasConflictingHashIdentities,
-  mergeEffectiveBook
+  mergeEffectiveBook,
+  matchesBookSearch
 } = require('../modules/book_detail.js')
 
 test('normalizes and deduplicates book detail navigation context', () => {
@@ -94,4 +95,50 @@ test('book detail service resolves effective data and builds a compact tag catal
   const catalog = await service.getTagCatalog()
   assert.deepEqual(catalog.artist, ['local-artist', 'shared-artist'])
   assert.deepEqual(catalog.language, ['chinese'])
+})
+
+test('matches the local detail-window filters used by cards and tags', () => {
+  const book = {
+    category: 'Doujinshi',
+    status: 'tagged',
+    readCount: 3,
+    pageCount: 20,
+    filecount: 30,
+    tags: { artist: ['alice'], female: ['glasses'] }
+  }
+  assert.equal(matchesBookSearch(book, { tag: 'alice', cat: 'artist' }), true)
+  assert.equal(matchesBookSearch(book, { tag: 'glasses' }), true)
+  assert.equal(matchesBookSearch(book, { tag: 'cat:Doujinshi' }), true)
+  assert.equal(matchesBookSearch(book, { tag: 'tagged' }), true)
+  assert.equal(matchesBookSearch(book, { readCount: 3 }), true)
+  assert.equal(matchesBookSearch(book, { pageDiff: true }), true)
+  assert.equal(matchesBookSearch(book, { tag: 'bob', cat: 'artist' }), false)
+})
+
+test('searches effective metadata without leaking conflicting shared hash data', async () => {
+  const mangas = [
+    { id: '1', hash: 'shared', filepath: '10001-a.zip', title: 'local-a', tags: {} },
+    { id: '2', hash: 'shared', filepath: '20002-b.zip', title: 'local-b', tags: { artist: ['local-b'] } },
+    { id: '3', hash: 'clean', filepath: '30003-c.zip', title: 'local-c', tags: {} }
+  ]
+  const metadata = [
+    { hash: 'shared', title: 'wrong-shared', tags: { artist: ['shared-artist'] } },
+    { hash: 'clean', title: 'merged-c', tags: { artist: ['target-artist'] } }
+  ]
+  const Manga = {
+    findAll: async () => mangas,
+    findByPk: async () => null
+  }
+  const Metadata = {
+    findAll: async () => metadata,
+    findByPk: async () => null
+  }
+  const service = createBookDetailService({ Manga, getMetadata: () => Metadata })
+
+  const result = await service.searchEffectiveBooks({ tag: 'target-artist', cat: 'artist' })
+  assert.deepEqual(result.map(book => book.id), ['3'])
+  assert.equal(result[0].title, 'merged-c')
+
+  const conflictedResult = await service.searchEffectiveBooks({ tag: 'shared-artist', cat: 'artist' })
+  assert.deepEqual(conflictedResult, [])
 })
