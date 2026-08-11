@@ -943,9 +943,11 @@ const handleLoadBookList = async scan => {
 }
 
 ipcMain.handle('load-book-list', async (event, scan) => {
-  return scan
-    ? await libraryTaskCoordinator.runMutation('scan-library', () => handleLoadBookList(true))
-    : await handleLoadBookList(false)
+  if (!scan) return await handleLoadBookList(false)
+  const result = await libraryTaskCoordinator.runMutation('scan-library', () => handleLoadBookList(true))
+  bookDetailService.invalidateTagCatalog()
+  notifyLibraryChanged({ sourceWebContents: event.sender })
+  return result
 })
 
 const handleForceGeneBookList = async () => {
@@ -992,8 +994,11 @@ const handleForceGeneBookList = async () => {
   return await loadBookListFromDatabase()
 }
 
-ipcMain.handle('force-gene-book-list', async () => {
-  return await libraryTaskCoordinator.runMutation('rebuild-library', handleForceGeneBookList)
+ipcMain.handle('force-gene-book-list', async event => {
+  const result = await libraryTaskCoordinator.runMutation('rebuild-library', handleForceGeneBookList)
+  bookDetailService.invalidateTagCatalog()
+  notifyLibraryChanged({ sourceWebContents: event.sender })
+  return result
 })
 
 const handlePatchLocalMetadata = async () => {
@@ -1025,8 +1030,11 @@ const handlePatchLocalMetadata = async () => {
   return bookList
 }
 
-ipcMain.handle('patch-local-metadata', async () => {
-  return await libraryTaskCoordinator.runMutation('patch-local-metadata', handlePatchLocalMetadata)
+ipcMain.handle('patch-local-metadata', async event => {
+  const result = await libraryTaskCoordinator.runMutation('patch-local-metadata', handlePatchLocalMetadata)
+  bookDetailService.invalidateTagCatalog()
+  notifyLibraryChanged({ sourceWebContents: event.sender })
+  return result
 })
 
 const handlePatchLocalMetadataByBook = async book => {
@@ -1209,12 +1217,16 @@ ipcMain.handle('post-data-ex', async (event, { url, data }) => {
 })
 
 ipcMain.handle('save-book', async (event, book) => {
-  return await libraryTaskCoordinator.runMutation('save-book', () => saveBookToDatabase(book))
+  await libraryTaskCoordinator.runMutation('save-book', () => saveBookToDatabase(book))
+  bookDetailService.invalidateTagCatalog()
+  const changed = await notifyBookChanged({ bookId: book?.id, sourceWebContents: event.sender })
+  return changed?.book || null
 })
 
 ipcMain.handle('increment-read-count', async (event, bookId) => {
   if (!bookId) return false
   await Manga.increment('readCount', { by: 1, where: { id: bookId } })
+  await notifyBookChanged({ bookId, sourceWebContents: event.sender })
   return true
 })
 
@@ -1561,6 +1573,8 @@ ipcMain.handle('save-setting', async (event, receiveSetting) => {
   if (receiveSetting.metadataPath !== setting.metadataPath) {
     Metadata = prepareMetadataModel(path.join(receiveSetting.metadataPath, './metadata.sqlite'))
     await Metadata.sync()
+    bookDetailService.invalidateTagCatalog()
+    notifyLibraryChanged({ sourceWebContents: event.sender })
   }
   if (receiveSetting.enabledLANBrowsing !== setting.enabledLANBrowsing) {
     if (receiveSetting.enabledLANBrowsing) {
@@ -1640,6 +1654,8 @@ ipcMain.handle('import-sqlite', async (event, bookList, sqlitePath) => {
         sqlitePath,
         bookList
       })
+      bookDetailService.invalidateTagCatalog()
+      notifyLibraryChanged({ sourceWebContents: event.sender })
       setProgressBar(-1)
       return {
         success: true,
@@ -1806,6 +1822,8 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('audit:library-changed', { rendererState: result.rendererState })
   }
+  bookDetailService.invalidateTagCatalog()
+  notifyLibraryChanged({ sourceWebContents: mainWindow?.webContents })
   return result
 })
 
