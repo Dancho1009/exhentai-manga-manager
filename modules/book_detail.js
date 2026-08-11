@@ -30,6 +30,95 @@ const normalizeBookDetailContext = request => {
   return { bookId, navigationIds }
 }
 
+const createBookDetailWindowRegistry = ({ isWindowAvailable = win => Boolean(win && !win.isDestroyed?.()) } = {}) => {
+  const entries = new Map()
+
+  const prune = () => {
+    for (const [windowId, entry] of entries) {
+      if (!isWindowAvailable(entry.window)) entries.delete(windowId)
+    }
+  }
+
+  const getWindowId = win => Number.isInteger(win?.id) ? win.id : null
+
+  const register = (win, context) => {
+    const windowId = getWindowId(win)
+    if (windowId === null) throw new Error('INVALID_BOOK_DETAIL_WINDOW')
+    const entry = { window: win, context }
+    entries.set(windowId, entry)
+    return entry
+  }
+
+  const unregister = win => {
+    const windowId = getWindowId(win)
+    if (windowId === null) return false
+    return entries.delete(windowId)
+  }
+
+  const getByWindow = win => {
+    prune()
+    const windowId = getWindowId(win)
+    return windowId === null ? null : entries.get(windowId) || null
+  }
+
+  const getBySender = sender => {
+    prune()
+    for (const entry of entries.values()) {
+      if (entry.window.webContents === sender) return entry
+    }
+    return null
+  }
+
+  const findByBookId = bookId => {
+    prune()
+    const normalizedBookId = normalizeBookId(bookId)
+    if (!normalizedBookId) return null
+    for (const entry of entries.values()) {
+      if (entry.context?.bookId === normalizedBookId) return entry
+    }
+    return null
+  }
+
+  const updateContextBySender = (sender, context) => {
+    const entry = getBySender(sender)
+    if (!entry) return null
+    entry.context = context
+    return entry
+  }
+
+  const forEachWindow = callback => {
+    prune()
+    for (const entry of entries.values()) callback(entry.window, entry)
+  }
+
+  const broadcast = (channel, payload, { excludeSender = null } = {}) => {
+    forEachWindow(win => {
+      if (win.webContents !== excludeSender) win.webContents.send(channel, payload)
+    })
+  }
+
+  const destroyAll = () => {
+    forEachWindow(win => win.destroy())
+    entries.clear()
+  }
+
+  return {
+    get size() {
+      prune()
+      return entries.size
+    },
+    register,
+    unregister,
+    getByWindow,
+    getBySender,
+    findByBookId,
+    updateContextBySender,
+    forEachWindow,
+    broadcast,
+    destroyAll
+  }
+}
+
 const getBookIdentity = book => {
   const urlIdentity = String(book?.url || '').match(/\/g\/(\d+)(?:\/([0-9a-z]+))?/i)
   if (urlIdentity) return `url:${urlIdentity[1]}:${urlIdentity[2] || ''}`
@@ -168,6 +257,7 @@ module.exports = {
   MAX_NAVIGATION_ITEMS,
   normalizeBookId,
   normalizeBookDetailContext,
+  createBookDetailWindowRegistry,
   getBookIdentity,
   hasConflictingHashIdentities,
   mergeEffectiveBook,

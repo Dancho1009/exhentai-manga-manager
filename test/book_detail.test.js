@@ -4,11 +4,26 @@ const assert = require('node:assert/strict')
 const {
   MAX_NAVIGATION_ITEMS,
   createBookDetailService,
+  createBookDetailWindowRegistry,
   normalizeBookDetailContext,
   hasConflictingHashIdentities,
   mergeEffectiveBook,
   matchesBookSearch
 } = require('../modules/book_detail.js')
+
+const createFakeDetailWindow = id => {
+  let destroyed = false
+  const messages = []
+  return {
+    id,
+    messages,
+    webContents: {
+      send: (channel, payload) => messages.push({ channel, payload })
+    },
+    isDestroyed: () => destroyed,
+    destroy: () => { destroyed = true }
+  }
+}
 
 test('normalizes and deduplicates book detail navigation context', () => {
   const context = normalizeBookDetailContext({
@@ -26,6 +41,44 @@ test('rejects invalid book detail ids and caps navigation size', () => {
   const inserted = normalizeBookDetailContext({ bookId: 'missing', navigationIds })
   assert.equal(inserted.navigationIds.length, MAX_NAVIGATION_ITEMS)
   assert.equal(inserted.navigationIds[0], 'missing')
+})
+
+test('book detail window registry keeps contexts isolated across windows', () => {
+  const registry = createBookDetailWindowRegistry()
+  const firstWindow = createFakeDetailWindow(1)
+  const secondWindow = createFakeDetailWindow(2)
+  const firstContext = normalizeBookDetailContext({ bookId: 'book-1', navigationIds: ['book-1', 'book-2'] })
+  const secondContext = normalizeBookDetailContext({ bookId: 'book-2', navigationIds: ['book-2', 'book-3'] })
+  registry.register(firstWindow, firstContext)
+  registry.register(secondWindow, secondContext)
+
+  assert.equal(registry.size, 2)
+  assert.equal(registry.getBySender(firstWindow.webContents).context.bookId, 'book-1')
+  assert.equal(registry.getBySender(secondWindow.webContents).context.bookId, 'book-2')
+  assert.equal(registry.findByBookId('book-2').window, secondWindow)
+
+  const navigated = normalizeBookDetailContext({ bookId: 'book-3', navigationIds: ['book-1', 'book-3'] })
+  registry.updateContextBySender(firstWindow.webContents, navigated)
+  assert.equal(registry.getBySender(firstWindow.webContents).context.bookId, 'book-3')
+  assert.equal(registry.getBySender(secondWindow.webContents).context.bookId, 'book-2')
+})
+
+test('book detail window registry broadcasts to every window except the source', () => {
+  const registry = createBookDetailWindowRegistry()
+  const firstWindow = createFakeDetailWindow(1)
+  const secondWindow = createFakeDetailWindow(2)
+  registry.register(firstWindow, { bookId: 'book-1', navigationIds: ['book-1'] })
+  registry.register(secondWindow, { bookId: 'book-2', navigationIds: ['book-2'] })
+
+  registry.broadcast('book-detail:book-changed', { bookId: 'book-2' }, { excludeSender: firstWindow.webContents })
+  assert.deepEqual(firstWindow.messages, [])
+  assert.deepEqual(secondWindow.messages, [{ channel: 'book-detail:book-changed', payload: { bookId: 'book-2' } }])
+
+  secondWindow.destroy()
+  assert.equal(registry.size, 1)
+  registry.destroyAll()
+  assert.equal(firstWindow.isDestroyed(), true)
+  assert.equal(registry.size, 0)
 })
 
 test('detects conflicting identities among books sharing a hash', () => {
