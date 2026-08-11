@@ -69,9 +69,9 @@
       </section>
 
       <el-tabs v-model="activeTab" class="audit-tabs">
-        <el-tab-pane :label="$t('audit.anomalyTab')" name="anomalies">
+        <el-tab-pane :label="$t('audit.anomalyTab')" name="anomalies" class="audit-list-pane">
           <div class="filter-row">
-            <el-input v-model="anomalySearch" :prefix-icon="Search" clearable :placeholder="$t('audit.filterPlaceholder')" />
+            <el-input v-model="anomalySearchInput" :prefix-icon="Search" clearable :placeholder="$t('audit.filterPlaceholder')" />
             <el-select v-model="severityFilter" clearable :placeholder="$t('audit.severity')">
               <el-option v-for="severity in severities" :key="severity" :label="$t(`audit.${severity}`)" :value="severity" />
             </el-select>
@@ -86,72 +86,92 @@
               <strong v-if="selectedFilteredAnomalyCount > 0">{{ $t('audit.selectedFilteredCount', { count: selectedFilteredAnomalyCount }) }}</strong>
             </div>
           </div>
-          <el-table :data="filteredAnomalies" height="calc(100vh - 335px)" row-key="id" @row-click="openAnomaly">
-            <el-table-column width="48" align="center">
-              <template #header>
-                <el-tooltip :content="$t('audit.selectAllFiltered')">
-                  <el-checkbox
-                    :model-value="allFilteredAnomaliesSelected"
-                    :indeterminate="someFilteredAnomaliesSelected"
-                    :disabled="running || filteredActionableAnomalyIds.length === 0"
-                    @change="toggleAllFilteredAnomalies"
-                  />
-                </el-tooltip>
-              </template>
-              <template #default="scope">
-                <el-tooltip :content="running ? $t('audit.previousReportReadOnly') : $t('audit.noApprovableAction')" :disabled="!running && Boolean(scope.row.action)">
-                  <span class="anomaly-checkbox">
+          <div class="audit-table-region">
+            <el-table :data="pagedAnomalies" height="100%" row-key="id" @row-click="openAnomaly">
+              <el-table-column width="48" align="center">
+                <template #header>
+                  <el-tooltip :content="$t('audit.selectAllFiltered')">
                     <el-checkbox
-                      :model-value="review.anomalyActionIds.includes(scope.row.id)"
-                      :disabled="running || !scope.row.action"
-                      @click.stop
-                      @change="value => toggleAnomaly(scope.row.id, value)"
+                      :model-value="allFilteredAnomaliesSelected"
+                      :indeterminate="someFilteredAnomaliesSelected"
+                      :disabled="running || filteredActionableAnomalyIds.length === 0"
+                      @change="toggleAllFilteredAnomalies"
                     />
-                  </span>
-                </el-tooltip>
-              </template>
-            </el-table-column>
-            <el-table-column :label="$t('audit.severity')" width="94">
-              <template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="plain">{{ $t(`audit.${scope.row.severity}`) }}</el-tag></template>
-            </el-table-column>
-            <el-table-column :label="$t('audit.type')" min-width="190" show-overflow-tooltip>
-              <template #default="scope">{{ auditTypeLabel(scope.row.type) }}</template>
-            </el-table-column>
-            <el-table-column prop="reason" :label="$t('audit.reason')" min-width="280" show-overflow-tooltip />
-            <el-table-column prop="filepath" :label="$t('audit.filepath')" min-width="420" show-overflow-tooltip />
-            <el-table-column width="54" align="center">
-              <template #default="scope">
-                <el-tooltip :content="$t('audit.locate')"><el-button link :icon="FolderOpened" @click.stop="locate(scope.row.filepath)" /></el-tooltip>
-              </template>
-            </el-table-column>
-          </el-table>
+                  </el-tooltip>
+                </template>
+                <template #default="scope">
+                  <el-tooltip :content="running ? $t('audit.previousReportReadOnly') : $t('audit.noApprovableAction')" :disabled="!running && Boolean(scope.row.action)">
+                    <span class="anomaly-checkbox">
+                      <el-checkbox
+                        :model-value="isAnomalySelected(scope.row.id)"
+                        :disabled="running || !scope.row.action"
+                        @click.stop
+                        @change="value => toggleAnomaly(scope.row.id, value)"
+                      />
+                    </span>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
+              <el-table-column :label="$t('audit.severity')" width="94">
+                <template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="plain">{{ $t(`audit.${scope.row.severity}`) }}</el-tag></template>
+              </el-table-column>
+              <el-table-column :label="$t('audit.type')" min-width="190" show-overflow-tooltip>
+                <template #default="scope">{{ auditTypeLabel(scope.row.type) }}</template>
+              </el-table-column>
+              <el-table-column prop="reason" :label="$t('audit.reason')" min-width="280" show-overflow-tooltip />
+              <el-table-column prop="filepath" :label="$t('audit.filepath')" min-width="420" show-overflow-tooltip />
+              <el-table-column width="54" align="center">
+                <template #default="scope">
+                  <el-tooltip :content="$t('audit.locate')"><el-button link :icon="FolderOpened" @click.stop="locate(scope.row.filepath)" /></el-tooltip>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <el-pagination
+            v-model:current-page="anomalyPage"
+            v-model:page-size="anomalyPageSize"
+            class="table-pagination"
+            :page-sizes="pageSizes"
+            :total="filteredAnomalies.length"
+            layout="total, sizes, prev, pager, next, jumper"
+          />
         </el-tab-pane>
 
-        <el-tab-pane :label="$t('audit.dedupTab')" name="duplicates">
+        <el-tab-pane :label="$t('audit.dedupTab')" name="duplicates" class="audit-list-pane">
           <div class="filter-row">
-            <el-input v-model="duplicateSearch" :prefix-icon="Search" clearable :placeholder="$t('audit.filterPlaceholder')" />
+            <el-input v-model="duplicateSearchInput" :prefix-icon="Search" clearable :placeholder="$t('audit.filterPlaceholder')" />
             <el-select v-model="duplicateKindFilter" clearable :placeholder="$t('audit.type')">
               <el-option v-for="kind in duplicateKinds" :key="kind" :label="auditTypeLabel(kind)" :value="kind" />
             </el-select>
           </div>
-          <el-table :data="filteredDuplicates" height="calc(100vh - 335px)" row-key="id" @row-click="openDuplicate">
-            <el-table-column width="48" align="center">
-              <template #default="scope"><el-icon v-if="review.duplicateSelections[scope.row.id]"><Select /></el-icon></template>
-            </el-table-column>
-            <el-table-column :label="$t('audit.type')" width="150">
-              <template #default="scope">{{ auditTypeLabel(scope.row.kind) }}</template>
-            </el-table-column>
-            <el-table-column :label="$t('audit.eligibility')" width="130">
-              <template #default="scope">
-                <el-tag :type="scope.row.eligible ? 'success' : 'warning'" effect="plain">{{ scope.row.eligible ? $t('audit.approvable') : $t('audit.manualReview') }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column :label="$t('audit.itemCount')" width="100"><template #default="scope">{{ scope.row.items.length }}</template></el-table-column>
-            <el-table-column :label="$t('audit.potentialSpace')" width="130"><template #default="scope">{{ formatBytes(scope.row.potentialBytes) }}</template></el-table-column>
-            <el-table-column :label="$t('audit.filepath')" min-width="480" show-overflow-tooltip>
-              <template #default="scope">{{ scope.row.items.map(item => item.filepath).join(' | ') }}</template>
-            </el-table-column>
-          </el-table>
+          <div class="audit-table-region">
+            <el-table :data="pagedDuplicates" height="100%" row-key="id" @row-click="openDuplicate">
+              <el-table-column width="48" align="center">
+                <template #default="scope"><el-icon v-if="review.duplicateSelections[scope.row.id]"><Select /></el-icon></template>
+              </el-table-column>
+              <el-table-column :label="$t('audit.type')" width="150">
+                <template #default="scope">{{ auditTypeLabel(scope.row.kind) }}</template>
+              </el-table-column>
+              <el-table-column :label="$t('audit.eligibility')" width="130">
+                <template #default="scope">
+                  <el-tag :type="scope.row.eligible ? 'success' : 'warning'" effect="plain">{{ scope.row.eligible ? $t('audit.approvable') : $t('audit.manualReview') }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column :label="$t('audit.itemCount')" width="100"><template #default="scope">{{ scope.row.items.length }}</template></el-table-column>
+              <el-table-column :label="$t('audit.potentialSpace')" width="130"><template #default="scope">{{ formatBytes(scope.row.potentialBytes) }}</template></el-table-column>
+              <el-table-column :label="$t('audit.filepath')" min-width="480" show-overflow-tooltip>
+                <template #default="scope">{{ scope.row.items.map(item => item.filepath).join(' | ') }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <el-pagination
+            v-model:current-page="duplicatePage"
+            v-model:page-size="duplicatePageSize"
+            class="table-pagination"
+            :page-sizes="pageSizes"
+            :total="filteredDuplicates.length"
+            layout="total, sizes, prev, pager, next, jumper"
+          />
         </el-tab-pane>
 
         <el-tab-pane :label="$t('audit.approvalTab')" name="approval">
@@ -273,7 +293,7 @@
 </template>
 
 <script setup>
-import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
+import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Connection, DocumentChecked, FolderOpened, Picture, Refresh, Search, Select, Tickets, TopRight, VideoPause, VideoPlay } from '@element-plus/icons-vue'
@@ -294,12 +314,18 @@ const scanMode = ref('quick')
 const deepScope = ref('anomalies')
 const onlineScope = ref('conflicts')
 const forceOnline = ref(false)
+const anomalySearchInput = ref('')
 const anomalySearch = ref('')
 const severityFilter = ref('')
 const anomalyTypeFilter = ref('')
 const actionableOnly = ref(false)
+const duplicateSearchInput = ref('')
 const duplicateSearch = ref('')
 const duplicateKindFilter = ref('')
+const anomalyPage = ref(1)
+const anomalyPageSize = ref(50)
+const duplicatePage = ref(1)
+const duplicatePageSize = ref(50)
 const anomalyDrawer = ref(false)
 const duplicateDrawer = ref(false)
 const selectedAnomaly = shallowRef(null)
@@ -310,6 +336,9 @@ const duplicateDraft = reactive({ keepId: null, quarantineIds: [] })
 const quarantineRoot = ref(`${String(initialSetting.library).replace(/[\\/][^\\/]+[\\/]?$/, '')}\\DedupeReview`)
 const severities = ['critical', 'high', 'medium', 'low']
 const availabilitySites = ['ehentai', 'exhentai']
+const pageSizes = [50, 100, 200, 500]
+const anomalySearchIndex = shallowRef(new Map())
+const duplicateSearchIndex = shallowRef(new Map())
 const modeOptions = computed(() => [
   { label: t('audit.quickScan'), value: 'quick' },
   { label: t('audit.deepScan'), value: 'deep' },
@@ -338,21 +367,28 @@ const anomalyBookCount = computed(() => report.value?.summary?.anomalyBooks ??
 const anomalyTypes = computed(() => [...new Set((report.value?.anomalies || []).map(item => item.type))].sort())
 const duplicateKinds = computed(() => [...new Set((report.value?.duplicates || []).map(item => item.kind))].sort())
 const filteredAnomalies = computed(() => (report.value?.anomalies || []).filter(item => {
-  const search = anomalySearch.value.toLowerCase()
   return (!severityFilter.value || item.severity === severityFilter.value) &&
     (!anomalyTypeFilter.value || item.type === anomalyTypeFilter.value) &&
     (!actionableOnly.value || Boolean(item.action)) &&
-    (!search || `${item.type} ${auditTypeLabel(item.type)} ${item.reason} ${item.filepath || ''}`.toLowerCase().includes(search))
+    (!anomalySearch.value || (anomalySearchIndex.value.get(item.id) || '').includes(anomalySearch.value))
 }))
 const filteredDuplicates = computed(() => (report.value?.duplicates || []).filter(item => {
-  const search = duplicateSearch.value.toLowerCase()
   return (!duplicateKindFilter.value || item.kind === duplicateKindFilter.value) &&
-    (!search || `${item.kind} ${auditTypeLabel(item.kind)} ${item.items.map(book => `${book.title} ${book.filepath}`).join(' ')}`.toLowerCase().includes(search))
+    (!duplicateSearch.value || (duplicateSearchIndex.value.get(item.id) || '').includes(duplicateSearch.value))
 }))
+const pagedAnomalies = computed(() => {
+  const start = (anomalyPage.value - 1) * anomalyPageSize.value
+  return filteredAnomalies.value.slice(start, start + anomalyPageSize.value)
+})
+const pagedDuplicates = computed(() => {
+  const start = (duplicatePage.value - 1) * duplicatePageSize.value
+  return filteredDuplicates.value.slice(start, start + duplicatePageSize.value)
+})
+const selectedAnomalyIdSet = computed(() => new Set(review.anomalyActionIds))
+const isAnomalySelected = id => selectedAnomalyIdSet.value.has(id)
 const filteredActionableAnomalyIds = computed(() => filteredAnomalies.value.filter(item => item.action).map(item => item.id))
 const selectedFilteredAnomalyCount = computed(() => {
-  const selectedIds = new Set(review.anomalyActionIds)
-  return filteredAnomalies.value.reduce((count, item) => count + Number(selectedIds.has(item.id)), 0)
+  return filteredAnomalies.value.reduce((count, item) => count + Number(selectedAnomalyIdSet.value.has(item.id)), 0)
 })
 const anomalyFilterScopeLabel = computed(() => {
   if (anomalyTypeFilter.value) return auditTypeLabel(anomalyTypeFilter.value)
@@ -360,9 +396,9 @@ const anomalyFilterScopeLabel = computed(() => {
   return t('audit.allAnomalies')
 })
 const allFilteredAnomaliesSelected = computed(() => filteredActionableAnomalyIds.value.length > 0 &&
-  filteredActionableAnomalyIds.value.every(id => review.anomalyActionIds.includes(id)))
+  filteredActionableAnomalyIds.value.every(id => selectedAnomalyIdSet.value.has(id)))
 const someFilteredAnomaliesSelected = computed(() => !allFilteredAnomaliesSelected.value &&
-  filteredActionableAnomalyIds.value.some(id => review.anomalyActionIds.includes(id)))
+  filteredActionableAnomalyIds.value.some(id => selectedAnomalyIdSet.value.has(id)))
 const pendingOnlineBookIds = computed(() => {
   if (!report.value || report.value.mode === 'online') return []
   return [...new Set((report.value.anomalies || [])
@@ -382,11 +418,24 @@ let removeLogListener
 let lastReportPath = null
 let selectVerifiedActions = false
 let anomalyPreviewRequest = 0
+let anomalySearchTimer = null
+let duplicateSearchTimer = null
 let stateFrame = null
 let pendingState = null
 let reloadPromise = null
 let reloadRequested = false
 
+const normalizeSearchText = value => String(value || '').trim().toLocaleLowerCase()
+const rebuildSearchIndexes = nextReport => {
+  anomalySearchIndex.value = new Map((nextReport?.anomalies || []).map(item => [
+    item.id,
+    normalizeSearchText(`${item.type || ''} ${auditTypeLabel(item.type)} ${item.reason || ''} ${item.filepath || ''}`)
+  ]))
+  duplicateSearchIndex.value = new Map((nextReport?.duplicates || []).map(item => [
+    item.id,
+    normalizeSearchText(`${item.kind || ''} ${auditTypeLabel(item.kind)} ${(item.items || []).map(book => `${book.title || ''} ${book.filepath || ''}`).join(' ')}`)
+  ]))
+}
 const assignState = value => {
   if (!value) return false
   const currentUpdatedAt = Date.parse(state.updatedAt || '')
@@ -403,6 +452,7 @@ const loadReportSnapshot = async () => {
   ])
   assignState(nextState)
   report.value = nextReport ? markRaw(nextReport) : null
+  rebuildSearchIndexes(nextReport)
   if (nextReview) {
     review.anomalyActionIds = nextReview.anomalyActionIds || []
     review.duplicateSelections = nextReview.duplicateSelections || {}
@@ -443,6 +493,29 @@ const scheduleStateUpdate = value => {
     }
   })
 }
+watch(anomalySearchInput, value => {
+  clearTimeout(anomalySearchTimer)
+  anomalySearchTimer = setTimeout(() => {
+    anomalySearch.value = normalizeSearchText(value)
+    anomalyPage.value = 1
+  }, 140)
+})
+watch(duplicateSearchInput, value => {
+  clearTimeout(duplicateSearchTimer)
+  duplicateSearchTimer = setTimeout(() => {
+    duplicateSearch.value = normalizeSearchText(value)
+    duplicatePage.value = 1
+  }, 140)
+})
+watch([severityFilter, anomalyTypeFilter, actionableOnly], () => { anomalyPage.value = 1 })
+watch(duplicateKindFilter, () => { duplicatePage.value = 1 })
+watch([() => filteredAnomalies.value.length, anomalyPageSize], ([total, pageSize]) => {
+  anomalyPage.value = Math.min(anomalyPage.value, Math.max(1, Math.ceil(total / pageSize)))
+})
+watch([() => filteredDuplicates.value.length, duplicatePageSize], ([total, pageSize]) => {
+  duplicatePage.value = Math.min(duplicatePage.value, Math.max(1, Math.ceil(total / pageSize)))
+})
+watch(locale, () => rebuildSearchIndexes(report.value))
 const launchAudit = async request => {
   try {
     assignState(await window.auditApi.start(request))
@@ -574,31 +647,39 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   removeStateListener?.()
   removeLogListener?.()
+  clearTimeout(anomalySearchTimer)
+  clearTimeout(duplicateSearchTimer)
   if (stateFrame !== null) window.cancelAnimationFrame(stateFrame)
 })
 </script>
 
 <style scoped>
-.audit-shell { min-height: 100vh; color: var(--el-text-color-primary); background: var(--el-bg-color); }
-.audit-toolbar { min-height: 72px; padding: 10px 18px; border-bottom: 1px solid var(--el-border-color); display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.audit-shell { height: 100vh; overflow: hidden; display: flex; flex-direction: column; color: var(--el-text-color-primary); background: var(--el-bg-color); }
+.audit-toolbar { flex: 0 0 auto; min-height: 72px; padding: 10px 18px; border-bottom: 1px solid var(--el-border-color); display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .audit-heading { min-width: 0; }
 .audit-heading h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: 0; }
 .audit-heading span { display: block; max-width: 680px; color: var(--el-text-color-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .audit-actions { display: flex; align-items: center; gap: 8px; }
 .scope-select { width: 160px; }
-.task-band { padding: 10px 18px; border-bottom: 1px solid var(--el-border-color); }
+.task-band { flex: 0 0 auto; padding: 10px 18px; border-bottom: 1px solid var(--el-border-color); }
 .task-line { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px; }
 .task-band .el-alert { margin-top: 8px; }
-.summary-band { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); border-bottom: 1px solid var(--el-border-color); }
+.summary-band { flex: 0 0 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); border-bottom: 1px solid var(--el-border-color); }
 .summary-band div { padding: 10px 18px; border-right: 1px solid var(--el-border-color); }
 .summary-band strong, .summary-band span { display: block; }
 .summary-band strong { font-size: 18px; }
 .summary-band span { margin-top: 3px; color: var(--el-text-color-secondary); font-size: 12px; }
-.audit-tabs { padding: 0 18px; }
+.audit-tabs { flex: 1 1 auto; min-height: 0; padding: 0 18px 58px; display: flex; flex-direction: column; box-sizing: border-box; }
+.audit-tabs :deep(.el-tabs__header) { flex: 0 0 auto; }
+.audit-tabs :deep(.el-tabs__content) { flex: 1 1 auto; min-height: 0; }
+.audit-tabs :deep(.el-tab-pane) { height: 100%; min-height: 0; }
+.audit-tabs :deep(.audit-list-pane) { display: flex; flex-direction: column; }
 .filter-row { display: grid; grid-template-columns: minmax(280px, 1fr) 180px 240px; gap: 10px; margin-bottom: 10px; }
 .filter-meta-row { display: flex; min-height: 32px; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
 .filter-counts { display: inline-flex; align-items: center; gap: 14px; color: var(--el-text-color-secondary); font-size: 13px; font-variant-numeric: tabular-nums; }
 .filter-counts strong { padding-left: 14px; color: var(--el-text-color-primary); border-left: 1px solid var(--el-border-color); font-weight: 600; }
+.audit-table-region { flex: 1 1 auto; min-height: 120px; overflow: hidden; }
+.table-pagination { flex: 0 0 auto; min-height: 42px; padding-top: 8px; justify-content: flex-end; }
 .approval-pane { max-width: 860px; padding: 14px 0; }
 .approval-line { display: flex; justify-content: space-between; padding: 14px 4px; border-bottom: 1px solid var(--el-border-color-lighter); }
 .path-line { display: grid; grid-template-columns: 1fr 40px; gap: 8px; margin: 20px 0; }
@@ -637,7 +718,7 @@ onBeforeUnmount(() => {
 </style>
 
 <style>
-html, body, #audit-app { margin: 0; min-width: 720px; min-height: 100%; background: var(--el-bg-color); }
+html, body, #audit-app { margin: 0; min-width: 720px; height: 100%; overflow: hidden; background: var(--el-bg-color); }
 html.light { color-scheme: light; }
 html.exhentai { background: #34353b; --el-bg-color: #34353b; --el-bg-color-overlay: #34353b; --el-color-primary: #909399; --el-fill-color-light: #3d414b; --el-border-color: #6e6e6e; }
 html.e-hentai { background: #e2e0d2; --el-bg-color: #e2e0d2; --el-bg-color-overlay: #e2e0d2; --el-color-primary: #521613; --el-fill-color-light: #edebe0; --el-border-color: #919191; }
