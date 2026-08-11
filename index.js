@@ -1274,6 +1274,21 @@ const saveCollectionListToFile = async list => {
   return await fs.promises.rename(tempPath, targetPath)
 }
 
+const removeBookFromCollections = async book => {
+  const references = new Set([book?.id, book?.hash].filter(Boolean))
+  if (!references.size) return false
+  let changed = false
+  const nextCollectionList = collectionList.map(collection => {
+    const previousList = Array.isArray(collection.list) ? collection.list : []
+    const nextList = previousList.filter(value => !references.has(value))
+    if (nextList.length === previousList.length) return collection
+    changed = true
+    return { ...collection, list: nextList }
+  })
+  if (changed) await saveCollectionListToFile(nextCollectionList)
+  return changed
+}
+
 ipcMain.handle('save-collection-list', async (event, list) => {
   return await libraryTaskCoordinator.runMutation('save-collection-list', () => saveCollectionListToFile(list))
 })
@@ -1392,7 +1407,8 @@ ipcMain.handle('get-default-manga-reader', async (event, arg) => {
 
 ipcMain.handle('delete-local-book', async (event, filepath) => {
   return await libraryTaskCoordinator.runMutation('delete-local-book', async () => {
-    if (filepath.startsWith(setting.library)) {
+    if (!String(filepath || '').startsWith(setting.library)) return false
+    const deletedBooks = await Manga.findAll({ where: { filepath }, raw: true })
     try {
       const stats = await fs.promises.stat(filepath)
       if (stats.isDirectory()) {
@@ -1411,17 +1427,20 @@ ipcMain.handle('delete-local-book', async (event, filepath) => {
         }
 
         const remainingFiles = await fs.promises.readdir(filepath)
-        if (remainingFiles.length === 0) {
-          await shell.trashItem(filepath)
-        }
+        if (remainingFiles.length === 0) await shell.trashItem(filepath)
       } else {
         await shell.trashItem(filepath)
       }
     } catch (e) {
       sendMessageToWebContents(`Delete ${filepath} failed because ${e}`)
     }
-    await Manga.destroy({ where: { filepath: filepath } })
+    await Manga.destroy({ where: { filepath } })
+    for (const book of deletedBooks) {
+      await removeBookFromCollections(book)
+      await notifyBookChanged({ bookId: book.id, type: 'deleted', sourceWebContents: event.sender })
     }
+    bookDetailService.invalidateTagCatalog()
+    return { success: true, bookIds: deletedBooks.map(book => book.id) }
   })
 })
 
