@@ -178,10 +178,7 @@ const notifyBookChanged = async ({ bookId, type = 'updated', sourceWebContents =
   if (isWindowAvailable(mainWindow) && mainWindow.webContents !== sourceWebContents) {
     mainWindow.webContents.send('book-detail:book-changed', payload)
   }
-  if (
-    isWindowAvailable(bookDetailWindow) &&
-    pendingBookDetailContext?.bookId === normalizedBookId
-  ) {
+  if (isWindowAvailable(bookDetailWindow) && bookDetailWindow.webContents !== sourceWebContents) {
     bookDetailWindow.webContents.send('book-detail:book-changed', payload)
   }
   return payload
@@ -1335,6 +1332,11 @@ ipcMain.handle('book-detail:get-tag-catalog', async () => {
   return await bookDetailService.getTagCatalog()
 })
 
+ipcMain.handle('book-detail:search-books', async (event, request = {}) => {
+  await databaseReady
+  return await bookDetailService.searchEffectiveBooks(request)
+})
+
 ipcMain.handle('book-detail:navigate', async (event, request = {}) => {
   const context = normalizeBookDetailContext(request)
   pendingBookDetailContext = context
@@ -1343,33 +1345,6 @@ ipcMain.handle('book-detail:navigate', async (event, request = {}) => {
 
 ipcMain.handle('book-detail:close-window', async () => {
   if (isWindowAvailable(bookDetailWindow)) bookDetailWindow.close()
-  return true
-})
-
-ipcMain.handle('book-detail:request-main-action', async (event, request = {}) => {
-  const action = String(request.action || '')
-  const allowedActions = new Set(['openContentView', 'openThumbnailView', 'openLocalBook', 'searchFromTag'])
-  if (!allowedActions.has(action)) throw new Error('UNSUPPORTED_BOOK_DETAIL_ACTION')
-  const bookId = normalizeBookId(request.bookId)
-  if (action !== 'searchFromTag' && !bookId) throw new Error('INVALID_BOOK_ID')
-  const payload = action === 'searchFromTag'
-    ? {
-        tag: String(request.payload?.tag || '').slice(0, 512),
-        cat: String(request.payload?.cat || '').slice(0, 128)
-      }
-    : undefined
-  const message = { action, bookId, payload }
-
-  if (!isWindowAvailable(mainWindow)) mainWindow = createWindow()
-  if (mainWindow.isMinimized()) mainWindow.restore()
-  mainWindow.show()
-  mainWindow.setSkipTaskbar(false)
-  mainWindow.focus()
-  if (mainWindow.webContents.isLoadingMainFrame()) {
-    mainWindow.webContents.once('did-finish-load', () => mainWindow.webContents.send('book-detail:main-action', message))
-  } else {
-    mainWindow.webContents.send('book-detail:main-action', message)
-  }
   return true
 })
 

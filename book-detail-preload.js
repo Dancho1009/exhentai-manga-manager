@@ -1,13 +1,13 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webFrame } = require('electron')
 
 const invokeChannels = new Set([
   'book-detail:get-bootstrap',
   'book-detail:get-context',
   'book-detail:get-book',
   'book-detail:get-tag-catalog',
+  'book-detail:search-books',
   'book-detail:navigate',
   'book-detail:close-window',
-  'book-detail:request-main-action',
   'save-book',
   'increment-read-count',
   'open-local-book',
@@ -23,6 +23,13 @@ const invokeChannels = new Set([
   'nhentai-metadata',
   'nhentai-search',
   'get-ex-webpage',
+  'set-progress-bar',
+  'load-manga-image-list',
+  'release-sendimagelock',
+  'use-new-cover',
+  'delete-image',
+  'copy-image-to-clipboard',
+  'update-window-title',
   'copy-text-to-clipboard',
   'read-text-from-clipboard'
 ])
@@ -33,7 +40,11 @@ const eventChannels = new Set([
   'book-detail:library-changed',
   'book-detail:lock-state',
   'book-detail:setting-changed',
-  'book-detail:translation-changed'
+  'book-detail:translation-changed',
+  'send-message',
+  'manga-image',
+  'manga-thumbnail-image',
+  'manga-load-error'
 ])
 
 const assertChannel = (channel, allowed) => {
@@ -64,13 +75,20 @@ contextBridge.exposeInMainWorld('bookDetailApi', {
   getContext: () => ipcRenderer.invoke('book-detail:get-context'),
   getBook: bookId => ipcRenderer.invoke('book-detail:get-book', bookId),
   getTagCatalog: () => ipcRenderer.invoke('book-detail:get-tag-catalog'),
+  searchBooks: request => ipcRenderer.invoke('book-detail:search-books', request),
   navigate: context => ipcRenderer.invoke('book-detail:navigate', context),
   closeWindow: () => ipcRenderer.invoke('book-detail:close-window'),
-  requestMainAction: request => ipcRenderer.invoke('book-detail:request-main-action', request),
   onOpen: listener => listen('book-detail:open', listener, true),
   onBookChanged: listener => listen('book-detail:book-changed', listener, true),
   onLibraryChanged: listener => listen('book-detail:library-changed', listener, true),
   onLockState: listener => listen('book-detail:lock-state', listener, true),
   onSettingChanged: listener => listen('book-detail:setting-changed', listener, true),
-  onTranslationChanged: listener => listen('book-detail:translation-changed', listener, true)
+  onTranslationChanged: listener => listen('book-detail:translation-changed', listener, true),
+  onMessage: listener => listen('send-message', listener, true)
+})
+
+contextBridge.exposeInMainWorld('electronFunction', {
+  'get-zoom-level': () => webFrame.getZoomLevel(),
+  'set-zoom-level': level => webFrame.setZoomLevel(level),
+  'insert-css': css => webFrame.insertCSS(css, { cssOrigin: 'user' })
 })

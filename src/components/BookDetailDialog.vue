@@ -245,7 +245,6 @@ const emit = defineEmits([
   'searchFromTag',
   'jumpMangeDetail',
   'addToHistory',
-  'requestMainAction',
 ])
 
 const dialogVisibleBookDetail = ref(false)
@@ -367,10 +366,6 @@ const showFile = (filepath) => {
   ipcRenderer.invoke('show-file', filepath)
 }
 const openLocalBook = (book) => {
-  if (props.standalone) {
-    emit('requestMainAction', 'openLocalBook', book)
-    return
-  }
   bookDetail.value = book
   if (setting.value.imageExplorer) {
     bookDetail.value.readCount += 1
@@ -401,10 +396,10 @@ const deleteBook = async (book) => {
       emit('saveCollection')
     } else {
       const findBookInBookList = _.findIndex(bookList.value, b => b.filepath === book.filepath)
-      bookList.value.splice(findBookInBookList, 1)
+      if (findBookInBookList >= 0) bookList.value.splice(findBookInBookList, 1)
       displayBookList.value = _.filter(displayBookList.value, b => b.filepath !== book.filepath)
-      emit('handleRemoveBookDisplay')
     }
+    emit('handleRemoveBookDisplay', book)
   })
 }
 const deleteLocalBook = (book) => {
@@ -641,6 +636,7 @@ const onMangaCommentContextMenu = (e, comment) => {
 defineExpose({
   dialogVisibleBookDetail,
   editingTag,
+  editTags,
   openBookDetail,
   openLocalBook,
   rescanBook,

@@ -184,6 +184,7 @@
     "originalViewer": "Original Viewer"
   },
   "c": {
+    "back": "Back",
     "selectCollectionList": "Select collectionList.json",
     "selectMetadataSqlite": "Select metadata.sqlite",
     "importMessage": "Import is complete, if the imported data have collections, you need to open and edit the collection and save it manually",

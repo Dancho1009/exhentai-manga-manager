@@ -184,6 +184,7 @@
     "originalViewer": "原版阅读器"
   },
   "c": {
+    "back": "返回",
     "selectCollectionList": "选择collectionList.json",
     "selectMetadataSqlite": "选择metadata.sqlite",
     "importMessage": "导入完成, 如导入数据有合集, 需打开编辑合集后手动保存",

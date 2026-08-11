@@ -437,21 +437,6 @@ export default defineComponent({
       await this.loadBookList(false)
       await this.loadCollectionList()
     })
-    ipcRenderer.on('book-detail:main-action', async (_event, request) => {
-      if (request?.action === 'searchFromTag') {
-        this.searchFromTag(request.payload?.tag, request.payload?.cat)
-        return
-      }
-      let book = this.bookList.find(item => item.id === request?.bookId)
-      if (!book) {
-        await this.loadBookList(false)
-        book = this.bookList.find(item => item.id === request?.bookId)
-      }
-      if (!book) return
-      if (request.action === 'openContentView') this.openContentView(book)
-      else if (request.action === 'openThumbnailView') this.openThumbnailView(book)
-      else if (request.action === 'openLocalBook') this.$refs.BookDetailDialogRef.openLocalBook(book)
-    })
   },
   beforeUnmount () {
     window.removeEventListener('keydown', this.resolveKey)
