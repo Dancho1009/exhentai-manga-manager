@@ -18,6 +18,7 @@ class AuditJobManager extends EventEmitter {
     this.progressFlushTimer = null
     this.progressFlushInFlight = Promise.resolve()
     this.progressIntervalMs = 100
+    this.reportCache = null
     this.state = {
       jobId: null,
       status: 'idle',
@@ -134,6 +135,7 @@ class AuditJobManager extends EventEmitter {
         onlineScope: options.onlineScope,
         onlineTargetCount: Array.isArray(options.onlineBookIds) ? options.onlineBookIds.length : 0
       })
+      this.reportCache = null
       const modeLabel = options.mode === 'deep' ? '深度' : options.mode === 'online' ? '在线来源' : '快速'
       await this.appendLog(`启动${modeLabel}检查`)
       worker = new Worker(path.join(__dirname, 'audit_worker.js'), {
@@ -226,7 +228,18 @@ class AuditJobManager extends EventEmitter {
   async getReport() {
     const reportPath = this.state.reportPath || this.state.previousReportPath
     if (!reportPath) return null
-    return await readJson(reportPath)
+    const stat = await fs.promises.stat(reportPath).catch(() => null)
+    if (!stat) return null
+    if (
+      this.reportCache?.path === reportPath &&
+      this.reportCache.mtimeMs === stat.mtimeMs &&
+      this.reportCache.size === stat.size
+    ) {
+      return this.reportCache.value
+    }
+    const value = await readJson(reportPath)
+    this.reportCache = { path: reportPath, mtimeMs: stat.mtimeMs, size: stat.size, value }
+    return value
   }
 
   async saveReview(review) {

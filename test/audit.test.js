@@ -149,6 +149,24 @@ test('audit manager keeps the previous report readable while a new task is runni
   assert.deepEqual(await manager.getReport(), previousReport)
 })
 
+test('audit manager reuses an unchanged parsed report and refreshes changed files', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-report-cache-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const reportPath = path.join(root, 'report.json')
+  await atomicWriteJson(reportPath, { jobId: 'cached-job', anomalies: [] })
+  const manager = new AuditJobManager({ storePath: root, coordinator: new LibraryTaskCoordinator() })
+  manager.state = { ...manager.state, jobId: 'cached-job', reportPath }
+
+  const first = await manager.getReport()
+  const second = await manager.getReport()
+  assert.strictEqual(second, first)
+
+  await atomicWriteJson(reportPath, { jobId: 'cached-job', anomalies: [{ id: 'changed' }] })
+  const changed = await manager.getReport()
+  assert.notStrictEqual(changed, first)
+  assert.equal(changed.anomalies[0].id, 'changed')
+})
+
 test('audit cache migrates and preserves lightweight ehviewer inspections independently', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-cache-'))
   let cache
