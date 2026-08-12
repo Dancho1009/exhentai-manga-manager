@@ -120,6 +120,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       }
     }
 
+    progress('finalizing-report', 0, 1)
     for (const candidateGroup of [...contentPrefilter.values()].filter(group => group.length > 1)) {
       const inspected = candidateGroup.filter(item => inspections.has(String(item.raw.id)))
       const imageGroups = groupBy(inspected, item => inspections.get(String(item.raw.id)).imageSignature)
@@ -183,6 +184,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     }
     const reportPath = path.join(jobDir, 'report.json')
     await atomicWriteJson(reportPath, report)
+    progress('finalizing-report', 1, 1)
     return { reportPath, summary: report.summary }
   } finally {
     if (cache) await cache.close()

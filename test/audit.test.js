@@ -92,10 +92,10 @@ const makeArchiveBuffer = ({ image = 'image-one', gid = '123456', token = 'abcde
   return zip.toBuffer()
 }
 
-const writeWorkerReport = async ({ workerFilename, root, jobId, options }) => {
+const writeWorkerReport = async ({ workerFilename, root, jobId, options, onMessage = () => {} }) => {
   const jobDir = path.join(root, 'audit', 'jobs', workerFilename.startsWith('anomaly') ? 'anomaly' : 'dedupe', jobId)
   await fs.promises.mkdir(jobDir, { recursive: true })
-  const completed = await runAuditWorker(workerFilename, { jobId, jobDir, options })
+  const completed = await runAuditWorker(workerFilename, { jobId, jobDir, options, onMessage })
   return JSON.parse(await fs.promises.readFile(completed.reportPath, 'utf8'))
 }
 
@@ -136,6 +136,57 @@ test('task timing estimates the current phase from its own progress baseline', a
   assert.equal(calculateTaskTiming({ status: 'running', phaseCompleted: 3, phaseTotal: 10 }, now).remainingSeconds, null)
 })
 
+test('task stage summaries reflect conditional checks, execution type, and stopped work', async () => {
+  const { calculateTaskStages } = await import('../src/audit/taskStages.mjs')
+  const localOnly = calculateTaskStages({
+    taskType: 'anomaly',
+    phase: 'inspecting-book-health',
+    status: 'running',
+    options: { onlinePolicy: 'none' }
+  })
+  assert.deepEqual(localOnly.stages.map(item => item.id), ['prepare', 'snapshot', 'local-anomaly', 'report'])
+  assert.equal(localOnly.completedCount, 2)
+  assert.equal(localOnly.currentStage.id, 'local-anomaly')
+  assert.equal(localOnly.nextStage.id, 'report')
+  assert.equal(localOnly.remainingCount, 1)
+
+  const online = calculateTaskStages({
+    taskType: 'anomaly',
+    phase: 'checking-online-sources',
+    status: 'running',
+    options: { onlinePolicy: 'ehviewer' }
+  })
+  assert.deepEqual(online.stages.map(item => item.id), ['prepare', 'snapshot', 'local-anomaly', 'online-sources', 'report'])
+  assert.equal(online.completedCount, 3)
+  assert.equal(online.nextStage.id, 'report')
+
+  const stopped = calculateTaskStages({
+    taskType: 'dedupe',
+    phase: 'cancelled',
+    lastWorkPhase: 'hashing-archives',
+    status: 'interrupted'
+  })
+  assert.equal(stopped.currentStage.id, 'archive-hash')
+  assert.equal(stopped.currentStage.state, 'paused')
+  assert.equal(stopped.nextStage.id, 'content-verification')
+
+  const anomalyExecution = calculateTaskStages({
+    taskType: 'execution',
+    phase: 'writing-metadata',
+    status: 'running',
+    options: { sourceTaskType: 'anomaly' }
+  })
+  const dedupeExecution = calculateTaskStages({
+    taskType: 'execution',
+    phase: 'quarantining-files',
+    status: 'running',
+    options: { sourceTaskType: 'dedupe' }
+  })
+  assert.equal(anomalyExecution.stages.some(item => item.id === 'quarantine'), false)
+  assert.equal(dedupeExecution.currentStage.id, 'quarantine')
+  assert.equal(dedupeExecution.stages.length, anomalyExecution.stages.length + 1)
+})
+
 test('workspace manager serializes independent channel state and throttles progress', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-workspace-state-'))
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
@@ -152,6 +203,9 @@ test('workspace manager serializes independent channel state and throttles progr
   await manager.setChannelState('anomaly', { phase: 'stable-phase', phaseCompleted: 7, phaseTotal: 20 })
   assert.equal(manager.getState().channels.anomaly.phaseStartedAt, phaseStartedAt)
   assert.equal(manager.getState().channels.anomaly.phaseStartCompleted, 4)
+  assert.equal(manager.getState().channels.anomaly.lastWorkPhase, 'stable-phase')
+  await manager.setChannelState('anomaly', { status: 'cancelling', phase: 'cancelling' })
+  assert.equal(manager.getState().channels.anomaly.lastWorkPhase, 'stable-phase')
 
   manager.progressIntervalMs = 1000
   let emitted = 0
@@ -405,9 +459,11 @@ test('anomaly worker checks individual books and never emits duplicate groups', 
     tags: { artist: ['author'] }, url: 'https://exhentai.org/g/123456/abcdef1234/'
   }])
   const before = await fs.promises.readFile(archive)
+  const phases = []
   const report = await writeWorkerReport({
     workerFilename: 'anomaly_worker.js', root, jobId: 'anomaly-job',
-    options: { library, auditStorePath, onlinePolicy: 'none', sevenZipPath: null, ...databases }
+    options: { library, auditStorePath, onlinePolicy: 'none', sevenZipPath: null, ...databases },
+    onMessage: message => { if (message.type === 'progress') phases.push(message.phase) }
   })
   assert.equal(report.reportType, 'anomaly')
   assert.equal(report.executable, true)
@@ -416,6 +472,7 @@ test('anomaly worker checks individual books and never emits duplicate groups', 
   assert.ok(report.anomalies.some(item => item.type === 'library-file-untracked'))
   assert.equal(report.summary.anomalyBooks, 1)
   assert.equal('groups' in report, false)
+  assert.ok(phases.includes('finalizing-report'))
   assert.deepEqual(await fs.promises.readFile(archive), before)
 })
 
@@ -473,9 +530,11 @@ test('dedupe worker proves byte-identical archives and never emits book anomalie
     { id: 'book-1', title: 'first', hash: 'hash-one', coverHash: 'cover-one', filepath: first, pageCount: 1, bundleSize: firstStat.size, mtime: firstStat.mtime.toISOString(), filecount: 1, url: 'https://exhentai.org/g/123456/abcdef1234/' },
     { id: 'book-2', title: 'second', hash: 'hash-two', coverHash: 'cover-two', filepath: second, pageCount: 1, bundleSize: secondStat.size, mtime: secondStat.mtime.toISOString(), filecount: 1, url: 'https://exhentai.org/g/123456/abcdef1234/' }
   ])
+  const phases = []
   const report = await writeWorkerReport({
     workerFilename: 'dedupe_worker.js', root, jobId: 'dedupe-job',
-    options: { library, auditStorePath, forceContent: false, sevenZipPath: null, ...databases }
+    options: { library, auditStorePath, forceContent: false, sevenZipPath: null, ...databases },
+    onMessage: message => { if (message.type === 'progress') phases.push(message.phase) }
   })
   const exact = report.groups.find(group => group.kind === 'exact-archive')
   assert.equal(report.reportType, 'dedupe')
@@ -484,6 +543,7 @@ test('dedupe worker proves byte-identical archives and never emits book anomalie
   assert.equal(exact.items.length, 2)
   assert.match(exact.evidence.sha256, /^[a-f0-9]{64}$/)
   assert.equal('anomalies' in report, false)
+  assert.ok(phases.includes('finalizing-report'))
 })
 
 test('dedupe worker excludes unreadable candidates instead of marking them duplicate', async t => {

@@ -13,6 +13,7 @@ const {
 const { normalizeReview } = require('./review_validator.js')
 
 const ACTIVE_STATUSES = new Set(['running', 'cancelling'])
+const TERMINAL_PHASES = new Set(['idle', 'cancelling', 'cancelled', 'completed', 'failed', 'interrupted'])
 
 const sanitizeOptions = (taskType, options = {}) => {
   if (taskType === 'anomaly') {
@@ -97,6 +98,7 @@ class AuditWorkspaceManager extends EventEmitter {
         nextPatch.phaseStartedAt = new Date().toISOString()
         nextPatch.phaseStartCompleted = Math.max(0, Number(patch.phaseCompleted ?? patch.completed ?? 0) || 0)
       }
+      if (patch.phase && !TERMINAL_PHASES.has(patch.phase)) nextPatch.lastWorkPhase = patch.phase
       const next = await this.repository.saveChannelState(taskType, { ...current, ...nextPatch })
       this.states[taskType] = next
       const state = this.getState()
@@ -330,7 +332,7 @@ class AuditWorkspaceManager extends EventEmitter {
       await this.setChannelState(taskType, {
         activeJobId: jobId,
         status: 'running',
-        phase: 'preparing-execution',
+        phase: 'validating-approvals',
         completed: 0,
         total: 0,
         phaseCompleted: 0,

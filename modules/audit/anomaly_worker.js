@@ -294,6 +294,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       }
     }
 
+    progress('finalizing-report', 0, 1)
     sortAnomalies(anomalies)
     const report = {
       schemaVersion: REPORT_SCHEMA_VERSION,
@@ -325,6 +326,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     }
     const reportPath = path.join(jobDir, 'report.json')
     await atomicWriteJson(reportPath, report)
+    progress('finalizing-report', 1, 1)
     return { reportPath, summary: report.summary }
   } finally {
     if (availabilityCache) await availabilityCache.close()

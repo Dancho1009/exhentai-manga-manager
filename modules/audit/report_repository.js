@@ -20,6 +20,7 @@ const createIdleState = taskType => ({
   phaseTotal: 0,
   phaseStartedAt: null,
   phaseStartCompleted: 0,
+  lastWorkPhase: null,
   latestJobId: null,
   latestReportId: null,
   latestReportPath: null,
