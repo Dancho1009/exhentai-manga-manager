@@ -311,6 +311,7 @@ export default defineComponent({
       'cat2letter',
       'keyMap',
       'categoryOption',
+      'searchTypeList',
       'setting',
       'bookDetail',
       'bookList',
@@ -1334,7 +1335,17 @@ export default defineComponent({
           {
             label: this.$t('m.batchGetMetadata'),
             disabled,
-            onClick: () => this.getHomeBooksMetadata(books)
+            children: [
+              {
+                label: this.$t('m.autoMetadataSource'),
+                divided: true,
+                onClick: () => this.getHomeBooksMetadata(books)
+              },
+              ...this.searchTypeList.map(searchType => ({
+                label: searchType.label,
+                onClick: () => this.getHomeBooksMetadata(books, searchType.value)
+              }))
+            ]
           },
           {
             label: this.$t('m.resetMetadata'),
@@ -1391,9 +1402,14 @@ export default defineComponent({
         this.homeBatchActionRunning = false
       }
     },
-    async getHomeBooksMetadata (books) {
+    async getHomeBooksMetadata (books, server) {
       await this.runHomeBatchAction(async () => {
-        await this.$refs.SearchDialogRef.getBooksMetadata(books, this.setting.requireGap || 10000)
+        await this.$refs.SearchDialogRef.getBooksMetadata(
+          books,
+          this.setting.requireGap || 10000,
+          undefined,
+          server ? { server, forceSearch: true } : {}
+        )
       })
     },
     async resetHomeBooksMetadata (books) {

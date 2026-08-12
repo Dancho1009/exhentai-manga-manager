@@ -92,6 +92,7 @@
     "patchWarning": "此操作将删除目前所有封面并更新本地文件属性",
     "patchLocalMetadata": "修补本地元数据",
     "batchGetMetadata": "批量获取元数据",
+    "autoMetadataSource": "自动（已有 URL 优先，否则使用默认来源）",
     "reGetMetadata": "重新搜索并获取元数据",
     "exportMetadata": "备份元数据",
     "importMetadata": "还原元数据",

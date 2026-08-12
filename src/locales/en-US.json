@@ -92,6 +92,7 @@
     "patchWarning": "This operation will delete all current covers and update the local file properties",
     "patchLocalMetadata": "PatchLocalMeta",
     "batchGetMetadata": "BatchGetMetadata",
+    "autoMetadataSource": "Automatic (prefer existing URL, otherwise use default source)",
     "reGetMetadata": "Re-search and Get Metadata",
     "exportMetadata": "Backup Metadata",
     "importMetadata": "Restore Metadata",
