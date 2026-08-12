@@ -23,6 +23,10 @@
           <span>{{ activePhaseLabel }} · {{ activeCompleted }}/{{ activeTotal }}</span>
         </div>
         <el-progress :percentage="progressPercentage" :stroke-width="12" />
+        <div class="task-estimate-line">
+          <span>{{ $t('audit.estimatedRemainingTime') }} <strong>{{ activeTiming.remainingText }}</strong></span>
+          <span>{{ $t('audit.estimatedFinishTime') }} <strong>{{ activeTiming.finishText }}</strong></span>
+        </div>
         <el-alert v-if="activeState.error" type="error" :closable="false" :title="activeState.error" show-icon />
       </section>
 
@@ -69,6 +73,7 @@
         :logs="logs"
         :active-task="activeTask"
         :active-state="activeState"
+        :timing="activeTiming"
       />
     </main>
   </el-config-provider>
@@ -86,6 +91,7 @@ import AnomalyPanel from './audit/AnomalyPanel.vue'
 import DedupePanel from './audit/DedupePanel.vue'
 import ApprovalPanel from './audit/ApprovalPanel.vue'
 import AuditLogPanel from './audit/AuditLogPanel.vue'
+import { calculateTaskTiming, formatTaskDuration } from './audit/taskTiming.mjs'
 
 const props = defineProps({ initialSetting: { type: Object, required: true } })
 const { t, te, locale } = useI18n()
@@ -99,6 +105,8 @@ const idleState = taskType => ({
   total: 0,
   phaseCompleted: 0,
   phaseTotal: 0,
+  phaseStartedAt: null,
+  phaseStartCompleted: 0,
   latestReportId: null,
   error: null
 })
@@ -127,6 +135,8 @@ const quarantineRoot = ref(`${String(initialSetting.library || '').replace(/[\\/
 const reportLoadTokens = { anomaly: 0, dedupe: 0 }
 let removeStateListener
 let removeLogListener
+let clockTimer
+const now = ref(Date.now())
 
 const elementLocale = computed(() => locale.value === 'zh-TW' ? zhTwElement : locale.value === 'en-US' ? enElement : zhCnElement)
 const anomalyState = computed(() => workspace.value.channels?.anomaly || idleState('anomaly'))
@@ -147,6 +157,14 @@ const activeStatusLabel = computed(() => {
 const activePhaseLabel = computed(() => {
   const key = `audit.phase_${activeState.value.phase}`
   return te(key) ? t(key) : activeState.value.phase
+})
+const activeTiming = computed(() => {
+  const timing = calculateTaskTiming(activeState.value, now.value)
+  return {
+    elapsedText: formatTaskDuration(timing.elapsedSeconds),
+    remainingText: timing.remainingSeconds === null ? t('audit.estimatingTime') : formatTaskDuration(timing.remainingSeconds),
+    finishText: timing.finishAt === null ? t('audit.estimatingTime') : new Date(timing.finishAt).toLocaleString()
+  }
 })
 
 const normalizeWorkspace = value => ({
@@ -288,6 +306,7 @@ const reloadAllData = async () => {
 const reloadAll = () => runAction(reloadAllData)
 
 onMounted(async () => {
+  clockTimer = window.setInterval(() => { now.value = Date.now() }, 1000)
   removeStateListener = window.auditApi.onState(applyWorkspaceState)
   removeLogListener = window.auditApi.onLog(appendLog)
   try {
@@ -298,6 +317,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  window.clearInterval(clockTimer)
   removeStateListener?.()
   removeLogListener?.()
 })
@@ -331,6 +351,8 @@ onBeforeUnmount(() => {
 .audit-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; }
 .task-band { flex: 0 0 auto; padding: 10px 18px 12px; border-bottom: 1px solid var(--el-border-color); background: var(--el-fill-color-light); }
 .task-line { display: flex; justify-content: space-between; gap: 18px; margin-bottom: 7px; }
+.task-estimate-line { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px 26px; margin-top: 7px; color: var(--el-text-color-secondary); font-size: 12px; }
+.task-estimate-line strong { color: var(--el-text-color-regular); font-variant-numeric: tabular-nums; }
 .task-band :deep(.el-alert) { margin-top: 8px; }
 .audit-tabs { flex: 1 1 auto; min-height: 0; padding: 0 18px; }
 .audit-tabs :deep(.el-tabs__content) { height: calc(100% - 56px); min-height: 0; overflow: hidden; }

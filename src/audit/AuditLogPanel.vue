@@ -32,7 +32,9 @@
         />
         <div class="active-task-meta">
           <span><small>{{ $t('audit.startedAt') }}</small><strong>{{ startedAtText }}</strong></span>
-          <span><small>{{ $t('audit.elapsedTime') }}</small><strong>{{ elapsedText }}</strong></span>
+          <span><small>{{ $t('audit.elapsedTime') }}</small><strong>{{ timing.elapsedText }}</strong></span>
+          <span><small>{{ $t('audit.estimatedRemainingTime') }}</small><strong>{{ timing.remainingText }}</strong></span>
+          <span><small>{{ $t('audit.estimatedFinishTime') }}</small><strong>{{ timing.finishText }}</strong></span>
           <span v-if="optionLabels.length"><small>{{ $t('audit.taskOptions') }}</small><strong>{{ optionLabels.join(' · ') }}</strong></span>
         </div>
       </section>
@@ -50,20 +52,19 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Tickets } from '@element-plus/icons-vue'
 
 const props = defineProps({
   logs: { type: Array, default: () => [] },
   activeTask: { type: Object, default: null },
-  activeState: { type: Object, default: () => ({}) }
+  activeState: { type: Object, default: () => ({}) },
+  timing: { type: Object, default: () => ({ elapsedText: '-', remainingText: '-', finishText: '-' }) }
 })
 const { t, te } = useI18n()
 const activePanels = ref([])
 const filter = ref('all')
-const now = ref(Date.now())
-let clockTimer
 
 const filterOptions = computed(() => [
   { label: t('audit.allTasks'), value: 'all' },
@@ -101,15 +102,6 @@ const progressText = computed(() => hasProgressTotal.value
 const startedAtText = computed(() => props.activeState?.startedAt
   ? new Date(props.activeState.startedAt).toLocaleString()
   : '-')
-const elapsedText = computed(() => {
-  const startedAt = new Date(props.activeState?.startedAt || 0).getTime()
-  if (!Number.isFinite(startedAt) || startedAt <= 0) return '-'
-  const seconds = Math.max(0, Math.floor((now.value - startedAt) / 1000))
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  const remainder = seconds % 60
-  return [hours, minutes, remainder].map(value => String(value).padStart(2, '0')).join(':')
-})
 const optionLabels = computed(() => {
   const options = props.activeState?.options || {}
   if (props.activeTask?.type === 'anomaly') {
@@ -131,10 +123,6 @@ const optionLabels = computed(() => {
   return []
 })
 
-onMounted(() => {
-  clockTimer = window.setInterval(() => { now.value = Date.now() }, 1000)
-})
-onBeforeUnmount(() => window.clearInterval(clockTimer))
 </script>
 
 <style scoped>
