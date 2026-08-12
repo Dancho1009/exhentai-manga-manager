@@ -117,6 +117,24 @@ test('atomic JSON writes use independent temporary files under concurrency', asy
   assert.equal((await fs.promises.readdir(root)).some(name => name.endsWith('.tmp')), false)
 })
 
+test('task timing estimates the current phase from its own progress baseline', async () => {
+  const { calculateTaskTiming, formatTaskDuration } = await import('../src/audit/taskTiming.mjs')
+  const now = Date.parse('2026-08-12T14:00:20.000Z')
+  const timing = calculateTaskTiming({
+    status: 'running',
+    startedAt: '2026-08-12T13:00:00.000Z',
+    phaseStartedAt: '2026-08-12T14:00:00.000Z',
+    phaseStartCompleted: 10,
+    phaseCompleted: 30,
+    phaseTotal: 100
+  }, now)
+  assert.equal(timing.elapsedSeconds, 3620)
+  assert.equal(timing.remainingSeconds, 70)
+  assert.equal(timing.finishAt, now + 70000)
+  assert.equal(formatTaskDuration(timing.elapsedSeconds), '01:00:20')
+  assert.equal(calculateTaskTiming({ status: 'running', phaseCompleted: 3, phaseTotal: 10 }, now).remainingSeconds, null)
+})
+
 test('workspace manager serializes independent channel state and throttles progress', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-workspace-state-'))
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
@@ -124,7 +142,15 @@ test('workspace manager serializes independent channel state and throttles progr
   await manager.initialize()
   await Promise.all(Array.from({ length: 30 }, (_, index) => manager.setChannelState('anomaly', { completed: index, phase: `phase-${index}` })))
   assert.equal(manager.getState().channels.anomaly.completed, 29)
+  assert.equal(manager.getState().channels.anomaly.phaseStartCompleted, 29)
+  assert.ok(Number.isFinite(new Date(manager.getState().channels.anomaly.phaseStartedAt).getTime()))
   assert.equal(manager.getState().channels.dedupe.status, 'idle')
+
+  await manager.setChannelState('anomaly', { phase: 'stable-phase', phaseCompleted: 4, phaseTotal: 20 })
+  const phaseStartedAt = manager.getState().channels.anomaly.phaseStartedAt
+  await manager.setChannelState('anomaly', { phase: 'stable-phase', phaseCompleted: 7, phaseTotal: 20 })
+  assert.equal(manager.getState().channels.anomaly.phaseStartedAt, phaseStartedAt)
+  assert.equal(manager.getState().channels.anomaly.phaseStartCompleted, 4)
 
   manager.progressIntervalMs = 1000
   let emitted = 0

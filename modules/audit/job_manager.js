@@ -64,7 +64,13 @@ class AuditWorkspaceManager extends EventEmitter {
   setChannelState(taskType, patch) {
     normalizeTaskType(taskType)
     const operation = this.stateWriteQueue.then(async () => {
-      const next = await this.repository.saveChannelState(taskType, { ...this.states[taskType], ...patch })
+      const current = this.states[taskType]
+      const nextPatch = { ...patch }
+      if (patch.phase && patch.phase !== current.phase) {
+        nextPatch.phaseStartedAt = new Date().toISOString()
+        nextPatch.phaseStartCompleted = Math.max(0, Number(patch.phaseCompleted ?? patch.completed ?? 0) || 0)
+      }
+      const next = await this.repository.saveChannelState(taskType, { ...current, ...nextPatch })
       this.states[taskType] = next
       const state = this.getState()
       this.emit('state', state)
