@@ -42,6 +42,7 @@ const { EhentaiAvailabilityCache } = require('./modules/ehentai_availability_cac
 const { LibraryTaskCoordinator } = require('./modules/audit/task_coordinator.js')
 const { AuditWorkspaceManager } = require('./modules/audit/job_manager.js')
 const { executeApprovedActions } = require('./modules/audit/action_executor.js')
+const { buildExecutionPreview } = require('./modules/audit/review_validator.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
 const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
 const { getEhviewerDataFromZip } = require('./fileLoader/zip.js')
@@ -1876,22 +1877,35 @@ ipcMain.handle('audit:save-review', async (event, { taskType, review } = {}) => 
   return await auditWorkspaceManager.saveReview(taskType, review || {})
 })
 
+ipcMain.handle('audit:get-execution-preview', async (event, request = {}) => {
+  const taskType = ['anomaly', 'dedupe'].includes(request.taskType) ? request.taskType : null
+  if (!taskType) throw new Error(`INVALID_AUDIT_TASK_TYPE: ${request.taskType}`)
+  const [report, review] = await Promise.all([
+    auditWorkspaceManager.getReport(taskType),
+    auditWorkspaceManager.getReview(taskType)
+  ])
+  if (request.reportId !== report?.reportId) throw new Error(`${taskType.toUpperCase()}_REVIEW_MISMATCH`)
+  return buildExecutionPreview({ taskType, report, review, library: setting.library })
+})
+
 ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
-  const defaultQuarantine = path.join(path.dirname(setting.library), 'DedupeReview')
-  const quarantineRoot = request.quarantineRoot || defaultQuarantine
+  const taskType = ['anomaly', 'dedupe'].includes(request.taskType) ? request.taskType : null
+  if (!taskType) throw new Error(`INVALID_AUDIT_TASK_TYPE: ${request.taskType}`)
+  const reportId = String(request.reportId || '')
+  if (!reportId) throw new Error('AUDIT_REPORT_MISSING')
   const rendererState = await getMainRendererState()
   const result = await auditWorkspaceManager.runExecution(async execution => {
-    const [anomalyReport, anomalyReview, dedupeReport, dedupeReview] = await Promise.all([
-      auditWorkspaceManager.getReport('anomaly'),
-      auditWorkspaceManager.getReview('anomaly'),
-      auditWorkspaceManager.getReport('dedupe'),
-      auditWorkspaceManager.getReview('dedupe')
+    const [report, review] = await Promise.all([
+      auditWorkspaceManager.getReport(taskType),
+      auditWorkspaceManager.getReview(taskType)
     ])
+    if (report?.reportId !== reportId || review?.reportId !== reportId) throw new Error(`${taskType.toUpperCase()}_REVIEW_MISMATCH`)
     return await executeApprovedActions({
-      anomalyReport,
-      anomalyReview,
-      dedupeReport,
-      dedupeReview,
+      taskType,
+      anomalyReport: taskType === 'anomaly' ? report : null,
+      anomalyReview: taskType === 'anomaly' ? review : null,
+      dedupeReport: taskType === 'dedupe' ? report : null,
+      dedupeReview: taskType === 'dedupe' ? review : null,
       executionId: execution.executionId,
       executionDir: execution.executionDir,
       auditStorePath: path.join(STORE_PATH, 'audit'),
@@ -1902,7 +1916,6 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
       collectionList,
       saveCollectionList: saveCollectionListToFile,
       library: setting.library,
-      quarantineRoot,
       rendererState,
       setProgress: execution.setProgress,
       isCancelled: execution.isCancelled,
@@ -1950,13 +1963,15 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
         }
       })
     })
-  })
+  }, { sourceTaskType: taskType, reportId })
   collectionList = result.collectionList
-  const workspaceState = auditWorkspaceManager.getState()
-  const clearReviews = []
-  if (workspaceState.channels.anomaly.latestReportId) clearReviews.push(auditWorkspaceManager.saveReview('anomaly', { actionIds: [] }))
-  if (workspaceState.channels.dedupe.latestReportId) clearReviews.push(auditWorkspaceManager.saveReview('dedupe', { selections: {} }))
-  await Promise.all(clearReviews)
+  if (taskType === 'anomaly') {
+    await auditWorkspaceManager.saveReview('anomaly', { reportId, actionIds: [] })
+  } else {
+    const dedupeReview = await auditWorkspaceManager.getReview('dedupe')
+    await auditWorkspaceManager.saveReview('dedupe', { reportId, selections: {}, quarantineRoot: dedupeReview?.quarantineRoot || '' })
+  }
+  await auditWorkspaceManager.markReportsStale(`${taskType}-execution:${result.taskType || taskType}`)
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('audit:library-changed', { rendererState: result.rendererState })
   }

@@ -5,7 +5,7 @@
         <div class="log-header">
           <span class="log-title"><el-icon><Tickets /></el-icon><span>{{ $t('audit.taskLog') }}</span><el-tag size="small" type="info" effect="plain">{{ logs.length }}</el-tag></span>
           <span v-if="activeTask" class="log-live-summary">
-            <el-tag size="small" :type="statusTagType" effect="plain">{{ taskLabel(activeTask.type) }}</el-tag>
+            <el-tag size="small" :type="statusTagType" effect="plain">{{ activeTaskLabel }}</el-tag>
             <span class="log-live-phase">{{ phaseLabel }}</span>
             <strong>{{ compactProgressText }}</strong>
           </span>
@@ -15,7 +15,7 @@
         <div class="active-task-heading">
           <div>
             <span class="active-task-kicker">{{ $t('audit.currentTask') }}</span>
-            <strong>{{ taskLabel(activeTask.type) }}</strong>
+            <strong>{{ activeTaskLabel }}</strong>
           </div>
           <el-tag :type="statusTagType" effect="plain">{{ statusLabel }}</el-tag>
         </div>
@@ -74,6 +74,9 @@ const filterOptions = computed(() => [
 ])
 const filteredLogs = computed(() => filter.value === 'all' ? props.logs : props.logs.filter(entry => entry.taskType === filter.value))
 const taskLabel = taskType => ({ anomaly: t('audit.anomalyTab'), dedupe: t('audit.dedupTab'), execution: t('audit.executionTask') })[taskType] || taskType
+const activeTaskLabel = computed(() => props.activeTask?.type === 'execution'
+  ? props.activeState?.options?.sourceTaskType === 'dedupe' ? t('audit.dedupeExecutionTask') : t('audit.anomalyExecutionTask')
+  : taskLabel(props.activeTask?.type))
 const phaseLabel = computed(() => {
   const key = `audit.phase_${props.activeState?.phase || 'starting'}`
   return te(key) ? t(key) : props.activeState?.phase || t('audit.phase_starting')
@@ -119,6 +122,9 @@ const optionLabels = computed(() => {
   }
   if (props.activeTask?.type === 'dedupe') {
     return [options.forceContent ? t('audit.forceContent') : t('audit.cacheAllowed')]
+  }
+  if (props.activeTask?.type === 'execution') {
+    return [options.sourceTaskType === 'dedupe' ? t('audit.dedupeTab') : t('audit.anomalyTab')]
   }
   return []
 })

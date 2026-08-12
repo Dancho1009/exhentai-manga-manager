@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('auditApi', {
   startDedupe: options => ipcRenderer.invoke('audit:start-dedupe', options),
   cancelActive: () => ipcRenderer.invoke('audit:cancel-active'),
   saveReview: (taskType, review) => ipcRenderer.invoke('audit:save-review', { taskType, review }),
+  getExecutionPreview: request => ipcRenderer.invoke('audit:get-execution-preview', request),
   executeApproved: options => ipcRenderer.invoke('audit:execute-approved', options),
   showFile: filepath => ipcRenderer.invoke('audit:show-file', filepath),
   openUrl: url => ipcRenderer.invoke('audit:open-url', url),

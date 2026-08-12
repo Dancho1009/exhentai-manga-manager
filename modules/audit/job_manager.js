@@ -314,12 +314,15 @@ class AuditWorkspaceManager extends EventEmitter {
     this.emit('state', this.getState())
   }
 
-  async runExecution(task) {
+  async runExecution(task, descriptor = {}) {
     this.ensureIdle()
     const taskType = 'execution'
+    const sourceTaskType = normalizeTaskType(descriptor.sourceTaskType, REPORT_TASK_TYPES)
+    const reportId = String(descriptor.reportId || '')
+    if (!reportId) throw new Error('AUDIT_REPORT_MISSING')
     const jobId = `${new Date().toISOString().replace(/[:.]/g, '-')}_${nanoid(8)}`
     this.coordinator.beginAudit(jobId)
-    this.activeTask = { type: taskType, jobId }
+    this.activeTask = { type: taskType, jobId, sourceTaskType }
     this.executionController = new AbortController()
     let jobDir
     try {
@@ -333,10 +336,11 @@ class AuditWorkspaceManager extends EventEmitter {
         phaseCompleted: 0,
         phaseTotal: 0,
         error: null,
+        options: sanitizeOptions(taskType, { sourceTaskType, reportId }),
         startedAt: new Date().toISOString(),
         completedAt: null
       })
-      await this.appendLog(taskType, jobId, '开始执行已批准项目')
+      await this.appendLog(taskType, jobId, sourceTaskType === 'anomaly' ? '开始执行异常修复' : '开始执行重复隔离')
     } catch (error) {
       this.executionController = null
       this.activeTask = null

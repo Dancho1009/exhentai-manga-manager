@@ -315,6 +315,13 @@ test('review validation keeps anomaly and duplicate approval models independent'
   assert.equal(preview.identityReplacementCount, 0)
 })
 
+test('execution requires an explicit task type when both review models contain approvals', async () => {
+  await assert.rejects(executeApprovedActions({
+    anomalyReview: { actionIds: ['repair'] },
+    dedupeReview: { selections: { duplicate: { keepId: 'keep', quarantineIds: ['remove'] } } }
+  }), /EXECUTION_TASK_TYPE_REQUIRED/)
+})
+
 test('audit cache migrates legacy content and preserves independent inspection layers', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-cache-'))
   let cache
@@ -545,8 +552,9 @@ test('approved duplicate execution quarantines one file and preserves merged use
   let savedCollections
   const states = []
   const result = await executeApprovedActions({
-    anomalyReport: null,
-    anomalyReview: null,
+    taskType: 'dedupe',
+    anomalyReport: { reportId: 'anomaly:decoy', executable: true, anomalies: [] },
+    anomalyReview: { reportId: 'anomaly:decoy', actionIds: ['must-not-run'] },
     dedupeReport,
     dedupeReview: { reportId, selections: { 'group-1': { keepId: 'keep', quarantineIds: ['remove'] } } },
     executionId,
@@ -579,6 +587,81 @@ test('approved duplicate execution quarantines one file and preserves merged use
   assert.ok(states.some(state => state.phase === 'verified'))
 })
 
+test('duplicate execution restores files, databases, and collections when collection persistence fails', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-dedupe-rollback-'))
+  const library = path.join(root, 'Library')
+  const quarantineRoot = path.join(root, 'DedupeReview')
+  const auditStorePath = path.join(root, 'audit')
+  const executionId = 'rollback-execution'
+  const executionDir = path.join(auditStorePath, 'executions', executionId)
+  await Promise.all([fs.promises.mkdir(executionDir, { recursive: true }), fs.promises.mkdir(library, { recursive: true })])
+  const first = path.join(library, 'first.zip')
+  const second = path.join(library, 'second.zip')
+  const buffer = makeArchiveBuffer()
+  await Promise.all([fs.promises.writeFile(first, buffer), fs.promises.writeFile(second, buffer)])
+  const [firstStat, secondStat] = await Promise.all([fs.promises.stat(first), fs.promises.stat(second)])
+  const databasePath = path.join(root, 'database.sqlite')
+  const metadataPath = path.join(root, 'metadata.sqlite')
+  const Manga = prepareMangaModel(databasePath)
+  const Metadata = prepareMetadataModel(metadataPath)
+  t.after(async () => {
+    await Promise.all([Manga.sequelize.close(), Metadata.sequelize.close()])
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
+  await Promise.all([Manga.sync(), Metadata.sync()])
+  await Manga.bulkCreate([
+    { id: 'keep', title: 'keep', hash: 'hash-keep', filepath: first, type: 'zip', pageCount: 1, bundleSize: firstStat.size, mtime: firstStat.mtime.toISOString(), coverHash: 'cover', status: 'tagged' },
+    { id: 'remove', title: 'remove', hash: 'hash-remove', filepath: second, type: 'zip', pageCount: 1, bundleSize: secondStat.size, mtime: secondStat.mtime.toISOString(), coverHash: 'cover', status: 'tagged' }
+  ])
+  await Metadata.bulkCreate([
+    { hash: 'hash-keep', title: 'keep', status: 'tagged' },
+    { hash: 'hash-remove', title: 'remove', status: 'tagged' }
+  ])
+  const reportId = 'dedupe:rollback-report'
+  const collectionWrites = []
+  await assert.rejects(executeApprovedActions({
+    taskType: 'dedupe',
+    dedupeReport: {
+      reportId,
+      executable: true,
+      groups: [{
+        id: 'group-1', kind: 'exact-archive', eligible: true, actionable: true,
+        items: [
+          { id: 'keep', filepath: first, hash: 'hash-keep', size: firstStat.size, mtimeMs: firstStat.mtimeMs },
+          { id: 'remove', filepath: second, hash: 'hash-remove', size: secondStat.size, mtimeMs: secondStat.mtimeMs }
+        ]
+      }]
+    },
+    dedupeReview: {
+      reportId,
+      selections: { 'group-1': { keepId: 'keep', quarantineIds: ['remove'] } },
+      quarantineRoot
+    },
+    executionId,
+    executionDir,
+    auditStorePath,
+    Manga,
+    Metadata,
+    databasePath,
+    metadataPath,
+    collectionList: [{ id: 'collection', list: ['hash-remove'] }],
+    saveCollectionList: async value => {
+      collectionWrites.push(JSON.parse(JSON.stringify(value)))
+      if (collectionWrites.length === 1) throw new Error('COLLECTION_WRITE_FAILED')
+    },
+    library,
+    rendererState: {}
+  }), /COLLECTION_WRITE_FAILED/)
+
+  assert.equal(await Manga.count(), 2)
+  assert.equal(await Metadata.count(), 2)
+  assert.equal((await Manga.findByPk('remove')).filepath, second)
+  assert.equal((await fs.promises.stat(second)).isFile(), true)
+  await assert.rejects(fs.promises.stat(path.join(quarantineRoot, executionId, path.basename(second))), error => error.code === 'ENOENT')
+  assert.equal(collectionWrites.length, 2)
+  assert.deepEqual(collectionWrites[1], [{ id: 'collection', list: ['hash-remove'] }])
+})
+
 test('repair execution rejects stale or legacy evidence and updates metadata atomically after revalidation', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-repair-'))
   const library = path.join(root, 'Library')
@@ -608,10 +691,11 @@ test('repair execution rejects stale or legacy evidence and updates metadata ato
   }
   const reportId = 'anomaly:repair-report'
   const common = {
+    taskType: 'anomaly',
     anomalyReport: { reportId, executable: true, anomalies: [anomaly] },
     anomalyReview: { reportId, actionIds: [anomaly.id] },
-    dedupeReport: null,
-    dedupeReview: null,
+    dedupeReport: { reportId: 'dedupe:decoy', executable: true, groups: [] },
+    dedupeReview: { reportId: 'dedupe:decoy', selections: { 'must-not-run': { keepId: 'x', quarantineIds: ['y'] } } },
     executionId: 'repair-execution',
     executionDir,
     auditStorePath,

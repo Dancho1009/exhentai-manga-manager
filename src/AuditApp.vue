@@ -38,9 +38,13 @@
             :busy="busy"
             :review-locked="reviewLocked"
             :action-ids="anomalyReview.actionIds"
+            :review-saving="reviewSaving.anomaly"
+            :review-dirty="reviewDirty.anomaly"
             @start="startAnomaly"
             @verify-conflicts="verifyConflicts"
             @update:action-ids="updateAnomalyActions"
+            @save-review="saveAnomalyReview"
+            @execute="prepareExecution('anomaly')"
           />
         </el-tab-pane>
         <el-tab-pane :label="$t('audit.dedupTab')" name="dedupe">
@@ -50,24 +54,25 @@
             :busy="busy"
             :review-locked="reviewLocked"
             :selections="dedupeReview.selections"
+            :quarantine-root="dedupeReview.quarantineRoot"
+            :review-saving="reviewSaving.dedupe"
+            :review-dirty="reviewDirty.dedupe"
             @start="startDedupe"
             @update:selections="updateDedupeSelections"
-          />
-        </el-tab-pane>
-        <el-tab-pane :label="$t('audit.approvalTab')" name="approval">
-          <approval-panel
-            v-model:quarantine-root="quarantineRoot"
-            :anomaly-report="anomalyReport"
-            :anomaly-review="anomalyReview"
-            :dedupe-report="dedupeReport"
-            :dedupe-review="dedupeReview"
-            :busy="busy"
-            @save="saveReviews"
-            @execute="executeApproved"
+            @update:quarantine-root="updateQuarantineRoot"
             @select-quarantine="selectQuarantine"
+            @save-review="saveDedupeReview"
+            @execute="prepareExecution('dedupe')"
           />
         </el-tab-pane>
       </el-tabs>
+
+      <audit-execution-confirm-dialog
+        v-model="executionDialogVisible"
+        :preview="executionPreview"
+        :submitting="executionSubmitting"
+        @confirm="confirmExecution"
+      />
 
       <audit-log-panel
         :logs="logs"
@@ -80,16 +85,16 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { Refresh, VideoPause } from '@element-plus/icons-vue'
 import zhCnElement from 'element-plus/dist/locale/zh-cn.mjs'
 import zhTwElement from 'element-plus/dist/locale/zh-tw.mjs'
 import enElement from 'element-plus/dist/locale/en.mjs'
 import AnomalyPanel from './audit/AnomalyPanel.vue'
 import DedupePanel from './audit/DedupePanel.vue'
-import ApprovalPanel from './audit/ApprovalPanel.vue'
+import AuditExecutionConfirmDialog from './audit/AuditExecutionConfirmDialog.vue'
 import AuditLogPanel from './audit/AuditLogPanel.vue'
 import { calculateTaskTiming, formatTaskDuration } from './audit/taskTiming.mjs'
 
@@ -112,7 +117,7 @@ const idleState = taskType => ({
 })
 
 const emptyWorkspace = () => ({
-  schemaVersion: 3,
+  schemaVersion: 4,
   activeTask: null,
   channels: {
     anomaly: idleState('anomaly'),
@@ -131,8 +136,17 @@ const logs = ref([])
 const activeTab = ref('anomaly')
 const actionPending = ref(false)
 const dataLoadCount = ref(0)
-const quarantineRoot = ref(`${String(initialSetting.library || '').replace(/[\\/][^\\/]+[\\/]?$/, '')}\\DedupeReview`)
+const defaultQuarantineRoot = `${String(initialSetting.library || '').replace(/[\\/][^\\/]+[\\/]?$/, '')}\\DedupeReview`
+const reviewSaving = reactive({ anomaly: false, dedupe: false })
+const reviewDirty = reactive({ anomaly: false, dedupe: false })
+const reviewRevision = { anomaly: 0, dedupe: 0 }
+const reviewSavePending = { anomaly: 0, dedupe: 0 }
+const executionDialogVisible = ref(false)
+const executionPreview = ref(null)
+const executionSubmitting = ref(false)
 const reportLoadTokens = { anomaly: 0, dedupe: 0 }
+const reviewSaveQueues = { anomaly: Promise.resolve(), dedupe: Promise.resolve() }
+const reviewSaveTimers = { anomaly: null, dedupe: null }
 let removeStateListener
 let removeLogListener
 let clockTimer
@@ -149,7 +163,9 @@ const activeCompleted = computed(() => Number(activeState.value.phaseCompleted ?
 const activeTotal = computed(() => Number(activeState.value.phaseTotal ?? activeState.value.total ?? 0))
 const progressPercentage = computed(() => activeTotal.value > 0 ? Math.min(100, Math.round(activeCompleted.value / activeTotal.value * 100)) : 0)
 const taskLabel = taskType => ({ anomaly: t('audit.anomalyTab'), dedupe: t('audit.dedupTab'), execution: t('audit.executionTask') })[taskType] || taskType
-const activeTaskLabel = computed(() => taskLabel(activeTask.value?.type))
+const activeTaskLabel = computed(() => activeTask.value?.type === 'execution'
+  ? activeState.value.options?.sourceTaskType === 'dedupe' ? t('audit.dedupeExecutionTask') : t('audit.anomalyExecutionTask')
+  : taskLabel(activeTask.value?.type))
 const activeStatusLabel = computed(() => {
   const key = `audit.status_${activeState.value.status}`
   return te(key) ? t(key) : activeState.value.status
@@ -179,7 +195,7 @@ const normalizeWorkspace = value => ({
 
 const defaultReview = (taskType, report) => taskType === 'anomaly'
   ? { reportId: report?.reportId || null, actionIds: [] }
-  : { reportId: report?.reportId || null, selections: {} }
+  : { reportId: report?.reportId || null, selections: {}, quarantineRoot: defaultQuarantineRoot }
 
 const loadTaskData = async taskType => {
   const token = ++reportLoadTokens[taskType]
@@ -190,14 +206,16 @@ const loadTaskData = async taskType => {
       window.auditApi.getReview(taskType)
     ])
     if (token !== reportLoadTokens[taskType]) return
-    const normalizedReview = review?.reportId === report?.reportId ? review : defaultReview(taskType, report)
+    const normalizedReview = report && review?.reportId === report.reportId ? review : defaultReview(taskType, report)
+    reviewRevision[taskType] += 1
     if (taskType === 'anomaly') {
       anomalyReport.value = report
       anomalyReview.value = normalizedReview
     } else {
       dedupeReport.value = report
-      dedupeReview.value = normalizedReview
+      dedupeReview.value = { ...normalizedReview, quarantineRoot: normalizedReview?.quarantineRoot || defaultQuarantineRoot }
     }
+    reviewDirty[taskType] = false
   } finally {
     dataLoadCount.value = Math.max(0, dataLoadCount.value - 1)
   }
@@ -248,48 +266,96 @@ const verifyConflicts = bookIds => runAction(() => window.auditApi.startAnomaly(
 }))
 const startDedupe = options => runAction(() => window.auditApi.startDedupe(options))
 const cancelActive = () => runAction(() => window.auditApi.cancelActive())
-const updateAnomalyActions = actionIds => { anomalyReview.value = { ...anomalyReview.value, actionIds } }
-const updateDedupeSelections = selections => { dedupeReview.value = { ...dedupeReview.value, selections } }
-
-const persistReviews = async ({ notify = true } = {}) => {
-  const tasks = []
-  if (anomalyReport.value) tasks.push(window.auditApi.saveReview('anomaly', anomalyReview.value).then(value => { anomalyReview.value = value }))
-  if (dedupeReport.value) tasks.push(window.auditApi.saveReview('dedupe', dedupeReview.value).then(value => { dedupeReview.value = value }))
-  if (!tasks.length) throw new Error(t('audit.noVerifiedActions'))
-  await Promise.all(tasks)
-  if (notify) ElMessage.success(t('audit.reviewSaved'))
+const scheduleReviewSave = taskType => {
+  reviewDirty[taskType] = true
+  window.clearTimeout(reviewSaveTimers[taskType])
+  reviewSaveTimers[taskType] = window.setTimeout(() => {
+    void persistReview(taskType).catch(showError)
+  }, 500)
 }
 
-const saveReviews = () => runAction(async () => {
-  await persistReviews()
-  return workspace.value
-})
+const updateAnomalyActions = actionIds => {
+  reviewRevision.anomaly += 1
+  anomalyReview.value = { ...anomalyReview.value, actionIds }
+  scheduleReviewSave('anomaly')
+}
+const updateDedupeSelections = selections => {
+  reviewRevision.dedupe += 1
+  dedupeReview.value = { ...dedupeReview.value, selections }
+  scheduleReviewSave('dedupe')
+}
+const updateQuarantineRoot = value => {
+  reviewRevision.dedupe += 1
+  dedupeReview.value = { ...dedupeReview.value, quarantineRoot: value }
+  scheduleReviewSave('dedupe')
+}
 
-const executeApproved = async () => {
+const persistReview = (taskType, { notify = false } = {}) => {
+  window.clearTimeout(reviewSaveTimers[taskType])
+  reviewSaveTimers[taskType] = null
+  const report = taskType === 'anomaly' ? anomalyReport.value : dedupeReport.value
+  if (!report) return Promise.reject(new Error(t('audit.noReport')))
+  const snapshot = JSON.parse(JSON.stringify(taskType === 'anomaly' ? anomalyReview.value : dedupeReview.value))
+  const revision = reviewRevision[taskType]
+  reviewSavePending[taskType] += 1
+  reviewSaving[taskType] = true
+  const operation = reviewSaveQueues[taskType]
+    .catch(() => {})
+    .then(() => window.auditApi.saveReview(taskType, snapshot))
+    .then(value => {
+      if (reviewRevision[taskType] === revision) {
+        if (taskType === 'anomaly') anomalyReview.value = value
+        else dedupeReview.value = { ...value, quarantineRoot: value.quarantineRoot || defaultQuarantineRoot }
+        reviewDirty[taskType] = false
+      }
+      if (notify) ElMessage.success(t('audit.reviewSaved'))
+      return value
+    })
+    .finally(() => {
+      reviewSavePending[taskType] = Math.max(0, reviewSavePending[taskType] - 1)
+      reviewSaving[taskType] = reviewSavePending[taskType] > 0
+    })
+  reviewSaveQueues[taskType] = operation
+  return operation
+}
+
+const saveAnomalyReview = () => persistReview('anomaly', { notify: true }).catch(showError)
+const saveDedupeReview = () => persistReview('dedupe', { notify: true }).catch(showError)
+
+const prepareExecution = async taskType => {
   if (busy.value) return
   try {
-    await persistReviews({ notify: false })
-    await ElMessageBox.confirm(t('audit.confirmExecute'), t('audit.executeApproved'), {
-      type: 'warning',
-      confirmButtonText: t('audit.executeApproved')
-    })
+    await persistReview(taskType)
+    const report = taskType === 'anomaly' ? anomalyReport.value : dedupeReport.value
+    executionPreview.value = await window.auditApi.getExecutionPreview({ taskType, reportId: report?.reportId })
+    executionDialogVisible.value = true
   } catch (error) {
-    if (error === 'cancel' || error === 'close') return
     showError(error)
-    return
   }
-  await runAction(async () => {
-    const result = await window.auditApi.executeApproved({ quarantineRoot: quarantineRoot.value })
-    ElMessage.success(t('audit.executionComplete', { count: Number(result?.movedCount || 0) + Number(result?.repairedCount || 0) }))
-    await reloadAllData()
-    return result?.state || workspace.value
-  })
+}
+
+const confirmExecution = async () => {
+  const preview = executionPreview.value
+  if (!preview || executionSubmitting.value) return
+  executionSubmitting.value = true
+  executionDialogVisible.value = false
+  try {
+    await runAction(async () => {
+      const result = await window.auditApi.executeApproved({ taskType: preview.taskType, reportId: preview.reportId })
+      ElMessage.success(t('audit.executionComplete', { count: Number(result?.movedCount || 0) + Number(result?.repairedCount || 0) }))
+      await reloadAllData()
+      return result?.state || workspace.value
+    })
+  } finally {
+    executionSubmitting.value = false
+    executionPreview.value = null
+  }
 }
 
 const selectQuarantine = async () => {
   try {
-    const value = await window.auditApi.selectQuarantine(quarantineRoot.value)
-    if (value) quarantineRoot.value = value
+    const value = await window.auditApi.selectQuarantine(dedupeReview.value.quarantineRoot)
+    if (value) updateQuarantineRoot(value)
   } catch (error) {
     showError(error)
   }
@@ -317,6 +383,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  Object.values(reviewSaveTimers).forEach(timer => window.clearTimeout(timer))
   window.clearInterval(clockTimer)
   removeStateListener?.()
   removeLogListener?.()

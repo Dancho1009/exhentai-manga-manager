@@ -10,6 +10,7 @@
 
     <el-alert v-if="running && report" type="info" :closable="false" :title="$t('audit.previousDedupeReportWhileRunning')" show-icon />
     <el-alert v-if="report?.legacy" type="warning" :closable="false" :title="$t('audit.legacyReportReadOnly')" show-icon />
+    <el-alert v-if="report?.stale" type="warning" :closable="false" :title="$t('audit.staleReportReadOnly')" show-icon />
     <div v-if="report" class="summary-band">
       <div><strong>{{ report.summary.libraryItems }}</strong><span>{{ $t('audit.libraryItems') }}</span></div>
       <div><strong>{{ report.summary.mangaRows }}</strong><span>{{ $t('audit.databaseRows') }}</span></div>
@@ -44,6 +45,23 @@
         </el-table>
       </div>
       <el-pagination v-model:current-page="page" v-model:page-size="pageSize" class="table-pagination" :page-sizes="pageSizes" :total="filteredGroups.length" layout="total, sizes, prev, pager, next, jumper" />
+      <div class="review-action-bar">
+        <div class="dedupe-review-summary">
+          <span><strong>{{ approvedGroupCount }}</strong><small>{{ $t('audit.approvedDuplicateGroups') }}</small></span>
+          <span><strong>{{ quarantineFileCount }}</strong><small>{{ $t('audit.approvedQuarantineFiles') }}</small></span>
+          <span><strong>{{ formatBytes(approvedPotentialBytes) }}</strong><small>{{ $t('audit.approvedPotentialSpace') }}</small></span>
+          <span class="review-save-state"><strong>{{ reviewStatusLabel }}</strong><small>{{ $t('audit.reviewPersistence') }}</small></span>
+        </div>
+        <div class="dedupe-execution-row">
+          <el-input :model-value="quarantineRoot" :disabled="reviewLocked" @update:model-value="$emit('update:quarantineRoot', $event)">
+            <template #prepend>{{ $t('audit.quarantinePath') }}</template>
+          </el-input>
+          <el-tooltip :content="$t('audit.chooseFolder')"><el-button :icon="FolderOpened" :disabled="reviewLocked" @click="$emit('select-quarantine')" /></el-tooltip>
+          <el-button :icon="Close" :disabled="reviewLocked || approvedGroupCount === 0" @click="$emit('update:selections', {})">{{ $t('audit.clearApproval') }}</el-button>
+          <el-button :icon="DocumentChecked" :loading="reviewSaving" :disabled="reviewLocked || !reviewDirty" @click="$emit('save-review')">{{ $t('audit.saveReview') }}</el-button>
+          <el-button type="danger" :icon="Select" :disabled="reviewLocked || approvedGroupCount === 0 || !quarantineRoot || report.executable === false" @click="$emit('execute')">{{ $t('audit.executeDedupeQuarantine') }}</el-button>
+        </div>
+      </div>
     </template>
     <el-empty v-else :description="$t('audit.noDedupeReport')" />
 
@@ -73,16 +91,19 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
-import { Search, Select, VideoPlay } from '@element-plus/icons-vue'
+import { Close, DocumentChecked, FolderOpened, Search, Select, VideoPlay } from '@element-plus/icons-vue'
 
 const props = defineProps({
   report: { type: Object, default: null },
   state: { type: Object, required: true },
   busy: Boolean,
   reviewLocked: Boolean,
-  selections: { type: Object, default: () => ({}) }
+  selections: { type: Object, default: () => ({}) },
+  quarantineRoot: { type: String, default: '' },
+  reviewSaving: Boolean,
+  reviewDirty: Boolean
 })
-const emit = defineEmits(['start', 'update:selections'])
+const emit = defineEmits(['start', 'update:selections', 'update:quarantineRoot', 'select-quarantine', 'save-review', 'execute'])
 const { t, te } = useI18n()
 const forceContent = ref(false)
 const searchInput = ref('')
@@ -103,6 +124,17 @@ const kinds = computed(() => [...new Set((props.report?.groups || []).map(item =
 const searchIndex = computed(() => new Map((props.report?.groups || []).map(item => [item.id, normalizeSearchText(`${item.kind} ${auditTypeLabel(item.kind)} ${(item.items || []).map(book => `${book.title} ${book.filepath}`).join(' ')}`)])))
 const filteredGroups = computed(() => (props.report?.groups || []).filter(item => (!kindFilter.value || item.kind === kindFilter.value) && (!search.value || (searchIndex.value.get(item.id) || '').includes(search.value))))
 const pagedGroups = computed(() => filteredGroups.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
+const approvedGroupCount = computed(() => Object.keys(props.selections).length)
+const quarantineFileCount = computed(() => Object.values(props.selections).reduce((sum, selection) => sum + (selection.quarantineIds || []).length, 0))
+const approvedPotentialBytes = computed(() => Object.entries(props.selections).reduce((sum, [groupId, selection]) => {
+  const group = props.report?.groups?.find(item => String(item.id) === String(groupId))
+  if (!group) return sum
+  const ids = new Set((selection.quarantineIds || []).map(String))
+  return sum + (group.items || []).filter(item => ids.has(String(item.id))).reduce((groupSum, item) => groupSum + Number(item.size || 0), 0)
+}, 0))
+const reviewStatusLabel = computed(() => props.reviewSaving
+  ? t('audit.reviewSaving')
+  : props.reviewDirty ? t('audit.reviewUnsaved') : t('audit.reviewAutoSaved'))
 
 const normalizeSearchText = value => String(value || '').trim().toLocaleLowerCase()
 const auditTypeLabel = value => { const key = `audit.type_${value}`; return value && te(key) ? t(key) : value || '' }
@@ -151,6 +183,7 @@ watch([() => filteredGroups.value.length, pageSize], ([total, size]) => { page.v
 .task-panel { min-height: 0; height: 100%; display: flex; flex-direction: column; }.task-toolbar { flex: 0 0 auto; min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 0; }.task-toolbar-main { display: flex; align-items: center; gap: 12px; }.last-run { color: var(--el-text-color-secondary); font-size: 12px; }
 .summary-band { flex: 0 0 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); border: 1px solid var(--el-border-color); border-radius: 4px; margin: 8px 0 12px; }.summary-band div { padding: 9px 14px; border-right: 1px solid var(--el-border-color); }.summary-band strong, .summary-band span { display: block; }.summary-band strong { font-size: 18px; }.summary-band span { margin-top: 3px; color: var(--el-text-color-secondary); font-size: 12px; }
 .filter-row { flex: 0 0 auto; display: grid; grid-template-columns: minmax(280px, 1fr) 260px; gap: 12px; margin: 10px 0 8px; }.audit-table-region { flex: 1 1 auto; min-height: 220px; }.table-pagination { flex: 0 0 auto; justify-content: flex-end; padding-top: 8px; }
+.review-action-bar { flex: 0 0 auto; margin-top: 8px; padding: 8px 12px 10px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-lighter); }.dedupe-review-summary { display: flex; align-items: center; gap: 24px; min-height: 36px; }.dedupe-review-summary > span { display: grid; grid-template-columns: auto auto; align-items: baseline; gap: 7px; }.dedupe-review-summary strong { font-size: 16px; }.dedupe-review-summary small { color: var(--el-text-color-secondary); }.review-save-state { margin-left: auto; }.review-save-state strong { color: var(--el-color-primary); font-size: 12px; }.dedupe-execution-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }.dedupe-execution-row > .el-input { flex: 1 1 360px; min-width: 240px; }
 .duplicate-editor-actions { display: flex; gap: 8px; margin: 12px 0; }.evidence-block { padding: 14px; overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); }.drawer-footer { display: flex; justify-content: flex-end; margin-top: 16px; }
-@media (max-width: 900px) { .task-toolbar, .task-toolbar-main { align-items: flex-start; flex-wrap: wrap; }.filter-row { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .task-toolbar, .task-toolbar-main, .dedupe-review-summary { align-items: flex-start; flex-wrap: wrap; }.review-save-state { margin-left: 0; }.filter-row { grid-template-columns: 1fr; } }
 </style>

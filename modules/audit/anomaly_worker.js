@@ -226,6 +226,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
               recommendedAction: 'repair-url-after-approval',
               action: {
                 type: 'repair-url',
+                repairKind: 'same-identity-domain-switch',
                 bookId: wrapped.raw.id,
                 filepath: wrapped.raw.filepath,
                 expectedSize: wrapped.actual.size,
@@ -262,6 +263,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
             recommendation = 'repair-url-after-approval'
             action = {
               type: 'repair-url',
+              repairKind: 'identity-replacement',
               bookId: wrapped.raw.id,
               filepath: wrapped.raw.filepath,
               expectedSize: wrapped.actual.size,
