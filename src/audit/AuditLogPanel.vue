@@ -35,6 +35,9 @@
           <span><small>{{ $t('audit.elapsedTime') }}</small><strong>{{ timing.elapsedText }}</strong></span>
           <span><small>{{ $t('audit.estimatedRemainingTime') }}</small><strong>{{ timing.remainingText }}</strong></span>
           <span><small>{{ $t('audit.estimatedFinishTime') }}</small><strong>{{ timing.finishText }}</strong></span>
+          <span><small>{{ $t('audit.completedStages') }}</small><strong>{{ stageSummary.completedCount }}/{{ stageSummary.totalCount }}</strong></span>
+          <span><small>{{ $t('audit.nextStage') }}</small><strong>{{ nextStageLabel }}</strong></span>
+          <span><small>{{ $t('audit.remainingStages') }}</small><strong>{{ $t('audit.remainingStageCount', { count: stageSummary.remainingCount }) }}</strong></span>
           <span v-if="optionLabels.length"><small>{{ $t('audit.taskOptions') }}</small><strong>{{ optionLabels.join(' · ') }}</strong></span>
         </div>
       </section>
@@ -60,7 +63,8 @@ const props = defineProps({
   logs: { type: Array, default: () => [] },
   activeTask: { type: Object, default: null },
   activeState: { type: Object, default: () => ({}) },
-  timing: { type: Object, default: () => ({ elapsedText: '-', remainingText: '-', finishText: '-' }) }
+  timing: { type: Object, default: () => ({ elapsedText: '-', remainingText: '-', finishText: '-' }) },
+  stageSummary: { type: Object, default: () => ({ completedCount: 0, totalCount: 0, nextStage: null, remainingCount: 0 }) }
 })
 const { t, te } = useI18n()
 const activePanels = ref([])
@@ -105,6 +109,9 @@ const progressText = computed(() => hasProgressTotal.value
 const startedAtText = computed(() => props.activeState?.startedAt
   ? new Date(props.activeState.startedAt).toLocaleString()
   : '-')
+const nextStageLabel = computed(() => props.stageSummary?.nextStage?.labelKey
+  ? t(props.stageSummary.nextStage.labelKey)
+  : t('audit.noNextStage'))
 const optionLabels = computed(() => {
   const options = props.activeState?.options || {}
   if (props.activeTask?.type === 'anomaly') {

@@ -23,6 +23,7 @@
           <span>{{ activePhaseLabel }} · {{ activeCompleted }}/{{ activeTotal }}</span>
         </div>
         <el-progress :percentage="progressPercentage" :stroke-width="12" />
+        <audit-task-stages :summary="activeStageSummary" />
         <div class="task-estimate-line">
           <span>{{ $t('audit.estimatedRemainingTime') }} <strong>{{ activeTiming.remainingText }}</strong></span>
           <span>{{ $t('audit.estimatedFinishTime') }} <strong>{{ activeTiming.finishText }}</strong></span>
@@ -79,6 +80,7 @@
         :active-task="activeTask"
         :active-state="activeState"
         :timing="activeTiming"
+        :stage-summary="activeStageSummary"
       />
     </main>
   </el-config-provider>
@@ -96,7 +98,9 @@ import AnomalyPanel from './audit/AnomalyPanel.vue'
 import DedupePanel from './audit/DedupePanel.vue'
 import AuditExecutionConfirmDialog from './audit/AuditExecutionConfirmDialog.vue'
 import AuditLogPanel from './audit/AuditLogPanel.vue'
+import AuditTaskStages from './audit/AuditTaskStages.vue'
 import { calculateTaskTiming, formatTaskDuration } from './audit/taskTiming.mjs'
+import { calculateTaskStages } from './audit/taskStages.mjs'
 
 const props = defineProps({ initialSetting: { type: Object, required: true } })
 const { t, te, locale } = useI18n()
@@ -174,6 +178,13 @@ const activePhaseLabel = computed(() => {
   const key = `audit.phase_${activeState.value.phase}`
   return te(key) ? t(key) : activeState.value.phase
 })
+const activeStageSummary = computed(() => calculateTaskStages({
+  taskType: activeTask.value?.type,
+  phase: activeState.value.phase,
+  lastWorkPhase: activeState.value.lastWorkPhase,
+  status: activeState.value.status,
+  options: activeState.value.options || {}
+}))
 const activeTiming = computed(() => {
   const timing = calculateTaskTiming(activeState.value, now.value)
   return {

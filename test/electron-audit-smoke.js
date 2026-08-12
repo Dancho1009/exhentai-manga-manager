@@ -2,6 +2,7 @@ const fs = require('fs')
 
 const port = Number(process.argv[2] || 9333)
 const screenshotPath = process.argv[3] || `${process.env.TEMP}\\emm-audit-smoke.png`
+const startTask = process.env.AUDIT_SMOKE_START_TASK || ''
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const openSockets = new Set()
 
@@ -82,6 +83,19 @@ const run = async () => {
     if (body.includes('漫画库异常检查与去重')) break
     await wait(250)
   }
+  if (startTask === 'anomaly' && !body.includes('任务进行中')) {
+    await auditCdp.send('Runtime.evaluate', {
+      expression: `window.auditApi.startAnomaly({ onlinePolicy: 'none', forceLocal: false, forceOnline: false })`,
+      awaitPromise: true,
+      returnByValue: true
+    })
+    for (let index = 0; index < 80; index += 1) {
+      const result = await auditCdp.send('Runtime.evaluate', { expression: 'document.body.innerText', returnByValue: true })
+      body = result.result.value || ''
+      if (body.includes('任务进行中') && body.includes('已完成阶段')) break
+      await wait(100)
+    }
+  }
   if (!body.includes('异常检查') || !body.includes('重复检查')) {
     throw new Error(`Audit UI text incomplete: ${body.slice(0, 500)}`)
   }
@@ -89,6 +103,9 @@ const run = async () => {
   if (!body.includes('开始异常检查')) throw new Error('Independent anomaly start action missing')
   if (body.includes('快速检查') || body.includes('深度检查') || body.includes('在线来源检查')) {
     throw new Error('Legacy combined audit modes are still visible')
+  }
+  if (body.includes('任务进行中') && (!body.includes('已完成阶段') || !body.includes('下一阶段') || !body.includes('剩余阶段'))) {
+    throw new Error('Active audit stage summary is incomplete')
   }
   const clickTab = async text => {
     const position = await auditCdp.send('Runtime.evaluate', {
@@ -144,6 +161,40 @@ const run = async () => {
   }
   const screenshot = await auditCdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
   fs.writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'))
+  let logScreenshotPath = null
+  if (startTask) {
+    const logHeader = await auditCdp.send('Runtime.evaluate', {
+      expression: `(() => {
+        const node = document.querySelector('.log-pane .el-collapse-item__header')
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+      })()`,
+      returnByValue: true
+    })
+    const point = logHeader.result.value
+    if (!point) throw new Error('Task log header missing')
+    await auditCdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await auditCdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await wait(300)
+    const logState = await auditCdp.send('Runtime.evaluate', {
+      expression: `(() => {
+        const node = document.querySelector('.active-task-summary')
+        return node ? node.innerText : ''
+      })()`,
+      returnByValue: true
+    })
+    const logText = logState.result.value || ''
+    if (!logText.includes('已完成阶段') || !logText.includes('下一阶段') || !logText.includes('剩余阶段')) {
+      throw new Error(`Expanded task stage summary is incomplete: ${logText}`)
+    }
+    logScreenshotPath = screenshotPath.replace(/(\.png)?$/i, '-log.png')
+    const logScreenshot = await auditCdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+    fs.writeFileSync(logScreenshotPath, Buffer.from(logScreenshot.data, 'base64'))
+    await auditCdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await auditCdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await wait(200)
+  }
   await auditCdp.send('Emulation.setDeviceMetricsOverride', { width: 820, height: 900, deviceScaleFactor: 1, mobile: false })
   await wait(300)
   const narrowState = await auditCdp.send('Runtime.evaluate', {
@@ -166,8 +217,15 @@ const run = async () => {
   if (runtimeExceptions.length > 0) {
     throw new Error(`Audit runtime exception: ${JSON.stringify(runtimeExceptions.slice(-5))}`)
   }
+  if (startTask) {
+    await auditCdp.send('Runtime.evaluate', {
+      expression: 'window.auditApi.cancelActive()',
+      awaitPromise: true,
+      returnByValue: true
+    })
+  }
   auditCdp.ws.close()
-  console.log(JSON.stringify({ auditUrl: audit.url, screenshotPath, dedupeScreenshotPath, narrowScreenshotPath, textPreview: body.slice(0, 240) }))
+  console.log(JSON.stringify({ auditUrl: audit.url, screenshotPath, dedupeScreenshotPath, logScreenshotPath, narrowScreenshotPath, textPreview: body.slice(0, 240) }))
 }
 
 run().catch(error => {
