@@ -65,7 +65,11 @@
         </el-tab-pane>
       </el-tabs>
 
-      <audit-log-panel :logs="logs" />
+      <audit-log-panel
+        :logs="logs"
+        :active-task="activeTask"
+        :active-state="activeState"
+      />
     </main>
   </el-config-provider>
 </template>
