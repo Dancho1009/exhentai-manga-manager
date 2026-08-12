@@ -401,6 +401,37 @@ const sendBookDetailContext = win => {
   return true
 }
 
+const bookDetailOpenRequests = new Map()
+
+const openBookDetailWindow = async request => {
+  const context = normalizeBookDetailContext(request)
+  const existing = bookDetailWindowRegistry.findByBookId(context.bookId)
+  if (existing) {
+    existing.context = context
+    focusBookDetailWindow(existing.window)
+    sendBookDetailContext(existing.window)
+    return { success: true, reused: true, windowId: existing.window.id, context }
+  }
+  if (bookDetailOpenRequests.has(context.bookId)) return await bookDetailOpenRequests.get(context.bookId)
+
+  const operation = (async () => {
+    await databaseReady
+    const book = await bookDetailService.getEffectiveBookById(context.bookId)
+    if (!book) throw new Error('BOOK_NOT_FOUND')
+    const reopened = bookDetailWindowRegistry.findByBookId(context.bookId)
+    if (reopened) {
+      reopened.context = context
+      focusBookDetailWindow(reopened.window)
+      sendBookDetailContext(reopened.window)
+      return { success: true, reused: true, windowId: reopened.window.id, context }
+    }
+    const detailWindow = createBookDetailWindow(context)
+    return { success: true, reused: false, windowId: detailWindow.id, context }
+  })().finally(() => bookDetailOpenRequests.delete(context.bookId))
+  bookDetailOpenRequests.set(context.bookId, operation)
+  return await operation
+}
+
 const getCascadedBookDetailPosition = (windowState, windowIndex) => {
   if (!Number.isInteger(windowState.x) || !Number.isInteger(windowState.y)) return {}
   const offset = (windowIndex % 8) * 28
@@ -1313,19 +1344,7 @@ ipcMain.handle('save-collection-list', async (event, list) => {
 
 // detail
 ipcMain.handle('book-detail:open-window', async (event, request = {}) => {
-  await databaseReady
-  const context = normalizeBookDetailContext(request)
-  const book = await bookDetailService.getEffectiveBookById(context.bookId)
-  if (!book) throw new Error('BOOK_NOT_FOUND')
-  const existing = bookDetailWindowRegistry.findByBookId(context.bookId)
-  if (existing) {
-    existing.context = context
-    focusBookDetailWindow(existing.window)
-    sendBookDetailContext(existing.window)
-    return { success: true, reused: true, windowId: existing.window.id, context }
-  }
-  const detailWindow = createBookDetailWindow(context)
-  return { success: true, reused: false, windowId: detailWindow.id, context }
+  return await openBookDetailWindow(request)
 })
 
 ipcMain.handle('book-detail:get-bootstrap', async () => ({
