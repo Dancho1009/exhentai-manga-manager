@@ -180,13 +180,32 @@ const run = async () => {
     const logState = await auditCdp.send('Runtime.evaluate', {
       expression: `(() => {
         const node = document.querySelector('.active-task-summary')
-        return node ? node.innerText : ''
+        const activeLogLines = [...document.querySelectorAll('.log-line.is-active-log')]
+        const spinner = document.querySelector('.running-log-spinner')
+        const spinnerStyle = spinner ? getComputedStyle(spinner) : null
+        return {
+          summaryText: node ? node.innerText : '',
+          activeLogCount: activeLogLines.length,
+          spinnerCount: document.querySelectorAll('.running-log-spinner').length,
+          activeLogText: activeLogLines[0]?.innerText || '',
+          spinnerAnimationName: spinnerStyle?.animationName || '',
+          spinnerIterationCount: spinnerStyle?.animationIterationCount || ''
+        }
       })()`,
       returnByValue: true
     })
-    const logText = logState.result.value || ''
+    const logText = logState.result.value?.summaryText || ''
     if (!logText.includes('已完成阶段') || !logText.includes('下一阶段') || !logText.includes('剩余阶段')) {
       throw new Error(`Expanded task stage summary is incomplete: ${logText}`)
+    }
+    if (
+      logState.result.value?.activeLogCount !== 1 ||
+      logState.result.value?.spinnerCount !== 1 ||
+      !logState.result.value?.activeLogText ||
+      logState.result.value?.spinnerAnimationName === 'none' ||
+      logState.result.value?.spinnerIterationCount !== 'infinite'
+    ) {
+      throw new Error(`Running log spinner is missing or ambiguous: ${JSON.stringify(logState.result.value)}`)
     }
     logScreenshotPath = screenshotPath.replace(/(\.png)?$/i, '-log.png')
     const logScreenshot = await auditCdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })

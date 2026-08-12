@@ -45,8 +45,20 @@
         <el-segmented v-model="filter" size="small" :options="filterOptions" />
       </div>
       <div class="log-content" @click.stop>
-        <div v-for="(entry, index) in filteredLogs" :key="`${entry.at}-${index}`" class="log-line" :class="`level-${entry.level || 'info'}`">
-          <span>{{ new Date(entry.at).toLocaleString() }}</span><strong>{{ taskLabel(entry.taskType) }}</strong><code>{{ entry.message }}</code>
+        <div
+          v-for="(entry, index) in filteredLogs"
+          :key="`${entry.at}-${index}`"
+          class="log-line"
+          :class="[`level-${entry.level || 'info'}`, { 'is-active-log': isActiveLog(entry) }]"
+        >
+          <span>{{ new Date(entry.at).toLocaleString() }}</span>
+          <strong class="log-task-label">
+            <span class="log-spinner-slot" aria-hidden="true">
+              <el-icon v-if="isActiveLog(entry)" class="running-log-spinner"><Loading /></el-icon>
+            </span>
+            <span>{{ taskLabel(entry.taskType) }}</span>
+          </strong>
+          <code>{{ entry.message }}</code>
         </div>
         <el-empty v-if="filteredLogs.length === 0" :description="$t('audit.noLogs')" :image-size="48" />
       </div>
@@ -57,7 +69,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Tickets } from '@element-plus/icons-vue'
+import { Loading, Tickets } from '@element-plus/icons-vue'
 
 const props = defineProps({
   logs: { type: Array, default: () => [] },
@@ -77,7 +89,12 @@ const filterOptions = computed(() => [
   { label: t('audit.executionTask'), value: 'execution' }
 ])
 const filteredLogs = computed(() => filter.value === 'all' ? props.logs : props.logs.filter(entry => entry.taskType === filter.value))
+const activeLogEntry = computed(() => {
+  if (!props.activeTask?.jobId || !['running', 'cancelling'].includes(props.activeState?.status)) return null
+  return [...props.logs].reverse().find(entry => entry.jobId === props.activeTask.jobId) || null
+})
 const taskLabel = taskType => ({ anomaly: t('audit.anomalyTab'), dedupe: t('audit.dedupTab'), execution: t('audit.executionTask') })[taskType] || taskType
+const isActiveLog = entry => entry === activeLogEntry.value
 const activeTaskLabel = computed(() => props.activeTask?.type === 'execution'
   ? props.activeState?.options?.sourceTaskType === 'dedupe' ? t('audit.dedupeExecutionTask') : t('audit.anomalyExecutionTask')
   : taskLabel(props.activeTask?.type))
@@ -163,10 +180,15 @@ const optionLabels = computed(() => {
 .log-line { display: grid; grid-template-columns: 170px 76px minmax(0, 1fr); gap: 10px; min-height: 28px; align-items: baseline; padding: 4px 8px; border-left: 3px solid var(--el-border-color); }
 .log-line span { color: var(--el-text-color-secondary); font-size: 12px; }
 .log-line strong { font-size: 12px; }
+.log-task-label { display: inline-flex; min-width: 0; align-items: center; gap: 5px; }
+.log-task-label > span:last-child { overflow: hidden; color: var(--el-text-color-primary); text-overflow: ellipsis; white-space: nowrap; }
+.log-spinner-slot { display: inline-flex; width: 14px; height: 14px; flex: 0 0 14px; align-items: center; justify-content: center; }
+.log-spinner-slot .running-log-spinner { color: var(--el-color-primary); font-size: 14px; animation: audit-log-spin 1s linear infinite; }
 .log-line code { overflow-wrap: anywhere; white-space: pre-wrap; }
 .level-info { border-color: var(--el-color-primary); }
 .level-warning { border-color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
 .level-error { border-color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
+@keyframes audit-log-spin { to { transform: rotate(360deg); } }
 @media (max-width: 900px) {
   .log-live-summary .el-tag { display: none; }
   .active-task-meta { gap: 10px 18px; }
