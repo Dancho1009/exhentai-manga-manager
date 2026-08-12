@@ -1825,6 +1825,10 @@ ipcMain.handle('audit:get-book-preview', async (event, bookId) => {
   }
 })
 
+ipcMain.handle('audit:open-book-detail', async (event, request = {}) => {
+  return await openBookDetailWindow(request)
+})
+
 ipcMain.handle('audit:start', async (event, request = {}) => {
   await databaseReady
   const mode = ['deep', 'online'].includes(request.mode) ? request.mode : 'quick'

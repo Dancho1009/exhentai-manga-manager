@@ -216,15 +216,25 @@
         <template v-if="selectedAnomaly">
           <div class="anomaly-detail-grid" :class="{ 'has-book-preview': selectedAnomaly.bookId }">
             <aside v-if="selectedAnomaly.bookId" class="anomaly-book-preview">
-              <el-skeleton v-if="anomalyPreviewLoading" animated>
-                <template #template><el-skeleton-item variant="image" class="anomaly-cover" /></template>
-              </el-skeleton>
-              <el-image v-else-if="anomalyBookPreview?.coverPath" class="anomaly-cover" :src="anomalyBookPreview.coverPath" fit="cover">
-                <template #error>
-                  <div class="anomaly-cover-placeholder"><el-icon><Picture /></el-icon><span>{{ $t('audit.coverUnavailable') }}</span></div>
-                </template>
-              </el-image>
-              <div v-else class="anomaly-cover anomaly-cover-placeholder"><el-icon><Picture /></el-icon><span>{{ $t('audit.coverUnavailable') }}</span></div>
+              <el-tooltip :content="$t('audit.openBookDetailWindow')" placement="bottom">
+                <button
+                  type="button"
+                  class="anomaly-cover-button"
+                  :aria-label="$t('audit.openBookDetailWindow')"
+                  :disabled="anomalyDetailOpening"
+                  @click="openSelectedAnomalyBookDetail"
+                >
+                  <el-skeleton v-if="anomalyPreviewLoading" animated>
+                    <template #template><el-skeleton-item variant="image" class="anomaly-cover" /></template>
+                  </el-skeleton>
+                  <el-image v-else-if="anomalyBookPreview?.coverPath" class="anomaly-cover" :src="anomalyBookPreview.coverPath" fit="cover">
+                    <template #error>
+                      <div class="anomaly-cover-placeholder"><el-icon><Picture /></el-icon><span>{{ $t('audit.coverUnavailable') }}</span></div>
+                    </template>
+                  </el-image>
+                  <div v-else class="anomaly-cover anomaly-cover-placeholder"><el-icon><Picture /></el-icon><span>{{ $t('audit.coverUnavailable') }}</span></div>
+                </button>
+              </el-tooltip>
               <p v-if="anomalyBookTitle" :title="anomalyBookTitle">{{ anomalyBookTitle }}</p>
             </aside>
             <div class="anomaly-description">
@@ -331,6 +341,7 @@ const duplicateDrawer = ref(false)
 const selectedAnomaly = shallowRef(null)
 const anomalyBookPreview = shallowRef(null)
 const anomalyPreviewLoading = ref(false)
+const anomalyDetailOpening = ref(false)
 const selectedDuplicate = shallowRef(null)
 const duplicateDraft = reactive({ keepId: null, quarantineIds: [] })
 const quarantineRoot = ref(`${String(initialSetting.library).replace(/[\\/][^\\/]+[\\/]?$/, '')}\\DedupeReview`)
@@ -387,6 +398,7 @@ const pagedDuplicates = computed(() => {
 const selectedAnomalyIdSet = computed(() => new Set(review.anomalyActionIds))
 const isAnomalySelected = id => selectedAnomalyIdSet.value.has(id)
 const filteredActionableAnomalyIds = computed(() => filteredAnomalies.value.filter(item => item.action).map(item => item.id))
+const filteredAnomalyBookIds = computed(() => [...new Set(filteredAnomalies.value.map(item => item.bookId).filter(Boolean).map(String))])
 const selectedFilteredAnomalyCount = computed(() => {
   return filteredAnomalies.value.reduce((count, item) => count + Number(selectedAnomalyIdSet.value.has(item.id)), 0)
 })
@@ -572,6 +584,22 @@ const openAnomaly = async row => {
     if (requestId === anomalyPreviewRequest) anomalyPreviewLoading.value = false
   }
 }
+const openSelectedAnomalyBookDetail = async () => {
+  const bookId = selectedAnomaly.value?.bookId
+  if (!bookId || anomalyDetailOpening.value) return
+  anomalyDetailOpening.value = true
+  try {
+    await window.auditApi.openBookDetail({
+      bookId: String(bookId),
+      navigationIds: filteredAnomalyBookIds.value
+    })
+  } catch (error) {
+    console.error(error)
+    ElMessage.error(t('audit.openBookDetailFailed'))
+  } finally {
+    anomalyDetailOpening.value = false
+  }
+}
 const openDuplicate = row => {
   selectedDuplicate.value = row
   const saved = review.duplicateSelections[row.id]
@@ -699,7 +727,11 @@ onBeforeUnmount(() => {
 .anomaly-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
 .anomaly-detail-grid.has-book-preview { grid-template-columns: 150px minmax(0, 1fr); }
 .anomaly-description, .anomaly-book-preview { min-width: 0; }
-.anomaly-cover { width: 150px; aspect-ratio: 500 / 707; overflow: hidden; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); border-radius: 4px; }
+.anomaly-cover-button { display: block; width: 150px; padding: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
+.anomaly-cover-button:disabled { cursor: wait; }
+.anomaly-cover-button:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }
+.anomaly-cover-button:not(:disabled):hover .anomaly-cover { border-color: var(--el-color-primary); box-shadow: 0 0 0 1px var(--el-color-primary-light-5); }
+.anomaly-cover { box-sizing: border-box; display: block; width: 150px; aspect-ratio: 500 / 707; overflow: hidden; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); border-radius: 4px; }
 .anomaly-cover-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--el-text-color-secondary); font-size: 12px; text-align: center; }
 .anomaly-cover-placeholder .el-icon { font-size: 28px; }
 .anomaly-book-preview p { display: -webkit-box; margin: 8px 0 0; overflow: hidden; color: var(--el-text-color-regular); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }

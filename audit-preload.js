@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('auditApi', {
   getReport: () => ipcRenderer.invoke('audit:get-report'),
   getReview: () => ipcRenderer.invoke('audit:get-review'),
   getBookPreview: bookId => ipcRenderer.invoke('audit:get-book-preview', bookId),
+  openBookDetail: request => ipcRenderer.invoke('audit:open-book-detail', request),
   start: options => ipcRenderer.invoke('audit:start', options),
   cancel: () => ipcRenderer.invoke('audit:cancel'),
   saveReview: review => ipcRenderer.invoke('audit:save-review', review),

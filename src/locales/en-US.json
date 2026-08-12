@@ -314,6 +314,8 @@
     "currentUrl": "Current URL",
     "ehviewerUrl": ".ehviewer URL",
     "coverUnavailable": "Cover unavailable",
+    "openBookDetailWindow": "Open book details in a separate window",
+    "openBookDetailFailed": "Could not open the book detail window",
     "preferredUrl": "Selected URL",
     "currentAvailability": "Current URL availability",
     "ehviewerAvailability": ".ehviewer URL availability",

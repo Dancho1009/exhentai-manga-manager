@@ -314,6 +314,8 @@
     "currentUrl": "目前 URL",
     "ehviewerUrl": ".ehviewer URL",
     "coverUnavailable": "暫無封面",
+    "openBookDetailWindow": "在獨立視窗開啟作品詳情",
+    "openBookDetailFailed": "無法開啟作品詳情視窗",
     "preferredUrl": "自動選擇 URL",
     "currentAvailability": "目前 URL 可用性",
     "ehviewerAvailability": ".ehviewer URL 可用性",
