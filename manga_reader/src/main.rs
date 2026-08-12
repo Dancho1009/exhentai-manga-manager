@@ -691,6 +691,20 @@ impl MangaReaderApp {
             ctx.request_repaint();
         }
     }
+
+    fn toggle_fullscreen(&self, ctx: &egui::Context) {
+        let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
+    }
+
+    fn exit_fullscreen_or_close(&self, ctx: &egui::Context) {
+        let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if is_fullscreen {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
 }
 
 impl eframe::App for MangaReaderApp {
@@ -711,9 +725,17 @@ impl eframe::App for MangaReaderApp {
             });
         }
 
-        if ctx.input(|i| {
-            i.key_pressed(egui::Key::Escape) || i.pointer.button_pressed(egui::PointerButton::Extra1)
-        }) {
+        let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+
+        if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
+            self.toggle_fullscreen(ctx);
+        }
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.exit_fullscreen_or_close(ctx);
+        }
+
+        if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra1)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
@@ -894,7 +916,9 @@ impl eframe::App for MangaReaderApp {
 
                 ui.add_space(5.0);
                 ui.label("Global:");
-                ui.label("  • Esc / Mouse Back: Close window");
+                ui.label("  • F11: Toggle fullscreen");
+                ui.label("  • Esc: Exit fullscreen or close window");
+                ui.label("  • Mouse Back: Close window");
 
                 if self.loading {
                     ui.add_space(20.0);
@@ -904,45 +928,47 @@ impl eframe::App for MangaReaderApp {
                     });
                 }
             } else {
-                ui.horizontal(|ui| {
-                    if ui.button("Open Folder").clicked() {
-                        self.open_folder_dialog(ctx);
-                    }
-                    if ui.button("Open Archive").clicked() {
-                        self.open_archive_dialog(ctx);
-                    }
-                    if ui.button("Close").clicked() {
-                        self.clear_loaded_images(Some(ctx));
-                        self.app_title = None;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-                            "Manga Reader".to_string(),
-                        ));
-                    }
+                if !is_fullscreen {
+                    ui.horizontal(|ui| {
+                        if ui.button("Open Folder").clicked() {
+                            self.open_folder_dialog(ctx);
+                        }
+                        if ui.button("Open Archive").clicked() {
+                            self.open_archive_dialog(ctx);
+                        }
+                        if ui.button("Close").clicked() {
+                            self.clear_loaded_images(Some(ctx));
+                            self.app_title = None;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                                "Manga Reader".to_string(),
+                            ));
+                        }
+
+                        ui.separator();
+
+                        let prev_view_mode = self.view_mode;
+                        ui.selectable_value(&mut self.view_mode, ViewMode::Scroll, "Scroll");
+                        ui.selectable_value(&mut self.view_mode, ViewMode::SinglePage, "Single Page");
+                        ui.selectable_value(&mut self.view_mode, ViewMode::DoublePage, "Double Page");
+                        if prev_view_mode != self.view_mode && self.view_mode == ViewMode::Scroll {
+                            self.scroll_to_page = Some(self.current_page);
+                        }
+                        ui.checkbox(&mut self.reverse_left_right, "RTL");
+
+                        ui.separator();
+
+                        let mode_text = if self.dark_mode { "🌙 Dark" } else { "☀ Light" };
+                        if ui.button(mode_text).clicked() {
+                            self.dark_mode = !self.dark_mode;
+                        }
+
+                        if self.loading {
+                            ui.label(" (Loading...)");
+                        }
+                    });
 
                     ui.separator();
-
-                    let prev_view_mode = self.view_mode;
-                    ui.selectable_value(&mut self.view_mode, ViewMode::Scroll, "Scroll");
-                    ui.selectable_value(&mut self.view_mode, ViewMode::SinglePage, "Single Page");
-                    ui.selectable_value(&mut self.view_mode, ViewMode::DoublePage, "Double Page");
-                    if prev_view_mode != self.view_mode && self.view_mode == ViewMode::Scroll {
-                        self.scroll_to_page = Some(self.current_page);
-                    }
-                    ui.checkbox(&mut self.reverse_left_right, "RTL");
-
-                    ui.separator();
-
-                    let mode_text = if self.dark_mode { "🌙 Dark" } else { "☀ Light" };
-                    if ui.button(mode_text).clicked() {
-                        self.dark_mode = !self.dark_mode;
-                    }
-
-                    if self.loading {
-                        ui.label(" (Loading...)");
-                    }
-                });
-
-                ui.separator();
+                }
 
                 if self.view_mode == ViewMode::Scroll {
                     let mut visible_range: Option<(usize, usize)> = None;

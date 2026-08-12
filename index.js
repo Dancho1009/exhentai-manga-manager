@@ -2111,11 +2111,73 @@ function compareItems(a, b, sortKey, ascending = false) {
   return 0
 }
 
-// 格式化标签
-const formatTags = (tags) => {
+const getQueryValue = value => Array.isArray(value) ? value[0] : value
+
+// 格式化标签（LANraragi 扩展按逗号分隔且不带空格）
+const formatTags = (tags = {}) => {
+  if (!tags || typeof tags !== 'object') return ''
+
   return Object.entries(tags)
-    .map(([key, values]) => values.map(value => setting.showTranslation ? `${tagTranslation?.[key]?.name || key}:${tagTranslation?.[key]?.[value]?.name || value}` : `${key}:${value}`).join(', '))
-    .join(', ')
+    .map(([key, values]) => {
+      const tagValues = Array.isArray(values) ? values : [values]
+      return tagValues
+        .filter(value => value !== undefined && value !== null && value !== '')
+        .map(value => setting.showTranslation ? `${tagTranslation?.[key]?._name || key}:${tagTranslation?.[key]?.[value]?.name || value}` : `${key}:${value}`)
+        .join(',')
+    })
+    .filter(Boolean)
+    .join(',')
+}
+
+const getLANArchiveTitle = (manga) => {
+  if (manga.title_jpn && manga.title) return `${manga.title_jpn} || ${manga.title}`
+  return manga.title_jpn || manga.title || path.basename(manga.filepath || '')
+}
+
+const getLANArchiveTags = (manga) => {
+  const tags = manga.tags ? formatTags(manga.tags) : ''
+  const extraTags = []
+  const dateAdded = Math.floor(Number(manga.date) / 1000)
+  if (dateAdded > 0) extraTags.push(`date_added:${dateAdded}`)
+  return [tags, ...extraTags].filter(Boolean).join(',')
+}
+
+const mangaToLANraragiArchive = (manga) => ({
+  arcid: manga.hash,
+  extension: path.extname(manga.filepath || ''),
+  filename: path.basename(manga.filepath || ''),
+  isnew: true,
+  lastreadtime: 0,
+  pagecount: Number(manga.pageCount || manga.filecount) || 0,
+  progress: 0,
+  size: Number(manga.filesize || manga.bundleSize) || 0,
+  summary: null,
+  tags: getLANArchiveTags(manga),
+  title: getLANArchiveTitle(manga),
+  category: manga.category || '',
+  url: manga.url
+})
+
+const filterLANBrowsingMangas = (mangaList, query) => {
+  const filter = String(getQueryValue(query.filter) || '').toLowerCase()
+  const category = getQueryValue(query.category)
+  const untaggedOnly = getQueryValue(query.untaggedonly) === 'true'
+
+  return mangaList.filter(manga => {
+    if (!manga.hash) return false
+    if (category && manga.category !== category) return false
+    if (untaggedOnly && manga.status !== 'non-tag' && !_.isEmpty(manga.tags)) return false
+    if (!filter) return true
+
+    return JSON.stringify(_.pick(manga, ['title', 'title_jpn', 'status', 'category', 'filepath', 'url'])).toLowerCase().includes(filter)
+      || formatTags(manga.tags).toLowerCase().includes(filter)
+  })
+}
+
+const sortLANBrowsingMangas = (mangaList, sortKey, ascending) => {
+  if (sortKey === 'random') return _.shuffle(mangaList)
+  if (!sortkey_map[sortKey]) return mangaList
+  return mangaList.sort((a, b) => compareItems(a, b, sortKey, ascending))
 }
 
 ipcMain.handle('update-tag-translation', async (event, _tagTranslation) => {
@@ -2123,61 +2185,48 @@ ipcMain.handle('update-tag-translation', async (event, _tagTranslation) => {
   bookDetailWindowRegistry.broadcast('book-detail:translation-changed', tagTranslation || {})
 })
 
+LANBrowsing.get('/api/categories', async (req, res) => {
+  try {
+    const bookList = await loadBookListFromDatabase()
+    const categories = [...new Set(bookList.map(manga => manga.category).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+      .map(category => ({ id: category, name: category, pinned: 0 }))
+
+    res.json(categories)
+  } catch (error) {
+    res.status(500).send(error.message)
+  }
+})
+
 LANBrowsing.get('/api/search', async (req, res) => {
   try {
-    const filter = req.query.filter || ''
-    const start = parseInt(req.query.start, 10) || 0
-    const length = parseInt(req.query.length, 10) || 200
+    const start = parseInt(getQueryValue(req.query.start), 10) || 0
+    const length = parseInt(getQueryValue(req.query.length), 10) || 200
     // 默认使用阅读次数排序, 来匹配 mihon 热门不带 sortby
-    let sortKey = req.query.sortby || 'read_count'
+    let sortKey = getQueryValue(req.query.sortby) || 'read_count'
     let showAll = false
-    if (sortKey.includes("_all")) {
-      sortKey = sortKey.replace("_all", "")
+    if (sortKey.includes('_all')) {
+      sortKey = sortKey.replace('_all', '')
       showAll = true
     }
 
-    // 读取并搜索数据库
     mangas = await loadBookListFromDatabase()
-    let filterMangas
-    if (filter) {
-      filterMangas = mangas.filter(manga => {
-        return JSON.stringify(_.pick(manga, ['title', 'title_jpn', 'status', 'category', 'filepath', 'url'])).toLowerCase().includes(filter.toLowerCase())
-        || formatTags(manga.tags).toLowerCase().includes(filter.toLowerCase())
-      })
-    } else {
-      filterMangas = mangas
-    }
+    const totalRecords = mangas.filter(manga => manga.hash).length
+    let filterMangas = filterLANBrowsingMangas(mangas, req.query)
+    const recordsFiltered = filterMangas.length
+    const ascending = getQueryValue(req.query.order) === 'asc'
 
-    if (sortKey !== 'random') {
-      filterMangas = filterMangas.sort((a, b) => compareItems(a, b, sortKey))
-    } else {
-      filterMangas = _.shuffle(filterMangas)
-    }
-    filterMangas = showAll ? filterMangas : filterMangas.slice(start, start + length)
+    filterMangas = sortLANBrowsingMangas(filterMangas, sortKey, ascending)
+    const pageMangas = showAll ? filterMangas : filterMangas.slice(start, start + length)
 
-    // 格式化响应数据
-    const responseData = filterMangas.map(manga => ({
-      arcid: manga.hash,
-      extension: path.extname(manga.filepath),
-      filename: path.basename(manga.filepath),
-      isnew: 'true',
-      lastreadtime: 0,
-      pagecount: manga.pageCount,
-      progress: 0,
-      size: manga.filesize,
-      summary: null,
-      tags: manga.tags ? formatTags(manga.tags) : '',
-      title: `${manga.title_jpn && manga.title ? `${manga.title_jpn} || ${manga.title}` : manga.title}`,
-      category: manga.category,
-      url: manga.url
-    }))
+    const responseData = pageMangas.map(mangaToLANraragiArchive)
     const hash = createHash('md5').update(JSON.stringify(responseData)).digest('hex')
     res.json({
       data: responseData,
       hash,
       draw: 0,
-      recordsFiltered: responseData.length,
-      recordsTotal: filterMangas.length
+      recordsFiltered,
+      recordsTotal: totalRecords
     })
   } catch (error) {
     res.status(500).send(error.message)
@@ -2186,27 +2235,19 @@ LANBrowsing.get('/api/search', async (req, res) => {
 
 LANBrowsing.get('/api/search/random', async (req, res) => {
   try {
-    // 从数据库中随机获取指定数量的 Manga 记录
-    const count = parseInt(req.query.count, 10) || 1
-    const randomMangas = _.sampleSize(await loadBookListFromDatabase(), count)
+    const count = parseInt(getQueryValue(req.query.count), 10) || 1
+    mangas = await loadBookListFromDatabase()
+    const totalRecords = mangas.filter(manga => manga.hash).length
+    const randomMangas = _.sampleSize(filterLANBrowsingMangas(mangas, req.query), count)
 
-    const responseData = randomMangas.map(manga => ({
-      arcid: manga.hash,
-      extension: path.extname(manga.filepath),
-      filename: path.basename(manga.filepath),
-      isnew: 'true',
-      lastreadtime: 0,
-      pagecount: manga.pageCount,
-      progress: 0,
-      size: manga.filesize,
-      summary: null,
-      tags: manga.tags ? formatTags(manga.tags) : '',
-      title: `${manga.title_jpn && manga.title ? `${manga.title_jpn} || ${manga.title}` : manga.title}`,
-      category: manga.category,
-    }))
-
+    const responseData = randomMangas.map(mangaToLANraragiArchive)
+    const hash = createHash('md5').update(JSON.stringify(responseData)).digest('hex')
     res.json({
-      data: responseData
+      data: responseData,
+      hash,
+      draw: 0,
+      recordsFiltered: 0,
+      recordsTotal: totalRecords
     })
   } catch (error) {
     console.error('Failed to fetch random Manga:', error)
@@ -2218,34 +2259,21 @@ LANBrowsing.get('/api/archives/:hash/metadata', async (req, res) => {
   try {
     const mangaHash = req.params.hash
 
-    // 从数据库找到对应的漫画
     if (_.isEmpty(mangas)) mangas = await loadBookListFromDatabase()
-    const manga = await mangas.find(manga => manga.hash === mangaHash)
+    const manga = mangas.find(manga => manga.hash === mangaHash)
 
     if (!manga) {
       return res.status(404).send('Manga not found')
     }
 
-    // 构造响应数据
-    const responseMetadata = {
-      arcid: manga.hash,
-      extension: path.extname(manga.filepath),
-      filename: path.basename(manga.filepath),
-      isnew: 'true',
-      lastreadtime: 0,
-      pagecount: manga.pageCount,
-      progress: 0,
-      size: manga.filesize,
-      summary: null,
-      tags: manga.tags ? formatTags(manga.tags) : '',
-      title: `${manga.title_jpn && manga.title ? `${manga.title_jpn} || ${manga.title}` : manga.title}`,
-      category: manga.category,
-    }
-
-    res.json(responseMetadata)
+    res.json(mangaToLANraragiArchive(manga))
   } catch (error) {
     res.status(500).send(error.message)
   }
+})
+
+LANBrowsing.delete('/api/archives/:hash/isnew', async (req, res) => {
+  res.status(204).send()
 })
 
 // 处理封面图片请求
