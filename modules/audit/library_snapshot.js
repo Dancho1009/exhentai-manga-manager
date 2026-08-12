@@ -2,13 +2,11 @@ const fs = require('fs')
 const path = require('path')
 const sqlite3 = require('sqlite3')
 const { open } = require('sqlite')
+const { mergeEffectiveBook } = require('../book_detail.js')
 const {
   IMAGE_EXTENSIONS,
   ARCHIVE_EXTENSIONS,
   normalizePath,
-  stableId,
-  extractGalleryIdentity,
-  extractFilenameId,
   parseTags
 } = require('./utils.js')
 
@@ -16,19 +14,6 @@ const openReadonly = filename => open({
   filename,
   driver: sqlite3.Database,
   mode: sqlite3.OPEN_READONLY
-})
-
-const makeAnomaly = (type, severity, data = {}) => ({
-  id: stableId(type, data.bookId, data.filepath, data.groupKey, data.metadataHash),
-  type,
-  severity,
-  title: data.title || type,
-  bookId: data.bookId || null,
-  filepath: data.filepath || null,
-  reason: data.reason || '',
-  evidence: data.evidence || {},
-  recommendedAction: data.recommendedAction || 'review',
-  action: data.action || null
 })
 
 const statFolder = async folderpath => {
@@ -118,9 +103,19 @@ const buildSnapshot = async ({ library, databasePath, metadataPath, excludeFile,
   }
 
   const metadataByHash = new Map(databaseSnapshot.metadataRows.map(row => [row.hash, row]))
+  const hashPeers = new Map()
+  for (const raw of databaseSnapshot.books) {
+    if (!raw.hash) continue
+    if (!hashPeers.has(raw.hash)) hashPeers.set(raw.hash, [])
+    hashPeers.get(raw.hash).push(raw)
+  }
   const books = databaseSnapshot.books.map(raw => ({
     raw,
-    effective: { ...raw, ...(metadataByHash.get(raw.hash) || {}) }
+    effective: mergeEffectiveBook({
+      manga: raw,
+      metadata: raw.hash ? metadataByHash.get(raw.hash) : null,
+      hashPeers: raw.hash ? hashPeers.get(raw.hash) : []
+    })
   }))
   return {
     createdAt: new Date().toISOString(),
@@ -133,118 +128,4 @@ const buildSnapshot = async ({ library, databasePath, metadataPath, excludeFile,
   }
 }
 
-const analyzeSnapshot = snapshot => {
-  const anomalies = []
-  const actualByPath = new Map(snapshot.actualItems.map(item => [normalizePath(item.filepath), item]))
-  const booksByPath = new Map()
-  const booksByHash = new Map()
-  const metadataHashes = new Set(snapshot.metadataRows.map(row => row.hash))
-
-  for (const wrapped of snapshot.books) {
-    const { raw, effective } = wrapped
-    const pathKey = normalizePath(raw.filepath)
-    const pathGroup = booksByPath.get(pathKey) || []
-    pathGroup.push(wrapped)
-    booksByPath.set(pathKey, pathGroup)
-    const hashGroup = booksByHash.get(raw.hash) || []
-    hashGroup.push(wrapped)
-    booksByHash.set(raw.hash, hashGroup)
-
-    const actual = actualByPath.get(pathKey)
-    if (!actual) {
-      anomalies.push(makeAnomaly('database-file-missing', 'critical', {
-        bookId: raw.id, filepath: raw.filepath, reason: '数据库记录指向的文件不存在', evidence: { databasePath: raw.filepath }
-      }))
-      continue
-    }
-    if (Number(raw.bundleSize) !== Number(actual.size)) {
-      anomalies.push(makeAnomaly('scan-stale-size', 'high', {
-        bookId: raw.id, filepath: raw.filepath, reason: '文件实际大小与数据库快照不一致',
-        evidence: { databaseSize: raw.bundleSize, actualSize: actual.size }, recommendedAction: 'targeted-rescan'
-      }))
-    }
-    const storedMtime = new Date(raw.mtime || 0).getTime()
-    if (Number.isFinite(storedMtime) && storedMtime > 0 && Math.abs(storedMtime - actual.mtimeMs) > 2000) {
-      anomalies.push(makeAnomaly('scan-stale-mtime', 'medium', {
-        bookId: raw.id, filepath: raw.filepath, reason: '文件修改时间与数据库快照不一致',
-        evidence: { databaseMtime: raw.mtime, actualMtime: actual.mtime }, recommendedAction: 'targeted-rescan'
-      }))
-    }
-    if (raw.coverPath && !fs.existsSync(raw.coverPath)) {
-      anomalies.push(makeAnomaly('cover-missing', 'medium', {
-        bookId: raw.id, filepath: raw.filepath, reason: '数据库封面路径不存在', evidence: { coverPath: raw.coverPath }, recommendedAction: 'targeted-rescan'
-      }))
-    }
-    if (!metadataHashes.has(raw.hash)) {
-      anomalies.push(makeAnomaly('metadata-missing', 'high', {
-        bookId: raw.id, filepath: raw.filepath, metadataHash: raw.hash, reason: 'metadata.sqlite 中没有对应 hash'
-      }))
-    }
-    const identity = extractGalleryIdentity(effective.url)
-    const filenameId = extractFilenameId(raw.filepath)
-    if (identity?.gid && filenameId && identity.gid !== filenameId) {
-      anomalies.push(makeAnomaly('filename-url-id-conflict', 'high', {
-        bookId: raw.id, filepath: raw.filepath, reason: '文件名前缀编号与元数据 URL gid 不一致',
-        evidence: { filenameId, urlGid: identity.gid, url: effective.url }, recommendedAction: 'deep-identity-check'
-      }))
-    }
-    if (effective.status === 'tagged' && !effective.url) {
-      anomalies.push(makeAnomaly('tagged-without-source', 'high', {
-        bookId: raw.id, filepath: raw.filepath, reason: '状态为 tagged，但没有来源 URL', recommendedAction: 'deep-identity-check'
-      }))
-    }
-    const pageDiff = Math.abs(Number(raw.pageCount || 0) - Number(effective.filecount || 0))
-    const pageBase = Math.max(Number(raw.pageCount || 0), Number(effective.filecount || 0), 1)
-    if (effective.filecount && pageDiff > 5 && pageDiff / pageBase > 0.05) {
-      anomalies.push(makeAnomaly('page-count-mismatch', pageDiff > 20 && pageDiff / pageBase > 0.25 ? 'high' : 'medium', {
-        bookId: raw.id, filepath: raw.filepath, reason: '本地页数与来源页数差异较大',
-        evidence: { localPages: raw.pageCount, remotePages: effective.filecount, difference: pageDiff }, recommendedAction: 'deep-identity-check'
-      }))
-    }
-    const tags = effective.tags || {}
-    if (!effective.title || !effective.category || !effective.filecount || Object.values(tags).flat().length === 0) {
-      anomalies.push(makeAnomaly('metadata-incomplete', 'low', {
-        bookId: raw.id, filepath: raw.filepath, reason: '存在缺失的常用元数据字段',
-        evidence: { title: Boolean(effective.title), category: Boolean(effective.category), filecount: effective.filecount, tagCount: Object.values(tags).flat().length }
-      }))
-    }
-  }
-
-  for (const actual of snapshot.actualItems) {
-    if (!booksByPath.has(normalizePath(actual.filepath))) {
-      anomalies.push(makeAnomaly('library-file-untracked', 'high', {
-        filepath: actual.filepath, reason: 'Library 中的作品没有数据库记录', evidence: { actualSize: actual.size }, recommendedAction: 'targeted-import'
-      }))
-    }
-  }
-  for (const [pathKey, group] of booksByPath) {
-    if (group.length > 1) {
-      anomalies.push(makeAnomaly('duplicate-database-path', 'critical', {
-        filepath: group[0].raw.filepath, groupKey: pathKey, reason: '多个 Manga 记录指向同一路径', evidence: { bookIds: group.map(item => item.raw.id) }
-      }))
-    }
-  }
-  for (const [hash, group] of booksByHash) {
-    if (group.length < 2) continue
-    const rawUrls = [...new Set(group.map(item => item.raw.url).filter(Boolean))]
-    const effectiveUrls = [...new Set(group.map(item => item.effective.url).filter(Boolean))]
-    const conflict = rawUrls.length > 1 || effectiveUrls.length > 1 || group.some(item => item.raw.url && item.effective.url && item.raw.url !== item.effective.url)
-    anomalies.push(makeAnomaly(conflict ? 'metadata-shadow-conflict' : 'shared-hash-review', conflict ? 'critical' : 'medium', {
-      filepath: group[0].raw.filepath, groupKey: hash, metadataHash: hash,
-      reason: conflict ? '共享 hash 的作品被同一 Metadata 记录覆盖，且身份信息冲突' : '多个作品共享抽样 hash，需要确认是否应共享元数据',
-      evidence: { bookIds: group.map(item => item.raw.id), rawUrls, effectiveUrls }
-    }))
-  }
-
-  const mangaHashes = new Set(snapshot.books.map(item => item.raw.hash))
-  for (const metadata of snapshot.metadataRows) {
-    if (!mangaHashes.has(metadata.hash)) {
-      anomalies.push(makeAnomaly('orphan-metadata', 'low', {
-        metadataHash: metadata.hash, reason: 'metadata.sqlite 记录没有对应 Manga', evidence: { title: metadata.title, url: metadata.url }
-      }))
-    }
-  }
-  return anomalies
-}
-
-module.exports = { buildSnapshot, analyzeSnapshot, makeAnomaly }
+module.exports = { buildSnapshot }

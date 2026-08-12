@@ -40,7 +40,7 @@ const {
 } = require('./modules/ehentai.js')
 const { EhentaiAvailabilityCache } = require('./modules/ehentai_availability_cache.js')
 const { LibraryTaskCoordinator } = require('./modules/audit/task_coordinator.js')
-const { AuditJobManager } = require('./modules/audit/job_manager.js')
+const { AuditWorkspaceManager } = require('./modules/audit/job_manager.js')
 const { executeApprovedActions } = require('./modules/audit/action_executor.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
 const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
@@ -97,14 +97,14 @@ if (setting.metadataPath) {
 let Metadata = prepareMetadataModel(metadataSqliteFile)
 const bookDetailService = createBookDetailService({ Manga, getMetadata: () => Metadata })
 const libraryTaskCoordinator = new LibraryTaskCoordinator()
-const auditJobManager = new AuditJobManager({ storePath: STORE_PATH, coordinator: libraryTaskCoordinator })
+const auditWorkspaceManager = new AuditWorkspaceManager({ storePath: STORE_PATH, coordinator: libraryTaskCoordinator })
 const sendAuditState = state => {
   if (auditWindow && !auditWindow.isDestroyed()) auditWindow.webContents.send('audit:state', state)
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('audit:lock-state', state.lock)
   bookDetailWindowRegistry?.broadcast('book-detail:lock-state', state.lock)
 }
-auditJobManager.on('state', sendAuditState)
-auditJobManager.on('log', entry => {
+auditWorkspaceManager.on('state', sendAuditState)
+auditWorkspaceManager.on('log', entry => {
   if (auditWindow && !auditWindow.isDestroyed()) auditWindow.webContents.send('audit:log', entry)
 })
 const getColumns = async (sequelize, tableName) => {
@@ -241,7 +241,7 @@ const createTray = () => {
       label: 'exit',
       click: async () => {
         appIsQuitting = true
-        await auditJobManager.interruptForExit()
+        await auditWorkspaceManager.interruptForExit()
         if (auditWindow && !auditWindow.isDestroyed()) auditWindow.destroy()
         bookDetailWindowRegistry.destroyAll()
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy()
@@ -358,18 +358,18 @@ const createAuditWindow = () => {
   win.once('ready-to-show', () => win.show())
   win.webContents.on('did-finish-load', () => {
     win.setTitle('exhentai-manga-manager | Library Audit')
-    win.webContents.send('audit:state', auditJobManager.getState())
+    win.webContents.send('audit:state', auditWorkspaceManager.getState())
   })
   let closePromptOpen = false
   win.on('close', event => {
-    if (appIsQuitting || !['running', 'cancelling'].includes(auditJobManager.getState().status)) return
+    if (appIsQuitting || !auditWorkspaceManager.getState().activeTask) return
     event.preventDefault()
     if (closePromptOpen) return
     closePromptOpen = true
     dialog.showMessageBox(win, {
       type: 'question',
       title: '任务仍在进行',
-      message: '异常检查仍在后台运行。隐藏窗口并继续任务吗？',
+      message: '审计任务仍在后台运行。隐藏窗口并继续任务吗？',
       buttons: ['隐藏并继续', '返回'],
       defaultId: 0,
       cancelId: 1,
@@ -493,7 +493,7 @@ const createBookDetailWindow = context => {
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=65536')
 // app.disableHardwareAcceleration()
 app.whenReady().then(async () => {
-  await auditJobManager.initialize()
+  await auditWorkspaceManager.initialize()
   await clearFolder(VIEWER_PATH)
   const primaryDisplay = screen.getPrimaryDisplay()
   screenWidth = Math.floor(primaryDisplay.workAreaSize.width * primaryDisplay.scaleFactor)
@@ -522,10 +522,10 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', event => {
-  if (appIsQuitting || !['running', 'cancelling'].includes(auditJobManager.getState().status)) return
+  if (appIsQuitting || !auditWorkspaceManager.getState().activeTask) return
   event.preventDefault()
   appIsQuitting = true
-  auditJobManager.interruptForExit().finally(() => app.quit())
+  auditWorkspaceManager.interruptForExit().finally(() => app.quit())
 })
 
 process.on('exit', () => {
@@ -1802,26 +1802,24 @@ const getMainRendererState = async () => {
 
 ipcMain.handle('audit:open-window', async () => {
   createAuditWindow()
-  return auditJobManager.getState()
+  return auditWorkspaceManager.getState()
 })
 
-ipcMain.handle('audit:get-state', async () => auditJobManager.getState())
-ipcMain.handle('audit:get-report', async () => await auditJobManager.getReport())
-ipcMain.handle('audit:get-review', async () => await auditJobManager.getReview())
+ipcMain.handle('audit:get-workspace-state', async () => auditWorkspaceManager.getState())
+ipcMain.handle('audit:get-report', async (event, taskType) => await auditWorkspaceManager.getReport(taskType))
+ipcMain.handle('audit:get-review', async (event, taskType) => await auditWorkspaceManager.getReview(taskType))
+ipcMain.handle('audit:get-logs', async (event, limit) => await auditWorkspaceManager.getLogs(Math.min(1000, Math.max(20, Number(limit) || 400))))
 ipcMain.handle('audit:get-book-preview', async (event, bookId) => {
   await databaseReady
   const normalizedBookId = String(bookId || '').trim()
   if (!normalizedBookId || normalizedBookId.length > 128) return null
-  const manga = await Manga.findByPk(normalizedBookId)
-  if (!manga) return null
-  const raw = manga.toJSON()
-  const shared = raw.hash ? await Metadata.findByPk(raw.hash) : null
-  const effective = { ...raw, ...(shared?.toJSON() || {}) }
+  const effective = await bookDetailService.getEffectiveBookById(normalizedBookId)
+  if (!effective) return null
   return {
-    id: raw.id,
-    title: effective.title || raw.title || '',
-    title_jpn: effective.title_jpn || raw.title_jpn || '',
-    coverPath: raw.coverPath || null
+    id: effective.id,
+    title: effective.title || '',
+    title_jpn: effective.title_jpn || '',
+    coverPath: effective.coverPath || null
   }
 })
 
@@ -1829,29 +1827,31 @@ ipcMain.handle('audit:open-book-detail', async (event, request = {}) => {
   return await openBookDetailWindow(request)
 })
 
-ipcMain.handle('audit:start', async (event, request = {}) => {
+const normalizeAuditBookIds = values => Array.isArray(values)
+  ? [...new Set(values
+    .filter(value => typeof value === 'string' || typeof value === 'number')
+    .map(value => String(value).trim())
+    .filter(value => value && value.length <= 128))].slice(0, 20000)
+  : []
+
+const getAuditWorkerOptions = () => ({
+  library: setting.library,
+  databasePath: path.join(STORE_PATH, 'database.sqlite'),
+  metadataPath: metadataSqliteFile,
+  auditStorePath: path.join(STORE_PATH, 'audit'),
+  excludeFile: setting.excludeFile,
+  sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe')
+})
+
+ipcMain.handle('audit:start-anomaly', async (event, request = {}) => {
   await databaseReady
-  const mode = ['deep', 'online'].includes(request.mode) ? request.mode : 'quick'
-  const deepScope = ['changed', 'anomalies', 'all'].includes(request.deepScope) ? request.deepScope : 'anomalies'
-  const onlineScope = ['conflicts', 'urls', 'ehviewer'].includes(request.onlineScope) ? request.onlineScope : 'conflicts'
-  const onlineBookIds = Array.isArray(request.onlineBookIds)
-    ? [...new Set(request.onlineBookIds
-      .filter(value => typeof value === 'string' || typeof value === 'number')
-      .map(value => String(value).trim())
-      .filter(value => value && value.length <= 128))].slice(0, 20000)
-    : []
-  return await auditJobManager.start({
-    mode,
-    deepScope,
-    onlineScope,
-    onlineBookIds,
+  const onlinePolicy = ['conflicts', 'urls', 'ehviewer'].includes(request.onlinePolicy) ? request.onlinePolicy : 'none'
+  return await auditWorkspaceManager.startAnomaly({
+    ...getAuditWorkerOptions(),
+    forceLocal: Boolean(request.forceLocal),
+    onlinePolicy,
+    onlineBookIds: normalizeAuditBookIds(request.onlineBookIds),
     forceOnline: Boolean(request.forceOnline),
-    library: setting.library,
-    databasePath: path.join(STORE_PATH, 'database.sqlite'),
-    metadataPath: metadataSqliteFile,
-    auditStorePath: path.join(STORE_PATH, 'audit'),
-    excludeFile: setting.excludeFile,
-    sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe'),
     ehentaiSetting: {
       proxy: setting.proxy,
       requireGap: setting.requireGap,
@@ -1863,70 +1863,100 @@ ipcMain.handle('audit:start', async (event, request = {}) => {
   })
 })
 
-ipcMain.handle('audit:cancel', async () => await auditJobManager.cancel())
-ipcMain.handle('audit:save-review', async (event, review) => await auditJobManager.saveReview(review || {}))
+ipcMain.handle('audit:start-dedupe', async (event, request = {}) => {
+  await databaseReady
+  return await auditWorkspaceManager.startDedupe({
+    ...getAuditWorkerOptions(),
+    forceContent: Boolean(request.forceContent)
+  })
+})
+
+ipcMain.handle('audit:cancel-active', async () => await auditWorkspaceManager.cancelActive())
+ipcMain.handle('audit:save-review', async (event, { taskType, review } = {}) => {
+  return await auditWorkspaceManager.saveReview(taskType, review || {})
+})
 
 ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
   const defaultQuarantine = path.join(path.dirname(setting.library), 'DedupeReview')
   const quarantineRoot = request.quarantineRoot || defaultQuarantine
   const rendererState = await getMainRendererState()
-  const result = await executeApprovedActions({
-    jobManager: auditJobManager,
-    coordinator: libraryTaskCoordinator,
-    Manga,
-    Metadata,
-    databasePath: path.join(STORE_PATH, 'database.sqlite'),
-    metadataPath: metadataSqliteFile,
-    collectionList,
-    saveCollectionList: saveCollectionListToFile,
-    library: setting.library,
-    quarantineRoot,
-    rendererState,
-    verifyRepairAction: async action => await withEhentaiAvailabilityCache(async cache => {
-      const candidateIdentity = extractEhentaiIdentity(action.newUrl)
-      if (!candidateIdentity) return { valid: false, error: 'INVALID_REPAIR_CANDIDATE_URL' }
-      const candidate = await checkGallerySites({
-        ...candidateIdentity,
-        preferredSite: getEhentaiSiteFromUrl(action.newUrl) || 'exhentai',
-        strategy: 'both',
-        force: true,
-        setting,
-        cache
-      })
-      if (!isIdentityWebAvailable(candidate)) return { valid: false, error: 'REPAIR_CANDIDATE_UNAVAILABLE' }
-      const currentIdentity = extractEhentaiIdentity(action.currentUrl)
-      const identityChanged = currentIdentity && (
-        currentIdentity.gid !== candidateIdentity.gid || currentIdentity.token !== candidateIdentity.token
-      )
-      if (identityChanged) {
-        const current = await checkGallerySites({
-          ...currentIdentity,
-          preferredSite: getEhentaiSiteFromUrl(action.currentUrl) || 'exhentai',
+  const result = await auditWorkspaceManager.runExecution(async execution => {
+    const [anomalyReport, anomalyReview, dedupeReport, dedupeReview] = await Promise.all([
+      auditWorkspaceManager.getReport('anomaly'),
+      auditWorkspaceManager.getReview('anomaly'),
+      auditWorkspaceManager.getReport('dedupe'),
+      auditWorkspaceManager.getReview('dedupe')
+    ])
+    return await executeApprovedActions({
+      anomalyReport,
+      anomalyReview,
+      dedupeReport,
+      dedupeReview,
+      executionId: execution.executionId,
+      executionDir: execution.executionDir,
+      auditStorePath: path.join(STORE_PATH, 'audit'),
+      Manga,
+      Metadata,
+      databasePath: path.join(STORE_PATH, 'database.sqlite'),
+      metadataPath: metadataSqliteFile,
+      collectionList,
+      saveCollectionList: saveCollectionListToFile,
+      library: setting.library,
+      quarantineRoot,
+      rendererState,
+      setProgress: execution.setProgress,
+      isCancelled: execution.isCancelled,
+      verifyRepairAction: async action => await withEhentaiAvailabilityCache(async cache => {
+        const candidateIdentity = extractEhentaiIdentity(action.newUrl)
+        if (!candidateIdentity) return { valid: false, error: 'INVALID_REPAIR_CANDIDATE_URL' }
+        const candidate = await checkGallerySites({
+          ...candidateIdentity,
+          preferredSite: getEhentaiSiteFromUrl(action.newUrl) || 'exhentai',
           strategy: 'both',
           force: true,
           setting,
           cache
         })
-        if (isIdentityWebAvailable(current) || hasUncertainSiteStatus(current)) {
-          return { valid: false, error: 'CURRENT_GALLERY_IS_AVAILABLE_OR_UNCERTAIN' }
+        if (!isIdentityWebAvailable(candidate)) return { valid: false, error: 'REPAIR_CANDIDATE_UNAVAILABLE' }
+        const currentIdentity = extractEhentaiIdentity(action.currentUrl)
+        const identityChanged = currentIdentity && (
+          currentIdentity.gid !== candidateIdentity.gid || currentIdentity.token !== candidateIdentity.token
+        )
+        if (identityChanged) {
+          const current = await checkGallerySites({
+            ...currentIdentity,
+            preferredSite: getEhentaiSiteFromUrl(action.currentUrl) || 'exhentai',
+            strategy: 'both',
+            force: true,
+            setting,
+            cache
+          })
+          if (isIdentityWebAvailable(current) || hasUncertainSiteStatus(current)) {
+            return { valid: false, error: 'CURRENT_GALLERY_IS_AVAILABLE_OR_UNCERTAIN' }
+          }
         }
-      }
-      const metadataResult = await getEhentaiGalleryMetadata({
-        ...candidateIdentity,
-        preferredSite: candidate.preferredSite,
-        forceAvailability: false,
-        setting,
-        cache
+        const metadataResult = await getEhentaiGalleryMetadata({
+          ...candidateIdentity,
+          preferredSite: candidate.preferredSite,
+          forceAvailability: false,
+          setting,
+          cache
+        })
+        if (metadataResult.gdata.status !== 'available') return { valid: false, error: 'REPAIR_GDATA_UNAVAILABLE' }
+        return {
+          valid: true,
+          newUrl: metadataResult.preferredUrl,
+          metadata: toEhentaiManagerMetadata(metadataResult.gdata.metadata)
+        }
       })
-      if (metadataResult.gdata.status !== 'available') return { valid: false, error: 'REPAIR_GDATA_UNAVAILABLE' }
-      return {
-        valid: true,
-        newUrl: metadataResult.preferredUrl,
-        metadata: toEhentaiManagerMetadata(metadataResult.gdata.metadata)
-      }
     })
   })
   collectionList = result.collectionList
+  const workspaceState = auditWorkspaceManager.getState()
+  const clearReviews = []
+  if (workspaceState.channels.anomaly.latestReportId) clearReviews.push(auditWorkspaceManager.saveReview('anomaly', { actionIds: [] }))
+  if (workspaceState.channels.dedupe.latestReportId) clearReviews.push(auditWorkspaceManager.saveReview('dedupe', { selections: {} }))
+  await Promise.all(clearReviews)
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('audit:library-changed', { rendererState: result.rendererState })
   }

@@ -72,6 +72,34 @@ const run = async () => {
   if (!body.includes('异常检查') || !body.includes('重复检查') || !body.includes('审批与执行')) {
     throw new Error(`Audit UI text incomplete: ${body.slice(0, 500)}`)
   }
+  if (!body.includes('开始异常检查')) throw new Error('Independent anomaly start action missing')
+  if (body.includes('快速检查') || body.includes('深度检查') || body.includes('在线来源检查')) {
+    throw new Error('Legacy combined audit modes are still visible')
+  }
+  const tabResult = await auditCdp.send('Runtime.evaluate', {
+    expression: `(async () => {
+      const clickText = text => {
+        const node = [...document.querySelectorAll('[role="tab"]')].find(item => item.textContent.includes(text))
+        if (!node) return false
+        node.click()
+        return true
+      }
+      const dedupeClicked = clickText('重复检查')
+      await new Promise(resolve => setTimeout(resolve, 120))
+      const dedupeVisible = document.body.innerText.includes('开始重复检查')
+      const approvalClicked = clickText('审批与执行')
+      await new Promise(resolve => setTimeout(resolve, 120))
+      const approvalVisible = document.body.innerText.includes('已批准异常修复') && document.body.innerText.includes('待隔离文件')
+      clickText('异常检查')
+      return { dedupeClicked, dedupeVisible, approvalClicked, approvalVisible }
+    })()`,
+    awaitPromise: true,
+    returnByValue: true
+  })
+  const tabs = tabResult.result.value
+  if (!tabs.dedupeClicked || !tabs.dedupeVisible || !tabs.approvalClicked || !tabs.approvalVisible) {
+    throw new Error(`Independent audit tabs failed: ${JSON.stringify(tabs)}`)
+  }
   const screenshot = await auditCdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
   fs.writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'))
   auditCdp.ws.close()

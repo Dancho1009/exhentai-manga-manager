@@ -92,8 +92,13 @@ const mergeRendererState = (rendererState, idMap) => {
 }
 
 const executeApprovedActions = async ({
-  jobManager,
-  coordinator,
+  anomalyReport,
+  anomalyReview,
+  dedupeReport,
+  dedupeReview,
+  executionId,
+  executionDir,
+  auditStorePath,
   Manga,
   Metadata,
   databasePath,
@@ -103,23 +108,26 @@ const executeApprovedActions = async ({
   library,
   quarantineRoot,
   rendererState,
-  verifyRepairAction
+  verifyRepairAction,
+  setProgress = async () => {},
+  isCancelled = () => false
 }) => {
-  const report = await jobManager.getReport()
-  const review = await jobManager.getReview()
-  if (!report || !review || report.jobId !== review.jobId) throw new Error('AUDIT_REVIEW_MISMATCH')
-  const jobId = report.jobId
-  coordinator.beginAudit(jobId)
-  const backupDir = path.join(jobManager.storePath, 'backups', `${jobId}_${Date.now()}`)
-  const actionLogPath = path.join(jobManager.jobsPath, jobId, 'action-audit.jsonl')
+  if (anomalyReview && (!anomalyReport || anomalyReview.reportId !== anomalyReport.reportId)) throw new Error('ANOMALY_REVIEW_MISMATCH')
+  if (dedupeReview && (!dedupeReport || dedupeReview.reportId !== dedupeReport.reportId)) throw new Error('DEDUPE_REVIEW_MISMATCH')
+  const backupDir = path.join(auditStorePath, 'backups', executionId)
+  const actionLogPath = path.join(executionDir, 'action-audit.jsonl')
   const writeActionLog = async entry => fs.promises.appendFile(actionLogPath, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, 'utf8')
+  const assertNotCancelled = () => {
+    if (isCancelled()) throw new Error('AUDIT_CANCELLED')
+  }
   const movedFiles = []
   const idMap = {}
   let nextCollections = JSON.parse(JSON.stringify(collectionList || []))
   let databaseCommitted = false
 
   try {
-    await jobManager.setState({ status: 'running', phase: 'preparing-execution', completed: 0, total: 0, error: null })
+    assertNotCancelled()
+    await setProgress({ phase: 'preparing-execution', completed: 0, total: 0, phaseCompleted: 0, phaseTotal: 0 })
     await fs.promises.mkdir(backupDir, { recursive: true })
     await Promise.all([
       backupDatabaseFamily(databasePath, backupDir),
@@ -128,14 +136,17 @@ const executeApprovedActions = async ({
       atomicWriteJson(path.join(backupDir, 'renderer-state.json'), rendererState || {})
     ])
 
-    const selectedGroups = Object.entries(review.duplicateSelections || {})
-    const approvedAnomalyIds = new Set(review.anomalyActionIds || [])
-    const approvedAnomalies = report.anomalies.filter(item => item.action && approvedAnomalyIds.has(item.id))
+    const selectedGroups = Object.entries(dedupeReview?.selections || {})
+    const approvedAnomalyIds = new Set(anomalyReview?.actionIds || [])
+    const approvedAnomalies = (anomalyReport?.anomalies || []).filter(item => item.action && approvedAnomalyIds.has(item.id))
+    if (approvedAnomalies.length > 0 && anomalyReport?.executable === false) throw new Error('ANOMALY_REPORT_NOT_EXECUTABLE')
+    if (selectedGroups.length > 0 && dedupeReport?.executable === false) throw new Error('DEDUPE_REPORT_NOT_EXECUTABLE')
     const duplicateActions = []
     const selectedBookIds = new Set()
     for (const [groupId, selection] of selectedGroups) {
-      const group = report.duplicates.find(item => item.id === groupId)
+      const group = (dedupeReport?.groups || []).find(item => item.id === groupId)
       if (!group) throw new Error(`DUPLICATE_GROUP_MISSING: ${groupId}`)
+      if (group.actionable === false) throw new Error(`DUPLICATE_GROUP_NOT_ACTIONABLE: ${groupId}`)
       const keep = group.items.find(item => item.id === selection.keepId)
       const quarantineItems = group.items.filter(item => (selection.quarantineIds || []).includes(item.id))
       if (!keep || quarantineItems.length === 0 || quarantineItems.some(item => item.id === keep.id)) {
@@ -153,9 +164,11 @@ const executeApprovedActions = async ({
     }
 
     const totalActions = approvedAnomalies.length + duplicateActions.reduce((sum, action) => sum + action.quarantineItems.length, 0)
-    await jobManager.setState({ phase: 'validating-approvals', total: totalActions, completed: 0 })
+    if (totalActions === 0) throw new Error('NO_APPROVED_ACTIONS')
+    await setProgress({ phase: 'validating-approvals', total: totalActions, completed: 0, phaseCompleted: 0, phaseTotal: totalActions })
     const preparedRepairs = new Map()
     for (const anomaly of approvedAnomalies) {
+      assertNotCancelled()
       await ensureExpectedFile({ filepath: anomaly.action.filepath, size: anomaly.action.expectedSize, mtimeMs: anomaly.action.expectedMtimeMs })
       if (anomaly.action.type === 'repair-url' && verifyRepairAction) {
         const prepared = await verifyRepairAction(anomaly.action)
@@ -164,26 +177,28 @@ const executeApprovedActions = async ({
       }
     }
     for (const action of duplicateActions) {
+      assertNotCancelled()
       await ensureExpectedFile(action.keep)
       for (const item of action.quarantineItems) await ensureExpectedFile(item)
     }
 
-    if (normalizePath(quarantineRoot).startsWith(`${normalizePath(library)}${path.sep}`)) {
+    if (duplicateActions.length > 0 && normalizePath(quarantineRoot).startsWith(`${normalizePath(library)}${path.sep}`)) {
       throw new Error('QUARANTINE_MUST_BE_OUTSIDE_LIBRARY')
     }
     let completed = 0
     for (const action of duplicateActions) {
       for (const item of action.quarantineItems) {
+        assertNotCancelled()
         const relative = path.relative(library, item.filepath)
         if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`FILE_OUTSIDE_LIBRARY: ${item.filepath}`)
-        const requestedTarget = path.join(quarantineRoot, jobId, relative)
+        const requestedTarget = path.join(quarantineRoot, executionId, relative)
         const target = await uniqueTargetPath(requestedTarget, item.id)
         await writeActionLog({ status: 'prepared', type: 'quarantine', source: item.filepath, target, keepId: action.keep.id })
         await moveAndVerify(item.filepath, target)
         movedFiles.push({ source: item.filepath, target })
         idMap[item.id] = action.keep.id
         completed += 1
-        await jobManager.setState({ phase: 'quarantining-files', completed, total: totalActions })
+        await setProgress({ phase: 'quarantining-files', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions })
         await writeActionLog({ status: 'file-verified', type: 'quarantine', source: item.filepath, target, keepId: action.keep.id })
       }
     }
@@ -192,6 +207,7 @@ const executeApprovedActions = async ({
     const removedHashes = new Set()
     try {
       for (const anomaly of approvedAnomalies) {
+        assertNotCancelled()
         const book = await Manga.findByPk(anomaly.action.bookId, { transaction })
         if (!book) throw new Error(`BOOK_MISSING: ${anomaly.action.bookId}`)
         const prepared = preparedRepairs.get(anomaly.id)
@@ -200,11 +216,12 @@ const executeApprovedActions = async ({
           url: prepared?.newUrl || anomaly.action.newUrl
         }, { transaction })
         completed += 1
-        await jobManager.setState({ phase: 'writing-metadata', completed, total: totalActions })
+        await setProgress({ phase: 'writing-metadata', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions })
         await writeActionLog({ status: 'manga-written', type: 'repair-url', bookId: book.id, oldUrl: anomaly.action.currentUrl, newUrl: prepared?.newUrl || anomaly.action.newUrl })
       }
 
       for (const action of duplicateActions) {
+        assertNotCancelled()
         const keepBook = await Manga.findByPk(action.keep.id, { transaction })
         const removedBooks = await Manga.findAll({ where: { id: action.quarantineItems.map(item => item.id) }, transaction })
         if (!keepBook || removedBooks.length !== action.quarantineItems.length) throw new Error(`BOOK_SET_CHANGED: ${action.group.id}`)
@@ -255,26 +272,22 @@ const executeApprovedActions = async ({
     }
 
     const nextRendererState = mergeRendererState(rendererState, idMap)
-    await atomicWriteJson(path.join(jobManager.jobsPath, jobId, 'renderer-state-after.json'), nextRendererState)
-    await jobManager.setState({ status: 'completed', phase: 'verified', completed: totalActions, total: totalActions, execution: { backupDir, movedCount: movedFiles.length, repairedCount: approvedAnomalies.length } })
+    await atomicWriteJson(path.join(executionDir, 'renderer-state-after.json'), nextRendererState)
+    await setProgress({ phase: 'verified', completed: totalActions, total: totalActions, phaseCompleted: totalActions, phaseTotal: totalActions })
     await writeActionLog({ status: 'verified', movedCount: movedFiles.length, repairedCount: approvedAnomalies.length })
     return { success: true, backupDir, rendererState: nextRendererState, collectionList: nextCollections, movedCount: movedFiles.length, repairedCount: approvedAnomalies.length }
   } catch (error) {
     if (!databaseCommitted) {
       for (const moved of [...movedFiles].reverse()) {
         try {
-          await fs.promises.mkdir(path.dirname(moved.source), { recursive: true })
-          await fs.promises.rename(moved.target, moved.source)
+          await moveAndVerify(moved.target, moved.source)
         } catch (rollbackError) {
           await writeActionLog({ status: 'rollback-failed', source: moved.source, target: moved.target, error: rollbackError.message })
         }
       }
     }
-    await jobManager.setState({ status: 'failed', phase: 'failed', error: error.stack || error.message })
     await writeActionLog({ status: 'failed', error: error.stack || error.message })
     throw error
-  } finally {
-    coordinator.endAudit(jobId)
   }
 }
 

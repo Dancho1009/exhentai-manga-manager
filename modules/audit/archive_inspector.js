@@ -103,21 +103,23 @@ const run7z = (sevenZipPath, args, capture = false) => new Promise((resolve, rej
   })
 })
 
-const inspect7zArchive = async (filepath, sevenZipPath) => {
-  if (!sevenZipPath) throw new Error('7z executable is unavailable')
-  const output = await run7z(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
+const parse7zRecords = output => {
   const markerIndex = output.indexOf('----------')
   const detail = markerIndex >= 0 ? output.slice(markerIndex) : output
-  const records = detail.split(/\r?\n\r?\n/).map(block => {
+  return detail.split(/\r?\n\r?\n/).map(block => {
     const record = {}
     for (const line of block.split(/\r?\n/)) {
       const separator = line.indexOf(' = ')
       if (separator > 0) record[line.slice(0, separator)] = line.slice(separator + 3)
     }
     return record
-  })
-  const entryPaths = records
-    .filter(record => record.Path && record.Folder !== '+')
+  }).filter(record => record.Path && record.Folder !== '+')
+}
+
+const inspect7zArchive = async (filepath, sevenZipPath) => {
+  if (!sevenZipPath) throw new Error('7z executable is unavailable')
+  const output = await run7z(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
+  const entryPaths = parse7zRecords(output)
     .map(record => normalizeEntryPath(record.Path))
     .filter(Boolean)
   const entries = []
@@ -239,16 +241,7 @@ const inspectZipEhviewer = async filepath => {
 const inspect7zEhviewer = async (filepath, sevenZipPath) => {
   if (!sevenZipPath) throw new Error('7z executable is unavailable')
   const output = await run7z(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
-  const markerIndex = output.indexOf('----------')
-  const detail = markerIndex >= 0 ? output.slice(markerIndex) : output
-  const candidates = detail.split(/\r?\n\r?\n/).map(block => {
-    const record = {}
-    for (const line of block.split(/\r?\n/)) {
-      const separator = line.indexOf(' = ')
-      if (separator > 0) record[line.slice(0, separator)] = line.slice(separator + 3)
-    }
-    return record
-  }).filter(record => record.Path && record.Folder !== '+')
+  const candidates = parse7zRecords(output)
     .map(record => normalizeEntryPath(record.Path))
     .filter(entryPath => !entryPath.includes('__MACOSX') && path.posix.basename(entryPath) === '.ehviewer')
   const entries = []
@@ -286,4 +279,89 @@ const inspectEhviewerIdentity = async (book, options = {}) => {
   return await inspect7zEhviewer(book.filepath, options.sevenZipPath)
 }
 
-module.exports = { inspectBookContent, inspectEhviewerIdentity }
+const inspectZipHealth = async filepath => {
+  const zipfile = await openZip(filepath)
+  const imagePaths = []
+  const ehviewerEntries = []
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    const fail = error => {
+      if (settled) return
+      settled = true
+      try { zipfile.close() } catch {}
+      reject(error)
+    }
+    zipfile.on('error', fail)
+    zipfile.on('entry', async entry => {
+      try {
+        const entryPath = normalizeEntryPath(entry.fileName)
+        if (!entryPath || entryPath.endsWith('/') || entryPath.includes('__MACOSX')) {
+          zipfile.readEntry()
+          return
+        }
+        if (IMAGE_EXTENSIONS.has(path.posix.extname(entryPath).toLowerCase())) imagePaths.push(entryPath)
+        if (path.posix.basename(entryPath) === '.ehviewer') {
+          const stream = await openZipEntry(zipfile, entry)
+          const digest = await digestStream(stream, true)
+          ehviewerEntries.push({ path: entryPath, ehviewerBuffer: digest.buffer })
+        }
+        zipfile.readEntry()
+      } catch (error) {
+        fail(error)
+      }
+    })
+    zipfile.on('end', () => {
+      if (settled) return
+      settled = true
+      resolve({
+        pageCount: imagePaths.length,
+        imagePaths: imagePaths.sort(naturalCompare),
+        ehviewer: resolveEhviewer(ehviewerEntries)
+      })
+    })
+    zipfile.readEntry()
+  })
+}
+
+const inspect7zHealth = async (filepath, sevenZipPath) => {
+  if (!sevenZipPath) throw new Error('7z executable is unavailable')
+  const output = await run7z(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
+  const entryPaths = parse7zRecords(output)
+    .map(record => normalizeEntryPath(record.Path))
+    .filter(entryPath => entryPath && !entryPath.includes('__MACOSX'))
+  const imagePaths = entryPaths.filter(entryPath => IMAGE_EXTENSIONS.has(path.posix.extname(entryPath).toLowerCase()))
+  const ehviewerEntries = []
+  for (const entryPath of entryPaths.filter(value => path.posix.basename(value) === '.ehviewer')) {
+    ehviewerEntries.push({
+      path: entryPath,
+      ehviewerBuffer: await run7z(sevenZipPath, ['x', '-so', '-p123456', '--', filepath, entryPath], true)
+    })
+  }
+  return {
+    pageCount: imagePaths.length,
+    imagePaths: imagePaths.sort(naturalCompare),
+    ehviewer: resolveEhviewer(ehviewerEntries)
+  }
+}
+
+const inspectFolderHealth = async folderpath => {
+  const dirents = await fs.promises.readdir(folderpath, { withFileTypes: true })
+  const imagePaths = dirents
+    .filter(dirent => dirent.isFile() && IMAGE_EXTENSIONS.has(path.extname(dirent.name).toLowerCase()))
+    .map(dirent => dirent.name)
+    .sort(naturalCompare)
+  return {
+    pageCount: imagePaths.length,
+    imagePaths,
+    ehviewer: await inspectFolderEhviewer(folderpath)
+  }
+}
+
+const inspectBookHealth = async (book, options = {}) => {
+  const extension = path.extname(book.filepath).toLowerCase()
+  if (book.type === 'folder') return await inspectFolderHealth(book.filepath)
+  if (extension === '.zip' || extension === '.cbz') return await inspectZipHealth(book.filepath)
+  return await inspect7zHealth(book.filepath, options.sevenZipPath)
+}
+
+module.exports = { inspectBookContent, inspectEhviewerIdentity, inspectBookHealth }
