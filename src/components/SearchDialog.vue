@@ -303,7 +303,7 @@ const getBookInfo = (book) => {
   return Promise.resolve()
 }
 const getBooksMetadata = async (bookList, gap, callback, options = {}) => {
-  const server = setting.value.defaultScraper || 'exhentai'
+  const server = options.server || setting.value.defaultScraper || 'exhentai'
   serviceAvailable.value = true
   const timer = ms => new Promise(res => setTimeout(res, ms))
   const saveQueue = createSerialQueue()
