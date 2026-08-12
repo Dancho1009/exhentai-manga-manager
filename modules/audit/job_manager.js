@@ -6,11 +6,32 @@ const {
   AuditReportRepository,
   REPORT_TASK_TYPES,
   TASK_TYPES,
+  WORKSPACE_SCHEMA_VERSION,
   createIdleState,
   normalizeTaskType
 } = require('./report_repository.js')
+const { normalizeReview } = require('./review_validator.js')
 
 const ACTIVE_STATUSES = new Set(['running', 'cancelling'])
+
+const sanitizeOptions = (taskType, options = {}) => {
+  if (taskType === 'anomaly') {
+    return {
+      forceLocal: Boolean(options.forceLocal),
+      onlinePolicy: ['conflicts', 'urls', 'ehviewer'].includes(options.onlinePolicy) ? options.onlinePolicy : 'none',
+      onlineBookCount: Array.isArray(options.onlineBookIds) ? options.onlineBookIds.length : Number(options.onlineBookCount || 0),
+      forceOnline: Boolean(options.forceOnline)
+    }
+  }
+  if (taskType === 'dedupe') return { forceContent: Boolean(options.forceContent) }
+  if (taskType === 'execution') {
+    return {
+      sourceTaskType: REPORT_TASK_TYPES.includes(options.sourceTaskType) ? options.sourceTaskType : null,
+      reportId: String(options.reportId || '') || null
+    }
+  }
+  return null
+}
 
 class AuditWorkspaceManager extends EventEmitter {
   constructor({ storePath, coordinator }) {
@@ -35,12 +56,18 @@ class AuditWorkspaceManager extends EventEmitter {
     await this.repository.initialize()
     for (const taskType of TASK_TYPES) {
       const state = await this.repository.loadChannelState(taskType)
+      const sanitizedOptions = sanitizeOptions(taskType, state.options || {})
+      let needsSave = state.schemaVersion !== WORKSPACE_SCHEMA_VERSION || JSON.stringify(state.options || null) !== JSON.stringify(sanitizedOptions)
+      state.options = sanitizedOptions
       if (ACTIVE_STATUSES.has(state.status)) {
         state.latestJobId = state.activeJobId || state.latestJobId
         state.status = 'interrupted'
         state.phase = 'interrupted'
         state.activeJobId = null
         state.error = state.error || 'Application exited before the task completed'
+        needsSave = true
+      }
+      if (needsSave) {
         this.states[taskType] = await this.repository.saveChannelState(taskType, state)
       } else {
         this.states[taskType] = state
@@ -50,7 +77,7 @@ class AuditWorkspaceManager extends EventEmitter {
 
   getState() {
     return {
-      schemaVersion: 3,
+      schemaVersion: WORKSPACE_SCHEMA_VERSION,
       activeTask: this.activeTask ? { ...this.activeTask } : null,
       channels: Object.fromEntries(TASK_TYPES.map(taskType => [taskType, { ...this.states[taskType] }])),
       lock: this.coordinator.getState()
@@ -146,7 +173,7 @@ class AuditWorkspaceManager extends EventEmitter {
         phaseCompleted: 0,
         phaseTotal: 0,
         error: null,
-        options,
+        options: sanitizeOptions(taskType, options),
         startedAt: new Date().toISOString(),
         completedAt: null
       })
@@ -417,7 +444,18 @@ class AuditWorkspaceManager extends EventEmitter {
 
   async saveReview(taskType, review) {
     normalizeTaskType(taskType, REPORT_TASK_TYPES)
-    return await this.repository.saveReview(taskType, this.states[taskType], review)
+    const report = await this.getReport(taskType)
+    const normalized = normalizeReview(taskType, report, review)
+    return await this.repository.saveReview(taskType, this.states[taskType], normalized)
+  }
+
+  async markReportsStale(reason = 'library-changed') {
+    const staleAt = new Date().toISOString()
+    for (const taskType of REPORT_TASK_TYPES) {
+      if (!this.states[taskType].latestReportId) continue
+      await this.setChannelState(taskType, { staleAt, staleReason: reason })
+    }
+    return this.getState()
   }
 
   async getLogs(limit = 400) {

@@ -3,11 +3,13 @@ const path = require('path')
 const { atomicWriteJson, readJson } = require('./utils.js')
 
 const REPORT_SCHEMA_VERSION = 3
+const WORKSPACE_SCHEMA_VERSION = 4
+const REVIEW_SCHEMA_VERSION = 1
 const TASK_TYPES = ['anomaly', 'dedupe', 'execution']
 const REPORT_TASK_TYPES = ['anomaly', 'dedupe']
 
 const createIdleState = taskType => ({
-  schemaVersion: REPORT_SCHEMA_VERSION,
+  schemaVersion: WORKSPACE_SCHEMA_VERSION,
   taskType,
   activeJobId: null,
   status: 'idle',
@@ -22,6 +24,8 @@ const createIdleState = taskType => ({
   latestReportId: null,
   latestReportPath: null,
   latestCompletedJobId: null,
+  staleAt: null,
+  staleReason: null,
   error: null,
   summary: null,
   options: null,
@@ -141,7 +145,7 @@ class AuditReportRepository {
     const value = {
       ...createIdleState(normalizeTaskType(taskType)),
       ...state,
-      schemaVersion: REPORT_SCHEMA_VERSION,
+      schemaVersion: WORKSPACE_SCHEMA_VERSION,
       taskType,
       updatedAt: new Date().toISOString()
     }
@@ -159,7 +163,9 @@ class AuditReportRepository {
       latestReportId: report.reportId,
       latestReportPath: reportPath,
       latestCompletedJobId: jobId,
-      summary: summary || report.summary || null
+      summary: summary || report.summary || null,
+      staleAt: null,
+      staleReason: null
     }
   }
 
@@ -170,18 +176,21 @@ class AuditReportRepository {
     const stat = await fs.promises.stat(reportPath).catch(() => null)
     if (!stat) return null
     const cached = this.reportCache.get(taskType)
-    if (cached?.path === reportPath && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.value
-    const value = await readJson(reportPath)
-    this.reportCache.set(taskType, { path: reportPath, mtimeMs: stat.mtimeMs, size: stat.size, value })
-    return value
+    const value = cached?.path === reportPath && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size
+      ? cached.value
+      : await readJson(reportPath)
+    if (value !== cached?.value) this.reportCache.set(taskType, { path: reportPath, mtimeMs: stat.mtimeMs, size: stat.size, value })
+    return state?.staleAt
+      ? { ...value, stale: true, staleAt: state.staleAt, staleReason: state.staleReason, executable: false }
+      : value
   }
 
   async getReview(taskType, state) {
     normalizeTaskType(taskType, REPORT_TASK_TYPES)
     if (!state?.latestCompletedJobId || !state.latestReportId) return null
     const fallback = taskType === 'anomaly'
-      ? { schemaVersion: REPORT_SCHEMA_VERSION, taskType, reportId: state.latestReportId, actionIds: [] }
-      : { schemaVersion: REPORT_SCHEMA_VERSION, taskType, reportId: state.latestReportId, selections: {} }
+      ? { schemaVersion: REVIEW_SCHEMA_VERSION, taskType, reportId: state.latestReportId, actionIds: [] }
+      : { schemaVersion: REVIEW_SCHEMA_VERSION, taskType, reportId: state.latestReportId, selections: {}, quarantineRoot: '' }
     const reviewPath = path.join(this.getJobDir(taskType, state.latestCompletedJobId), 'review.json')
     const review = await readJson(reviewPath, fallback)
     return review?.reportId === state.latestReportId ? { ...fallback, ...review } : fallback
@@ -192,17 +201,18 @@ class AuditReportRepository {
     if (!state?.latestCompletedJobId || !state.latestReportId) throw new Error('AUDIT_REPORT_MISSING')
     const value = taskType === 'anomaly'
       ? {
-          schemaVersion: REPORT_SCHEMA_VERSION,
+          schemaVersion: REVIEW_SCHEMA_VERSION,
           taskType,
           reportId: state.latestReportId,
           actionIds: [...new Set((review?.actionIds || []).map(String))],
           updatedAt: new Date().toISOString()
         }
       : {
-          schemaVersion: REPORT_SCHEMA_VERSION,
+          schemaVersion: REVIEW_SCHEMA_VERSION,
           taskType,
           reportId: state.latestReportId,
           selections: review?.selections && typeof review.selections === 'object' ? review.selections : {},
+          quarantineRoot: String(review?.quarantineRoot || ''),
           updatedAt: new Date().toISOString()
         }
     await atomicWriteJson(path.join(this.getJobDir(taskType, state.latestCompletedJobId), 'review.json'), value)
@@ -280,6 +290,8 @@ class AuditReportRepository {
 module.exports = {
   AuditReportRepository,
   REPORT_SCHEMA_VERSION,
+  WORKSPACE_SCHEMA_VERSION,
+  REVIEW_SCHEMA_VERSION,
   TASK_TYPES,
   REPORT_TASK_TYPES,
   createIdleState,

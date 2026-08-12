@@ -14,6 +14,7 @@ const { AuditCache } = require('../modules/audit/cache.js')
 const { atomicWriteJson, normalizePath } = require('../modules/audit/utils.js')
 const { inspectBookContent, inspectEhviewerIdentity, inspectBookHealth } = require('../modules/audit/archive_inspector.js')
 const { executeApprovedActions } = require('../modules/audit/action_executor.js')
+const { normalizeAnomalyReview, normalizeDedupeReview, buildExecutionPreview } = require('../modules/audit/review_validator.js')
 const { prepareMangaModel, prepareMetadataModel } = require('../modules/database.js')
 
 const createDatabases = async (root, books) => {
@@ -230,6 +231,88 @@ test('legacy combined reports migrate into separate non-executable reports witho
   assert.equal(dedupe.executable, false)
   assert.equal(dedupe.groups[0].kind, 'exact-archive')
   assert.equal(await fs.promises.stat(path.join(legacyDir, 'report.json')).then(() => true), true)
+})
+
+test('workspace state strips credentials and marks old reports read-only after library changes', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-state-v4-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const repository = new AuditReportRepository(root)
+  await repository.initialize()
+  await repository.saveChannelState('anomaly', {
+    status: 'completed',
+    options: {
+      onlinePolicy: 'ehviewer',
+      forceLocal: false,
+      forceOnline: true,
+      ehentaiSetting: { igneous: 'secret-cookie', ipb_pass_hash: 'secret-hash' }
+    }
+  })
+  const manager = new AuditWorkspaceManager({ storePath: root, coordinator: new LibraryTaskCoordinator() })
+  await manager.initialize()
+  assert.deepEqual(manager.getState().channels.anomaly.options, {
+    forceLocal: false,
+    onlinePolicy: 'ehviewer',
+    onlineBookCount: 0,
+    forceOnline: true
+  })
+  assert.equal((await fs.promises.readFile(path.join(root, 'audit', 'channels', 'anomaly-state.json'), 'utf8')).includes('secret-cookie'), false)
+
+  const jobId = 'current-anomaly'
+  const jobDir = await manager.repository.createJob('anomaly', jobId)
+  const reportPath = path.join(jobDir, 'report.json')
+  await atomicWriteJson(reportPath, {
+    schemaVersion: 3,
+    reportType: 'anomaly',
+    reportId: `anomaly:${jobId}`,
+    jobId,
+    executable: true,
+    summary: {},
+    anomalies: []
+  })
+  const reportState = await manager.repository.activateReport('anomaly', jobId, reportPath, {})
+  await manager.setChannelState('anomaly', { ...reportState, status: 'completed' })
+  await manager.markReportsStale('test-library-change')
+  const staleReport = await manager.getReport('anomaly')
+  assert.equal(staleReport.stale, true)
+  assert.equal(staleReport.executable, false)
+})
+
+test('review validation keeps anomaly and duplicate approval models independent', () => {
+  const anomalyReport = {
+    reportId: 'anomaly:review',
+    executable: true,
+    anomalies: [
+      { id: 'repair', action: { type: 'repair-url', currentUrl: 'https://exhentai.org/g/1/aaaaaaaaaa/', newUrl: 'https://e-hentai.org/g/1/aaaaaaaaaa/' } },
+      { id: 'unknown', action: { type: 'delete-file' } }
+    ]
+  }
+  assert.deepEqual(normalizeAnomalyReview(anomalyReport, { reportId: anomalyReport.reportId, actionIds: ['repair', 'repair'] }).actionIds, ['repair'])
+  assert.throws(() => normalizeAnomalyReview(anomalyReport, { reportId: anomalyReport.reportId, actionIds: ['unknown'] }), /UNSUPPORTED_ANOMALY_ACTION/)
+
+  const dedupeReport = {
+    reportId: 'dedupe:review',
+    executable: true,
+    groups: [
+      { id: 'first', actionable: true, items: [{ id: 'a' }, { id: 'shared' }] },
+      { id: 'second', actionable: true, items: [{ id: 'b' }, { id: 'shared' }] }
+    ]
+  }
+  assert.throws(() => normalizeDedupeReview(dedupeReport, {
+    reportId: dedupeReport.reportId,
+    selections: {
+      first: { keepId: 'a', quarantineIds: ['shared'] },
+      second: { keepId: 'b', quarantineIds: ['shared'] }
+    },
+    quarantineRoot: path.join(os.tmpdir(), 'DedupeReview')
+  }), /OVERLAPPING_DUPLICATE_SELECTION/)
+  const preview = buildExecutionPreview({
+    taskType: 'anomaly',
+    report: anomalyReport,
+    review: { reportId: anomalyReport.reportId, actionIds: ['repair'] },
+    library: path.join(os.tmpdir(), 'Library')
+  })
+  assert.equal(preview.sameIdentityCount, 1)
+  assert.equal(preview.identityReplacementCount, 0)
 })
 
 test('audit cache migrates legacy content and preserves independent inspection layers', async t => {
