@@ -174,7 +174,8 @@ const executeApprovedAnomalies = async ({
       rendererState,
       collectionList,
       movedCount: 0,
-      repairedCount: approvedAnomalies.length
+      repairedCount: approvedAnomalies.length,
+      repairedAnomalyIds: approvedAnomalies.map(item => String(item.id))
     }
   } catch (error) {
     await writeActionLog({ status: 'failed', taskType: 'anomaly', error: error.stack || error.message }).catch(() => {})

@@ -74,6 +74,26 @@ class AuditWorkspaceManager extends EventEmitter {
         this.states[taskType] = state
       }
     }
+    await this.restoreResolvedAnomaliesFromLatestExecution()
+  }
+
+  async restoreResolvedAnomaliesFromLatestExecution() {
+    const execution = this.states.execution
+    const anomaly = this.states.anomaly
+    if (execution.status !== 'completed' || execution.options?.sourceTaskType !== 'anomaly') return
+    if (!execution.latestJobId || execution.options?.reportId !== anomaly.latestReportId) return
+    if (anomaly.resolvedReportId === anomaly.latestReportId && (anomaly.resolvedAnomalyIds || []).length > 0) return
+    const entries = await this.repository.getExecutionActionLog(execution.latestJobId)
+    const verified = [...entries].reverse().find(entry => entry.status === 'verified' && entry.taskType === 'anomaly')
+    if (!verified) return
+    const anomalyIds = [...new Set(entries
+      .filter(entry => entry.status === 'prepared' && entry.type === 'repair-url' && entry.anomalyId)
+      .map(entry => String(entry.anomalyId)))]
+    if (anomalyIds.length === 0 || anomalyIds.length !== Number(verified.repairedCount || 0)) return
+    await this.setChannelState('anomaly', {
+      resolvedReportId: anomaly.latestReportId,
+      resolvedAnomalyIds: anomalyIds
+    })
   }
 
   getState() {
@@ -457,6 +477,18 @@ class AuditWorkspaceManager extends EventEmitter {
     const report = await this.getReport(taskType)
     const normalized = normalizeReview(taskType, report, review)
     return await this.repository.saveReview(taskType, this.states[taskType], normalized)
+  }
+
+  async markAnomaliesResolved(reportId, anomalyIds) {
+    const state = this.states.anomaly
+    if (!reportId || state.latestReportId !== reportId) throw new Error('ANOMALY_REVIEW_MISMATCH')
+    const resolved = new Set(state.resolvedReportId === reportId ? state.resolvedAnomalyIds || [] : [])
+    for (const anomalyId of anomalyIds || []) resolved.add(String(anomalyId))
+    await this.setChannelState('anomaly', {
+      resolvedReportId: reportId,
+      resolvedAnomalyIds: [...resolved]
+    })
+    return await this.getReport('anomaly')
   }
 
   async markReportsStale(reason = 'library-changed') {

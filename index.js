@@ -2049,6 +2049,7 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
   }, { sourceTaskType: taskType, reportId })
   collectionList = result.collectionList
   if (taskType === 'anomaly') {
+    await auditWorkspaceManager.markAnomaliesResolved(reportId, result.repairedAnomalyIds || [])
     await auditWorkspaceManager.saveReview('anomaly', { reportId, actionIds: [] })
   } else {
     const dedupeReview = await auditWorkspaceManager.getReview('dedupe')

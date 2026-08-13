@@ -259,6 +259,81 @@ test('anomaly and dedupe reports stay independently readable while another task 
   assert.equal(firstDedupe.summary.duplicateGroups, 2)
 })
 
+test('resolved anomaly actions stay hidden without rewriting the source report', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-resolved-overlay-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const manager = new AuditWorkspaceManager({ storePath: root, coordinator: new LibraryTaskCoordinator() })
+  await manager.initialize()
+  const jobId = 'anomaly-resolved'
+  const reportId = `anomaly:${jobId}`
+  const jobDir = await manager.repository.createJob('anomaly', jobId)
+  const reportPath = path.join(jobDir, 'report.json')
+  await atomicWriteJson(reportPath, {
+    reportType: 'anomaly',
+    reportId,
+    jobId,
+    executable: true,
+    summary: { anomalies: 3, anomalyBooks: 2, actionableAnomalies: 2 },
+    anomalies: [
+      { id: 'fixed', bookId: 'book-a', action: { type: 'repair-url' } },
+      { id: 'remaining-action', bookId: 'book-a', action: { type: 'repair-url' } },
+      { id: 'remaining-report-only', bookId: 'book-b', action: null }
+    ]
+  })
+  const reportState = await manager.repository.activateReport('anomaly', jobId, reportPath)
+  await manager.setChannelState('anomaly', { ...reportState, status: 'completed' })
+  await manager.markAnomaliesResolved(reportId, ['fixed'])
+
+  const visible = await manager.getReport('anomaly')
+  assert.deepEqual(visible.anomalies.map(item => item.id), ['remaining-action', 'remaining-report-only'])
+  assert.equal(visible.summary.anomalies, 2)
+  assert.equal(visible.summary.anomalyBooks, 2)
+  assert.equal(visible.summary.actionableAnomalies, 1)
+  assert.equal(visible.resolvedAnomalies, 1)
+  assert.equal((await fs.promises.readFile(reportPath, 'utf8')).includes('"fixed"'), true)
+
+  const restored = new AuditWorkspaceManager({ storePath: root, coordinator: new LibraryTaskCoordinator() })
+  await restored.initialize()
+  assert.deepEqual((await restored.getReport('anomaly')).anomalies.map(item => item.id), ['remaining-action', 'remaining-report-only'])
+})
+
+test('completed legacy execution restores resolved anomaly ids from its verified action log', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-resolved-legacy-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const manager = new AuditWorkspaceManager({ storePath: root, coordinator: new LibraryTaskCoordinator() })
+  await manager.initialize()
+  const reportJobId = 'legacy-report'
+  const reportId = `anomaly:${reportJobId}`
+  const reportDir = await manager.repository.createJob('anomaly', reportJobId)
+  const reportPath = path.join(reportDir, 'report.json')
+  await atomicWriteJson(reportPath, {
+    reportType: 'anomaly', reportId, jobId: reportJobId, executable: true,
+    summary: { anomalies: 2, anomalyBooks: 2, actionableAnomalies: 2 },
+    anomalies: [
+      { id: 'legacy-fixed', bookId: 'book-a', action: { type: 'repair-url' } },
+      { id: 'legacy-remaining', bookId: 'book-b', action: { type: 'repair-url' } }
+    ]
+  })
+  const reportState = await manager.repository.activateReport('anomaly', reportJobId, reportPath)
+  await manager.setChannelState('anomaly', { ...reportState, status: 'completed' })
+  const executionJobId = 'legacy-execution'
+  const executionDir = await manager.repository.createJob('execution', executionJobId)
+  await fs.promises.writeFile(path.join(executionDir, 'action-audit.jsonl'), [
+    JSON.stringify({ status: 'prepared', type: 'repair-url', anomalyId: 'legacy-fixed' }),
+    JSON.stringify({ status: 'verified', taskType: 'anomaly', repairedCount: 1 })
+  ].join('\n') + '\n')
+  await manager.setChannelState('execution', {
+    status: 'completed',
+    latestJobId: executionJobId,
+    options: { sourceTaskType: 'anomaly', reportId }
+  })
+
+  const restored = new AuditWorkspaceManager({ storePath: root, coordinator: new LibraryTaskCoordinator() })
+  await restored.initialize()
+  assert.deepEqual(restored.getState().channels.anomaly.resolvedAnomalyIds, ['legacy-fixed'])
+  assert.deepEqual((await restored.getReport('anomaly')).anomalies.map(item => item.id), ['legacy-remaining'])
+})
+
 test('legacy combined reports migrate into separate non-executable reports without deleting originals', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-legacy-migration-'))
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
@@ -288,7 +363,7 @@ test('legacy combined reports migrate into separate non-executable reports witho
 })
 
 test('workspace state strips credentials and marks old reports read-only after library changes', async t => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-state-v4-'))
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-state-v5-'))
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
   const repository = new AuditReportRepository(root)
   await repository.initialize()

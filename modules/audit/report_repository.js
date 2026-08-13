@@ -3,7 +3,7 @@ const path = require('path')
 const { atomicWriteJson, readJson } = require('./utils.js')
 
 const REPORT_SCHEMA_VERSION = 3
-const WORKSPACE_SCHEMA_VERSION = 4
+const WORKSPACE_SCHEMA_VERSION = 5
 const REVIEW_SCHEMA_VERSION = 1
 const TASK_TYPES = ['anomaly', 'dedupe', 'execution']
 const REPORT_TASK_TYPES = ['anomaly', 'dedupe']
@@ -27,6 +27,8 @@ const createIdleState = taskType => ({
   latestCompletedJobId: null,
   staleAt: null,
   staleReason: null,
+  resolvedReportId: null,
+  resolvedAnomalyIds: [],
   error: null,
   summary: null,
   options: null,
@@ -43,6 +45,26 @@ const normalizeTaskType = (taskType, allowed = TASK_TYPES) => {
 const getReportId = (taskType, jobId) => `${taskType}:${jobId}`
 
 const clearLegacyActions = anomaly => ({ ...anomaly, action: null })
+
+const applyResolvedAnomalies = (report, state) => {
+  if (report?.reportType !== 'anomaly' || state?.resolvedReportId !== report.reportId) return report
+  const resolvedIds = new Set((state.resolvedAnomalyIds || []).map(String))
+  if (resolvedIds.size === 0) return report
+  const anomalies = (report.anomalies || []).filter(item => !resolvedIds.has(String(item.id)))
+  const resolvedCount = (report.anomalies || []).length - anomalies.length
+  if (resolvedCount === 0) return report
+  return {
+    ...report,
+    resolvedAnomalies: resolvedCount,
+    summary: {
+      ...(report.summary || {}),
+      anomalies: anomalies.length,
+      anomalyBooks: new Set(anomalies.filter(item => item.bookId).map(item => String(item.bookId))).size,
+      actionableAnomalies: anomalies.filter(item => item.action).length
+    },
+    anomalies
+  }
+}
 
 const toLegacyAnomalyReport = (report, jobId) => {
   const anomalies = (report.anomalies || []).map(clearLegacyActions)
@@ -166,7 +188,9 @@ class AuditReportRepository {
       latestCompletedJobId: jobId,
       summary: summary || report.summary || null,
       staleAt: null,
-      staleReason: null
+      staleReason: null,
+      resolvedReportId: null,
+      resolvedAnomalyIds: []
     }
   }
 
@@ -181,9 +205,10 @@ class AuditReportRepository {
       ? cached.value
       : await readJson(reportPath)
     if (value !== cached?.value) this.reportCache.set(taskType, { path: reportPath, mtimeMs: stat.mtimeMs, size: stat.size, value })
+    const visibleReport = applyResolvedAnomalies(value, state)
     return state?.staleAt
-      ? { ...value, stale: true, staleAt: state.staleAt, staleReason: state.staleReason, executable: false }
-      : value
+      ? { ...visibleReport, stale: true, staleAt: state.staleAt, staleReason: state.staleReason, executable: false }
+      : visibleReport
   }
 
   async getReview(taskType, state) {
@@ -230,6 +255,19 @@ class AuditReportRepository {
     const content = await fs.promises.readFile(path.join(this.getJobDir(taskType, jobId), 'log.jsonl'), 'utf8').catch(() => '')
     const lines = content.split(/\r?\n/).filter(Boolean).slice(-Math.max(1, Number(limit) || 400))
     return lines.flatMap(line => {
+      try {
+        const entry = JSON.parse(line)
+        return entry && typeof entry === 'object' ? [entry] : []
+      } catch {
+        return []
+      }
+    })
+  }
+
+  async getExecutionActionLog(jobId) {
+    if (!jobId) return []
+    const content = await fs.promises.readFile(path.join(this.getJobDir('execution', jobId), 'action-audit.jsonl'), 'utf8').catch(() => '')
+    return content.split(/\r?\n/).filter(Boolean).flatMap(line => {
       try {
         const entry = JSON.parse(line)
         return entry && typeof entry === 'object' ? [entry] : []
