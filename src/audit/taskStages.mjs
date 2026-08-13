@@ -7,7 +7,7 @@ const anomalyStages = options => [
   stage('snapshot', 'audit.stage_librarySnapshot', ['enumerating-library', 'snapshot-files']),
   stage('local-anomaly', 'audit.stage_localAnomaly', ['inspecting-book-health', 'reading-ehviewer-identities']),
   ...(options?.onlinePolicy && options.onlinePolicy !== 'none'
-    ? [stage('online-sources', 'audit.stage_onlineSources', ['checking-online-sources'])]
+    ? [stage('online-sources', 'audit.stage_onlineSources', ['checking-online-sources', 'checking-gallery-versions'])]
     : []),
   stage('report', 'audit.stage_finalizeReport', ['finalizing-report', 'completed'])
 ]
@@ -81,4 +81,3 @@ export const calculateTaskStages = ({ taskType, phase, lastWorkPhase, status, op
     remainingCount: Math.max(0, stages.length - currentIndex - 1)
   }
 }
-

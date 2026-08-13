@@ -15,6 +15,7 @@
       <template v-if="preview.taskType === 'anomaly'">
         <el-descriptions-item :label="$t('audit.approvedRepairs')">{{ preview.selectedCount }}</el-descriptions-item>
         <el-descriptions-item :label="$t('audit.sameIdentitySwitches')">{{ preview.sameIdentityCount }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('audit.versionUpgrades')">{{ preview.versionUpgradeCount || 0 }}</el-descriptions-item>
         <el-descriptions-item :label="$t('audit.identityReplacements')">{{ preview.identityReplacementCount }}</el-descriptions-item>
       </template>
       <template v-else>

@@ -101,7 +101,8 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
     const selected = new Set(normalizedReview.actionIds)
     const anomalies = (report.anomalies || []).filter(item => item.action && selected.has(normalizeId(item.id)))
     const sameIdentityCount = anomalies.filter(item => getRepairKind(item) === 'same-identity-domain-switch').length
-    const identityReplacementCount = anomalies.length - sameIdentityCount
+    const versionUpgradeCount = anomalies.filter(item => getRepairKind(item) === 'gallery-version-upgrade').length
+    const identityReplacementCount = anomalies.length - sameIdentityCount - versionUpgradeCount
     if (anomalies.length === 0) throw new Error('NO_APPROVED_ACTIONS')
     return {
       valid: true,
@@ -109,6 +110,7 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
       reportId: report.reportId,
       selectedCount: anomalies.length,
       sameIdentityCount,
+      versionUpgradeCount,
       identityReplacementCount
     }
   }

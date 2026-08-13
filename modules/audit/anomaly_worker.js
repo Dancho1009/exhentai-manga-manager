@@ -7,6 +7,7 @@ const { EhentaiAvailabilityCache } = require('../ehentai_availability_cache.js')
 const {
   checkGallerySites,
   getGalleryMetadata,
+  getGdataBatch,
   extractGalleryIdentity: extractEhentaiIdentity,
   isIdentityWebAvailable
 } = require('../ehentai.js')
@@ -14,7 +15,9 @@ const {
   summarizeAvailability,
   pickAvailableUrl,
   getSameIdentityFallbackUrl,
-  decideIdentityConflict
+  decideIdentityConflict,
+  getGalleryVersionRelation,
+  isVersionChainNoise
 } = require('./online_decision.js')
 const { inspectBookHealth } = require('./archive_inspector.js')
 const { atomicWriteJson, normalizePath } = require('./utils.js')
@@ -27,6 +30,12 @@ const runtime = createWorkerRuntime()
 const sortAnomalies = anomalies => {
   const severityOrder = { critical: 0, high: 1, medium: 2, low: 3 }
   anomalies.sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity] || left.type.localeCompare(right.type))
+}
+
+const removeVersionChainNoise = (anomalies, bookId, relation) => {
+  for (let index = anomalies.length - 1; index >= 0; index -= 1) {
+    if (isVersionChainNoise(anomalies[index], bookId, relation)) anomalies.splice(index, 1)
+  }
 }
 
 runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
@@ -146,6 +155,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     }
 
     const onlineChecks = []
+    let versionChainMatches = 0
     const onlinePolicy = options.onlinePolicy || 'none'
     if (onlinePolicy !== 'none') {
       const requestedIds = new Set((options.onlineBookIds || []).map(value => String(value)))
@@ -199,6 +209,24 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         progress('checking-online-sources', completed, identities.size)
       }
 
+      const versionIdentities = new Map()
+      for (const source of sources) {
+        if (!source.currentIdentity || !source.ehviewerIdentity) continue
+        if (source.currentIdentity.gid === source.ehviewerIdentity.gid && source.currentIdentity.token === source.ehviewerIdentity.token) continue
+        for (const identity of [source.currentIdentity, source.ehviewerIdentity]) {
+          versionIdentities.set(`${identity.gid}:${identity.token}`, identity)
+        }
+      }
+      const versionMetadata = versionIdentities.size > 0
+        ? await getGdataBatch({
+            identities: [...versionIdentities.values()],
+            setting: options.ehentaiSetting || {},
+            cache: availabilityCache,
+            force: Boolean(options.forceOnline),
+            onProgress: (done, total) => progress('checking-gallery-versions', done, total)
+          })
+        : new Map()
+
       for (const source of sources) {
         const { wrapped, currentIdentity, ehviewer, ehviewerIdentity } = source
         const currentAvailability = currentIdentity ? identities.get(`${currentIdentity.gid}:${currentIdentity.token}`) : null
@@ -241,6 +269,67 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         if (!ehviewerIdentity || !ehviewerAvailability) continue
         const sameIdentity = currentIdentity && currentIdentity.gid === ehviewerIdentity.gid && currentIdentity.token === ehviewerIdentity.token
         if (sameIdentity) continue
+        const currentGdata = currentIdentity ? versionMetadata.get(`${currentIdentity.gid}:${currentIdentity.token}`) : null
+        const candidateGdata = versionMetadata.get(`${ehviewerIdentity.gid}:${ehviewerIdentity.token}`)
+        const versionRelation = currentGdata?.status === 'available' && candidateGdata?.status === 'available'
+          ? getGalleryVersionRelation({
+              currentMetadata: currentGdata.metadata,
+              candidateMetadata: candidateGdata.metadata,
+              currentIdentity,
+              candidateIdentity: ehviewerIdentity
+            })
+          : null
+        if (versionRelation?.sameChain) {
+          versionChainMatches += 1
+          removeVersionChainNoise(anomalies, wrapped.raw.id, versionRelation)
+          const versionEvidence = {
+            ...evidence,
+            versionRelation,
+            currentVersion: {
+              gid: String(currentGdata.metadata.gid),
+              token: String(currentGdata.metadata.token || currentIdentity.token)
+            },
+            ehviewerVersion: {
+              gid: String(candidateGdata.metadata.gid),
+              token: String(candidateGdata.metadata.token || ehviewerIdentity.token)
+            }
+          }
+          if (versionRelation.status === 'current-latest' || versionRelation.status === 'same-version') continue
+
+          let versionAction = null
+          let versionReason = '当前 URL 与 .ehviewer 属于同一 Gallery 版本链'
+          if (versionRelation.status === 'candidate-latest' && isIdentityWebAvailable(ehviewerAvailability)) {
+            const newUrl = pickAvailableUrl(ehviewerAvailability, 'exhentai')
+            versionReason = '当前 URL 是历史版本，.ehviewer 指向最新 Gallery 版本'
+            versionAction = {
+              type: 'repair-url',
+              repairKind: 'gallery-version-upgrade',
+              bookId: wrapped.raw.id,
+              filepath: wrapped.raw.filepath,
+              expectedSize: wrapped.actual.size,
+              expectedMtimeMs: wrapped.actual.mtimeMs,
+              currentUrl,
+              newUrl,
+              availabilityProof: {
+                checkedAt: Date.now(),
+                current: currentAvailability,
+                candidate: ehviewerAvailability,
+                versionRelation
+              }
+            }
+          } else if (versionRelation.status === 'latest-other') {
+            versionReason = '当前 URL 与 .ehviewer 均为历史版本，Gallery 另有最新版本'
+          }
+          anomalies.push(makeAnomaly('gallery-version-outdated', 'medium', {
+            bookId: wrapped.raw.id,
+            filepath: wrapped.raw.filepath,
+            reason: versionReason,
+            evidence: versionEvidence,
+            recommendedAction: versionAction ? 'upgrade-gallery-version-after-approval' : 'review-latest-gallery-version',
+            action: versionAction
+          }))
+          continue
+        }
         const decision = decideIdentityConflict({
           currentAvailability,
           candidateAvailability: ehviewerAvailability,
@@ -251,14 +340,14 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         let action = null
         let recommendation = 'manual-review'
         if (decision.actionable) {
-          const metadataResult = await getGalleryMetadata({
+          const metadataResult = candidateGdata || await getGalleryMetadata({
             ...ehviewerIdentity,
             preferredSite: 'exhentai',
             forceAvailability: false,
             setting: options.ehentaiSetting || {},
             cache: availabilityCache
-          })
-          if (metadataResult.gdata.status === 'available') {
+          }).then(result => result.gdata)
+          if (metadataResult.status === 'available') {
             const newUrl = pickAvailableUrl(ehviewerAvailability, 'exhentai')
             recommendation = 'repair-url-after-approval'
             action = {
@@ -274,7 +363,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
                 checkedAt: Date.now(),
                 current: currentAvailability,
                 candidate: ehviewerAvailability,
-                candidateGdataStatus: metadataResult.gdata.status
+                candidateGdataStatus: metadataResult.status
               }
             }
           }
@@ -319,7 +408,8 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         actionableAnomalies: anomalies.filter(item => item.action).length,
         onlineIdentities: onlineChecks.length,
         onlineCopyright: onlineChecks.filter(item => Object.values(item.sites).some(site => site.status === 'copyright')).length,
-        onlineAvailable: onlineChecks.filter(item => isIdentityWebAvailable(item)).length
+        onlineAvailable: onlineChecks.filter(item => isIdentityWebAvailable(item)).length,
+        versionChainMatches
       },
       anomalies,
       onlineChecks

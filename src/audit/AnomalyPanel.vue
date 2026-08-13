@@ -33,6 +33,7 @@
       <div v-if="report.options?.onlinePolicy !== 'none'"><strong>{{ report.summary.onlineIdentities || 0 }}</strong><span>{{ $t('audit.onlineIdentities') }}</span></div>
       <div v-if="report.options?.onlinePolicy !== 'none'"><strong>{{ report.summary.onlineAvailable || 0 }}</strong><span>{{ $t('audit.onlineAvailable') }}</span></div>
       <div v-if="report.options?.onlinePolicy !== 'none'"><strong>{{ report.summary.onlineCopyright || 0 }}</strong><span>{{ $t('audit.onlineCopyright') }}</span></div>
+      <div v-if="report.summary.versionChainMatches"><strong>{{ report.summary.versionChainMatches }}</strong><span>{{ $t('audit.versionChainMatches') }}</span></div>
     </div>
 
     <template v-if="report">
