@@ -104,6 +104,56 @@ const run = async () => {
   if (body.includes('快速检查') || body.includes('深度检查') || body.includes('在线来源检查')) {
     throw new Error('Legacy combined audit modes are still visible')
   }
+  let clearButtonReady = false
+  for (let index = 0; index < 40; index += 1) {
+    const result = await auditCdp.send('Runtime.evaluate', {
+      expression: `(() => {
+        const button = document.querySelector('button[title="清除所有检查记录"]')
+        return Boolean(button && !button.disabled)
+      })()`,
+      returnByValue: true
+    })
+    clearButtonReady = Boolean(result.result.value)
+    if (clearButtonReady) break
+    await wait(100)
+  }
+  if (!clearButtonReady) throw new Error('Clear inspection button did not become available')
+  const clearButtonState = await auditCdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const clearButton = document.querySelector('button[title="清除所有检查记录"]')
+      if (!clearButton) return null
+      const buttons = [...clearButton.closest('.audit-actions').querySelectorAll('button')]
+      const nextButton = buttons[buttons.indexOf(clearButton) + 1]
+      const clearRect = clearButton.getBoundingClientRect()
+      const nextRect = nextButton?.getBoundingClientRect?.()
+      clearButton.click()
+      return { clearX: clearRect.x, nextX: nextRect?.x ?? null }
+    })()`,
+    returnByValue: true
+  })
+  await wait(250)
+  const clearConfirmationScreenshotPath = screenshotPath.replace(/(\.png)?$/i, '-clear-confirm.png')
+  const clearConfirmationScreenshot = await auditCdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+  fs.writeFileSync(clearConfirmationScreenshotPath, Buffer.from(clearConfirmationScreenshot.data, 'base64'))
+  const clearConfirmation = await auditCdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const dialog = document.querySelector('.el-message-box')
+      const text = dialog?.innerText || ''
+      const cancel = [...(dialog?.querySelectorAll('button') || [])].find(button => button.textContent.includes('取消'))
+      cancel?.click()
+      return { text, hasCancel: Boolean(cancel) }
+    })()`,
+    returnByValue: true
+  })
+  const clearState = clearButtonState.result.value
+  const confirmationState = clearConfirmation.result.value
+  if (!clearState || clearState.nextX === null || clearState.clearX >= clearState.nextX) {
+    throw new Error(`Clear inspection button is missing or not left of stop: ${JSON.stringify(clearState)}`)
+  }
+  if (!confirmationState?.hasCancel || !confirmationState.text.includes('确认清除所有检查记录') || !confirmationState.text.includes('不会修改漫画文件')) {
+    throw new Error(`Clear inspection confirmation is incomplete: ${JSON.stringify(confirmationState)}`)
+  }
+  await wait(200)
   if (body.includes('任务进行中') && (!body.includes('已完成阶段') || !body.includes('下一阶段') || !body.includes('剩余阶段'))) {
     throw new Error('Active audit stage summary is incomplete')
   }
@@ -221,6 +271,7 @@ const run = async () => {
       innerWidth: window.innerWidth,
       scrollWidth: document.documentElement.scrollWidth,
       anomalyActionVisible: document.body.innerText.includes('执行异常修复'),
+      emptyAnomalyReportVisible: document.body.innerText.includes('尚无异常检查报告'),
       tabCount: document.querySelectorAll('[role="tab"]').length
     })`,
     returnByValue: true
@@ -229,7 +280,7 @@ const run = async () => {
   const narrowScreenshot = await auditCdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
   fs.writeFileSync(narrowScreenshotPath, Buffer.from(narrowScreenshot.data, 'base64'))
   const narrow = narrowState.result.value
-  if (!narrow.anomalyActionVisible || narrow.tabCount !== 2 || narrow.scrollWidth > narrow.innerWidth + 1) {
+  if ((!narrow.anomalyActionVisible && !narrow.emptyAnomalyReportVisible) || narrow.tabCount !== 2 || narrow.scrollWidth > narrow.innerWidth + 1) {
     throw new Error(`Narrow audit layout failed: ${JSON.stringify(narrow)}`)
   }
   const runtimeExceptions = auditCdp.events.filter(event => event.method === 'Runtime.exceptionThrown')
@@ -244,7 +295,7 @@ const run = async () => {
     })
   }
   auditCdp.ws.close()
-  console.log(JSON.stringify({ auditUrl: audit.url, screenshotPath, dedupeScreenshotPath, logScreenshotPath, narrowScreenshotPath, textPreview: body.slice(0, 240) }))
+  console.log(JSON.stringify({ auditUrl: audit.url, screenshotPath, clearConfirmationScreenshotPath, dedupeScreenshotPath, logScreenshotPath, narrowScreenshotPath, textPreview: body.slice(0, 240) }))
 }
 
 run().catch(error => {

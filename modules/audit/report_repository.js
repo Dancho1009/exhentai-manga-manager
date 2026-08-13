@@ -159,6 +159,20 @@ class AuditReportRepository {
     return jobDir
   }
 
+  async clearInspectionRecords() {
+    this.reportCache.clear()
+    await Promise.all([
+      fs.promises.rm(this.channelsPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+      fs.promises.rm(this.jobsPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+      fs.promises.rm(path.join(this.storePath, 'audit-log.jsonl'), { force: true })
+    ])
+    await Promise.all([
+      fs.promises.mkdir(this.channelsPath, { recursive: true }),
+      fs.promises.mkdir(path.join(this.jobsPath, 'anomaly'), { recursive: true }),
+      fs.promises.mkdir(path.join(this.jobsPath, 'dedupe'), { recursive: true })
+    ])
+  }
+
   async loadChannelState(taskType) {
     const fallback = createIdleState(normalizeTaskType(taskType))
     return { ...fallback, ...(await readJson(this.getChannelStatePath(taskType), fallback)) }

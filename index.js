@@ -1875,6 +1875,7 @@ ipcMain.handle('audit:start-dedupe', async (event, request = {}) => {
 })
 
 ipcMain.handle('audit:cancel-active', async () => await auditWorkspaceManager.cancelActive())
+ipcMain.handle('audit:clear-inspection-records', async () => await auditWorkspaceManager.clearInspectionRecords())
 ipcMain.handle('audit:save-review', async (event, { taskType, review } = {}) => {
   return await auditWorkspaceManager.saveReview(taskType, review || {})
 })

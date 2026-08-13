@@ -11,6 +11,7 @@ const {
   normalizeTaskType
 } = require('./report_repository.js')
 const { normalizeReview } = require('./review_validator.js')
+const { clearAuditCacheDatabase } = require('./cache.js')
 
 const ACTIVE_STATUSES = new Set(['running', 'cancelling'])
 const TERMINAL_PHASES = new Set(['idle', 'cancelling', 'cancelled', 'completed', 'failed', 'interrupted'])
@@ -51,6 +52,7 @@ class AuditWorkspaceManager extends EventEmitter {
     this.progressFlushTimer = null
     this.progressFlushInFlight = Promise.resolve()
     this.progressIntervalMs = 100
+    this.clearingRecords = false
   }
 
   async initialize() {
@@ -166,7 +168,26 @@ class AuditWorkspaceManager extends EventEmitter {
   }
 
   ensureIdle() {
-    if (this.activeTask || this.worker || this.activePromise) throw new Error('AUDIT_ALREADY_RUNNING')
+    if (this.activeTask || this.worker || this.activePromise || this.clearingRecords) throw new Error('AUDIT_ALREADY_RUNNING')
+  }
+
+  async clearInspectionRecords() {
+    this.ensureIdle()
+    this.clearingRecords = true
+    try {
+      await this.flushProgress()
+      await this.stateWriteQueue.catch(() => {})
+      await clearAuditCacheDatabase(this.storePath)
+      await this.repository.clearInspectionRecords()
+      for (const taskType of TASK_TYPES) {
+        this.states[taskType] = await this.repository.saveChannelState(taskType, createIdleState(taskType))
+      }
+      const state = this.getState()
+      this.emit('state', state)
+      return state
+    } finally {
+      this.clearingRecords = false
+    }
   }
 
   async startAnomaly(options) {

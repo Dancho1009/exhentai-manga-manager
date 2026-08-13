@@ -11,6 +11,7 @@ const { LibraryTaskCoordinator } = require('../modules/audit/task_coordinator.js
 const { AuditWorkspaceManager } = require('../modules/audit/job_manager.js')
 const { AuditReportRepository } = require('../modules/audit/report_repository.js')
 const { AuditCache } = require('../modules/audit/cache.js')
+const { EhentaiAvailabilityCache } = require('../modules/ehentai_availability_cache.js')
 const { atomicWriteJson, normalizePath } = require('../modules/audit/utils.js')
 const { inspectBookContent, inspectEhviewerIdentity, inspectBookHealth } = require('../modules/audit/archive_inspector.js')
 const { executeApprovedActions } = require('../modules/audit/action_executor.js')
@@ -219,6 +220,79 @@ test('workspace manager serializes independent channel state and throttles progr
 
   manager.activeTask = { type: 'anomaly', jobId: 'already-running' }
   await assert.rejects(manager.startDedupe({}), /AUDIT_ALREADY_RUNNING/)
+})
+
+test('clearing inspection records resets reports, reviews, logs, and caches while preserving execution recovery data', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-clear-records-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const manager = new AuditWorkspaceManager({ storePath: root, coordinator: new LibraryTaskCoordinator() })
+  await manager.initialize()
+  const protectedPaths = [
+    path.join(root, 'Library', 'protected-book.zip'),
+    path.join(root, 'database.sqlite'),
+    path.join(root, 'metadata.sqlite')
+  ]
+  await fs.promises.mkdir(path.dirname(protectedPaths[0]), { recursive: true })
+  await Promise.all(protectedPaths.map((filepath, index) => fs.promises.writeFile(filepath, `protected-${index}`)))
+  const protectedBefore = await Promise.all(protectedPaths.map(filepath => fs.promises.readFile(filepath)))
+
+  const jobId = 'anomaly-to-clear'
+  const jobDir = await manager.repository.createJob('anomaly', jobId)
+  const reportPath = path.join(jobDir, 'report.json')
+  const report = {
+    reportType: 'anomaly', reportId: `anomaly:${jobId}`, jobId, executable: true,
+    summary: { anomalies: 1 }, anomalies: [{ id: 'clear-me', action: null }]
+  }
+  await atomicWriteJson(reportPath, report)
+  const reportState = await manager.repository.activateReport('anomaly', jobId, reportPath, report.summary)
+  await manager.setChannelState('anomaly', { ...reportState, status: 'completed', latestJobId: jobId })
+  await manager.saveReview('anomaly', { reportId: report.reportId, actionIds: [] })
+  await manager.appendLog('anomaly', jobId, '检查记录')
+
+  const executionDir = await manager.repository.createJob('execution', 'preserved-execution')
+  await fs.promises.writeFile(path.join(executionDir, 'action-audit.jsonl'), '{"status":"verified"}\n')
+  const backupDir = path.join(root, 'audit', 'backups', 'preserved-backup')
+  await fs.promises.mkdir(backupDir, { recursive: true })
+  await fs.promises.writeFile(path.join(backupDir, 'database.sqlite'), 'backup')
+
+  const auditStorePath = path.join(root, 'audit')
+  const localCache = await AuditCache.open(auditStorePath)
+  await localCache.update(
+    { filepath: path.join(root, 'book.zip') },
+    { size: 10, mtimeMs: 20 },
+    { healthInspection: { pageCount: 1, ehviewer: { status: 'absent' } } }
+  )
+  await localCache.close()
+  const onlineCache = await EhentaiAvailabilityCache.open(auditStorePath)
+  await onlineCache.set({ site: 'exhentai', gid: '1', token: 'token', status: 'available', checkedAt: Date.now() })
+  await onlineCache.setGdata({ gid: '1', token: 'token', status: 'available', metadata: { gid: 1, title: 'cached' } })
+  await onlineCache.close()
+
+  const state = await manager.clearInspectionRecords()
+  for (const taskType of ['anomaly', 'dedupe', 'execution']) {
+    assert.equal(state.channels[taskType].status, 'idle')
+    assert.equal(state.channels[taskType].latestReportId, null)
+    assert.equal(state.channels[taskType].latestJobId, null)
+  }
+  assert.equal(await manager.getReport('anomaly'), null)
+  assert.equal(await manager.getReview('anomaly'), null)
+  assert.deepEqual(await manager.getLogs(), [])
+
+  const cacheDb = await open({ filename: path.join(auditStorePath, 'audit-cache.sqlite'), driver: sqlite3.Database })
+  assert.equal((await cacheDb.get('SELECT COUNT(*) AS count FROM cache_entries')).count, 0)
+  assert.equal((await cacheDb.get('SELECT COUNT(*) AS count FROM gallery_availability')).count, 0)
+  assert.equal((await cacheDb.get('SELECT COUNT(*) AS count FROM gallery_gdata')).count, 0)
+  await cacheDb.close()
+
+  assert.equal(await fs.promises.stat(path.join(executionDir, 'action-audit.jsonl')).then(() => true), true)
+  assert.equal(await fs.promises.stat(path.join(backupDir, 'database.sqlite')).then(() => true), true)
+  assert.equal(await fs.promises.stat(path.join(auditStorePath, 'migration-v3.json')).then(() => true), true)
+  assert.deepEqual((await fs.promises.readdir(path.join(auditStorePath, 'jobs'))).sort(), ['anomaly', 'dedupe'])
+  const protectedAfter = await Promise.all(protectedPaths.map(filepath => fs.promises.readFile(filepath)))
+  assert.deepEqual(protectedAfter, protectedBefore)
+
+  manager.activeTask = { type: 'anomaly', jobId: 'running' }
+  await assert.rejects(manager.clearInspectionRecords(), /AUDIT_ALREADY_RUNNING/)
 })
 
 test('workspace manager releases its lock and records a failed state when task startup fails', async t => {

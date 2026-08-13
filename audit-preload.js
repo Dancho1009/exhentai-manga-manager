@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('auditApi', {
   startAnomaly: options => ipcRenderer.invoke('audit:start-anomaly', options),
   startDedupe: options => ipcRenderer.invoke('audit:start-dedupe', options),
   cancelActive: () => ipcRenderer.invoke('audit:cancel-active'),
+  clearInspectionRecords: () => ipcRenderer.invoke('audit:clear-inspection-records'),
   saveReview: (taskType, review) => ipcRenderer.invoke('audit:save-review', { taskType, review }),
   getExecutionPreview: request => ipcRenderer.invoke('audit:get-execution-preview', request),
   executeApproved: options => ipcRenderer.invoke('audit:execute-approved', options),

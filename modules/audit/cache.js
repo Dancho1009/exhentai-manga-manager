@@ -8,6 +8,7 @@ const ARCHIVE_HASH_VERSION = 1
 const HEALTH_INSPECTION_VERSION = 1
 const CONTENT_INSPECTION_VERSION = 1
 const EHVIEWER_INSPECTION_VERSION = 1
+const CACHE_TABLES = ['cache_entries', 'gallery_availability', 'gallery_gdata']
 
 const parseJson = value => {
   if (!value) return null
@@ -124,8 +125,35 @@ class AuditCache {
   }
 }
 
+const clearAuditCacheDatabase = async storePath => {
+  const db = await open({
+    filename: path.join(storePath, 'audit-cache.sqlite'),
+    driver: sqlite3.Database
+  })
+  try {
+    await db.exec('PRAGMA busy_timeout = 5000;')
+    const rows = await db.all("SELECT name FROM sqlite_master WHERE type = 'table'")
+    const existing = new Set(rows.map(row => row.name))
+    await db.exec('BEGIN IMMEDIATE;')
+    try {
+      for (const table of CACHE_TABLES) {
+        if (existing.has(table)) await db.exec(`DELETE FROM ${table};`)
+      }
+      await db.exec('COMMIT;')
+    } catch (error) {
+      await db.exec('ROLLBACK;').catch(() => {})
+      throw error
+    }
+    await db.exec('PRAGMA wal_checkpoint(TRUNCATE);').catch(() => {})
+    await db.exec('VACUUM;').catch(() => {})
+  } finally {
+    await db.close()
+  }
+}
+
 module.exports = {
   AuditCache,
+  clearAuditCacheDatabase,
   CACHE_VERSION,
   ARCHIVE_HASH_VERSION,
   HEALTH_INSPECTION_VERSION,

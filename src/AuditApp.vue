@@ -8,6 +8,17 @@
         </div>
         <div class="audit-actions">
           <el-tag v-if="activeTask" type="warning" effect="plain">{{ activeTaskLabel }}</el-tag>
+          <el-tooltip :content="$t('audit.clearInspectionRecords')">
+            <el-button
+              type="danger"
+              plain
+              :icon="Delete"
+              :title="$t('audit.clearInspectionRecords')"
+              :aria-label="$t('audit.clearInspectionRecords')"
+              :disabled="busy"
+              @click="confirmClearInspectionRecords"
+            />
+          </el-tooltip>
           <el-tooltip :content="$t('audit.stop')">
             <el-button :icon="VideoPause" :disabled="!activeTask || actionPending" @click="cancelActive" />
           </el-tooltip>
@@ -89,8 +100,8 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage } from 'element-plus'
-import { Refresh, VideoPause } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Delete, Refresh, VideoPause } from '@element-plus/icons-vue'
 import zhCnElement from 'element-plus/dist/locale/zh-cn.mjs'
 import zhTwElement from 'element-plus/dist/locale/zh-tw.mjs'
 import enElement from 'element-plus/dist/locale/en.mjs'
@@ -277,6 +288,43 @@ const verifyConflicts = bookIds => runAction(() => window.auditApi.startAnomaly(
 }))
 const startDedupe = options => runAction(() => window.auditApi.startDedupe(options))
 const cancelActive = () => runAction(() => window.auditApi.cancelActive())
+const confirmClearInspectionRecords = async () => {
+  if (busy.value) return
+  try {
+    await ElMessageBox.confirm(
+      t('audit.clearInspectionRecordsConfirm'),
+      t('audit.clearInspectionRecordsConfirmTitle'),
+      {
+        type: 'warning',
+        confirmButtonText: t('audit.clearInspectionRecords'),
+        cancelButtonText: t('c.cancel'),
+        confirmButtonClass: 'el-button--danger'
+      }
+    )
+  } catch {
+    return
+  }
+
+  Object.values(reviewSaveTimers).forEach(timer => window.clearTimeout(timer))
+  reviewSaveTimers.anomaly = null
+  reviewSaveTimers.dedupe = null
+  await Promise.all(Object.values(reviewSaveQueues).map(queue => queue.catch(() => {})))
+  await runAction(async () => {
+    const state = await window.auditApi.clearInspectionRecords()
+    workspace.value = normalizeWorkspace(state)
+    anomalyReport.value = null
+    dedupeReport.value = null
+    anomalyReview.value = defaultReview('anomaly', null)
+    dedupeReview.value = defaultReview('dedupe', null)
+    logs.value = []
+    reviewDirty.anomaly = false
+    reviewDirty.dedupe = false
+    executionDialogVisible.value = false
+    executionPreview.value = null
+    ElMessage.success(t('audit.clearInspectionRecordsSuccess'))
+    return state
+  })
+}
 const scheduleReviewSave = taskType => {
   reviewDirty[taskType] = true
   window.clearTimeout(reviewSaveTimers[taskType])
