@@ -12,6 +12,70 @@ const FINAL_UNAVAILABLE_STATUSES = new Set([
   'geo-blocked'
 ])
 
+const isConclusiveSiteUnavailable = status => FINAL_UNAVAILABLE_STATUSES.has(status)
+
+const normalizeVersionIdentity = (gid, token) => {
+  const identity = { gid: String(gid || ''), token: String(token || '').toLowerCase() }
+  return /^\d+$/.test(identity.gid) && /^[0-9a-z]+$/.test(identity.token) ? identity : null
+}
+
+const metadataIdentity = (metadata, fallback) => normalizeVersionIdentity(metadata?.gid || fallback?.gid, metadata?.token || fallback?.token)
+const metadataPointer = (metadata, name) => normalizeVersionIdentity(metadata?.[`${name}_gid`], metadata?.[`${name}_key`])
+const identityKey = identity => identity ? `${identity.gid}:${identity.token}` : null
+const sameIdentity = (left, right) => Boolean(left && right && identityKey(left) === identityKey(right))
+
+const getGalleryVersionRelation = ({ currentMetadata, candidateMetadata, currentIdentity, candidateIdentity }) => {
+  const current = metadataIdentity(currentMetadata, currentIdentity)
+  const candidate = metadataIdentity(candidateMetadata, candidateIdentity)
+  if (!current || !candidate) return { status: 'unknown', sameChain: false, latestIdentity: null, chainGids: [] }
+  if (sameIdentity(current, candidate)) {
+    return { status: 'same-version', sameChain: true, latestIdentity: current, chainGids: [current.gid] }
+  }
+
+  const currentPointers = {
+    parent: metadataPointer(currentMetadata, 'parent'),
+    current: metadataPointer(currentMetadata, 'current'),
+    first: metadataPointer(currentMetadata, 'first')
+  }
+  const candidatePointers = {
+    parent: metadataPointer(candidateMetadata, 'parent'),
+    current: metadataPointer(candidateMetadata, 'current'),
+    first: metadataPointer(candidateMetadata, 'first')
+  }
+  const directlyLinked = Object.values(currentPointers).some(pointer => sameIdentity(pointer, candidate)) ||
+    Object.values(candidatePointers).some(pointer => sameIdentity(pointer, current))
+  const sameFirst = sameIdentity(currentPointers.first, candidatePointers.first)
+  if (!directlyLinked && !sameFirst) {
+    return { status: 'unrelated', sameChain: false, latestIdentity: null, chainGids: [current.gid, candidate.gid] }
+  }
+
+  const chain = [current, candidate, ...Object.values(currentPointers), ...Object.values(candidatePointers)].filter(Boolean)
+  const chainGids = [...new Set(chain.map(identity => identity.gid))]
+  const latestPointers = [currentPointers.current, candidatePointers.current]
+    .filter(pointer => pointer && !sameIdentity(pointer, currentPointers.first) && !sameIdentity(pointer, candidatePointers.first))
+  const latestKeys = [...new Set(latestPointers.map(identityKey))]
+  let latestIdentity = latestKeys.length === 1 ? latestPointers[0] : null
+  if (!latestIdentity && latestKeys.length === 0) {
+    if (sameIdentity(currentPointers.parent, candidate)) latestIdentity = current
+    else if (sameIdentity(candidatePointers.parent, current)) latestIdentity = candidate
+  }
+
+  const status = sameIdentity(latestIdentity, current)
+    ? 'current-latest'
+    : sameIdentity(latestIdentity, candidate)
+      ? 'candidate-latest'
+      : latestIdentity
+        ? 'latest-other'
+        : 'same-chain-latest-unknown'
+  return { status, sameChain: true, latestIdentity, chainGids }
+}
+
+const isVersionChainNoise = (anomaly, bookId, relation) => {
+  if (!relation?.sameChain || String(anomaly?.bookId) !== String(bookId)) return false
+  if (['ehviewer-url-conflict', 'unverified-page-mismatch'].includes(anomaly.type)) return true
+  return anomaly.type === 'filename-url-id-conflict' && relation.chainGids.includes(String(anomaly.evidence?.filenameId || ''))
+}
+
 const isConclusiveUnavailable = availability => {
   const statuses = ['ehentai', 'exhentai'].map(site => availability?.sites?.[site]?.status)
   return statuses.every(status => FINAL_UNAVAILABLE_STATUSES.has(status))
@@ -40,7 +104,7 @@ const pickAvailableUrl = (availability, preferredSite = 'exhentai') => {
 const getSameIdentityFallbackUrl = (availability, currentUrl) => {
   if (!availability || !currentUrl) return null
   const currentSite = getSiteFromUrl(currentUrl)
-  if (!currentSite || availability.sites?.[currentSite]?.status === 'available') return null
+  if (!currentSite || !isConclusiveSiteUnavailable(availability.sites?.[currentSite]?.status)) return null
   const otherSite = currentSite === 'exhentai' ? 'ehentai' : 'exhentai'
   return availability.sites?.[otherSite]?.status === 'available'
     ? buildGalleryUrl(otherSite, availability.identity.gid, availability.identity.token)
@@ -78,6 +142,9 @@ const decideIdentityConflict = ({ currentAvailability, candidateAvailability, cu
 
 module.exports = {
   FINAL_UNAVAILABLE_STATUSES,
+  isConclusiveSiteUnavailable,
+  getGalleryVersionRelation,
+  isVersionChainNoise,
   isConclusiveUnavailable,
   summarizeAvailability,
   pickAvailableUrl,

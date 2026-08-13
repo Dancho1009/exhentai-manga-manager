@@ -6,13 +6,16 @@ const path = require('path')
 const {
   classifyGalleryHtml,
   checkGallerySites,
-  getGalleryMetadata
+  getGalleryMetadata,
+  getGdataBatch
 } = require('../modules/ehentai.js')
 const { EhentaiAvailabilityCache } = require('../modules/ehentai_availability_cache.js')
 const {
   decideIdentityConflict,
   getSameIdentityFallbackUrl,
-  summarizeAvailability
+  summarizeAvailability,
+  getGalleryVersionRelation,
+  isVersionChainNoise
 } = require('../modules/audit/online_decision.js')
 
 const response = (body, status, url) => ({
@@ -130,6 +133,79 @@ test('copyrighted pages can still return usable gdata metadata', async () => {
   assert.equal(result.gdata.metadata.title, 'Archived metadata')
 })
 
+test('gdata batches up to 25 identities per API request and preserves result order', async () => {
+  const identities = Array.from({ length: 30 }, (_, index) => ({ gid: String(1000 + index), token: `token${index}` }))
+  const batchSizes = []
+  const results = await getGdataBatch({
+    identities,
+    setting: {},
+    fetchImpl: async (url, options) => {
+      const payload = JSON.parse(options.body)
+      batchSizes.push(payload.gidlist.length)
+      return response(JSON.stringify({
+        gmetadata: payload.gidlist.map(([gid]) => ({ gid, title: `Gallery ${gid}`, tags: [] }))
+      }), 200, url)
+    }
+  })
+  assert.deepEqual(batchSizes, [25, 5])
+  assert.equal(results.size, 30)
+  assert.equal(results.get('1000:token0').metadata.title, 'Gallery 1000')
+  assert.equal(results.get('1029:token29').metadata.title, 'Gallery 1029')
+})
+
+test('gallery version relation distinguishes current latest, candidate latest, and unrelated identities', () => {
+  const oldIdentity = { gid: '4050179', token: '09c3a040d0' }
+  const latestIdentity = { gid: '4055722', token: 'd7df36ff21' }
+  const oldMetadata = {
+    gid: 4050179,
+    parent_gid: '4050161', parent_key: '1961fe3850',
+    current_gid: '4055722', current_key: 'd7df36ff21',
+    first_gid: '4050161', first_key: '1961fe3850'
+  }
+  const latestMetadata = {
+    gid: 4055722,
+    parent_gid: '4050179', parent_key: '09c3a040d0',
+    first_gid: '4050161', first_key: '1961fe3850'
+  }
+  const currentLatest = getGalleryVersionRelation({
+    currentMetadata: latestMetadata,
+    candidateMetadata: oldMetadata,
+    currentIdentity: latestIdentity,
+    candidateIdentity: oldIdentity
+  })
+  assert.equal(currentLatest.sameChain, true)
+  assert.equal(currentLatest.status, 'current-latest')
+  assert.equal(currentLatest.latestIdentity.gid, '4055722')
+  assert.deepEqual(new Set(currentLatest.chainGids), new Set(['4050161', '4050179', '4055722']))
+
+  const candidateLatest = getGalleryVersionRelation({
+    currentMetadata: oldMetadata,
+    candidateMetadata: latestMetadata,
+    currentIdentity: oldIdentity,
+    candidateIdentity: latestIdentity
+  })
+  assert.equal(candidateLatest.status, 'candidate-latest')
+
+  const unrelated = getGalleryVersionRelation({
+    currentMetadata: latestMetadata,
+    candidateMetadata: { gid: 9999999 },
+    currentIdentity: latestIdentity,
+    candidateIdentity: { gid: '9999999', token: 'different1' }
+  })
+  assert.equal(unrelated.sameChain, false)
+  assert.equal(unrelated.status, 'unrelated')
+})
+
+test('confirmed version chains suppress only identity noise belonging to the same book and chain', () => {
+  const relation = { sameChain: true, chainGids: ['4050161', '4050179', '4055722'] }
+  assert.equal(isVersionChainNoise({ type: 'ehviewer-url-conflict', bookId: 'book' }, 'book', relation), true)
+  assert.equal(isVersionChainNoise({ type: 'unverified-page-mismatch', bookId: 'book' }, 'book', relation), true)
+  assert.equal(isVersionChainNoise({ type: 'filename-url-id-conflict', bookId: 'book', evidence: { filenameId: '4050179' } }, 'book', relation), true)
+  assert.equal(isVersionChainNoise({ type: 'filename-url-id-conflict', bookId: 'book', evidence: { filenameId: '123' } }, 'book', relation), false)
+  assert.equal(isVersionChainNoise({ type: 'metadata-missing', bookId: 'book' }, 'book', relation), false)
+  assert.equal(isVersionChainNoise({ type: 'ehviewer-url-conflict', bookId: 'other' }, 'book', relation), false)
+})
+
 test('identity conflict matrix only allows a conclusively available candidate', () => {
   const available = availability('available', 'generic-unavailable')
   const unavailable = availability('copyright', 'generic-unavailable')
@@ -151,6 +227,14 @@ test('same identity changes domain only when the current site is unavailable', (
     'https://e-hentai.org/g/2212965/551e1ccfb1/'
   )
   assert.equal(getSameIdentityFallbackUrl(result, 'https://e-hentai.org/g/2212965/551e1ccfb1/'), null)
+  assert.equal(
+    getSameIdentityFallbackUrl(availability('available', 'network-error', '2212965', '551e1ccfb1'), 'https://exhentai.org/g/2212965/551e1ccfb1/'),
+    null
+  )
+  assert.equal(
+    getSameIdentityFallbackUrl(availability('available', 'service-unavailable', '2212965', '551e1ccfb1'), 'https://exhentai.org/g/2212965/551e1ccfb1/'),
+    null
+  )
   assert.equal(summarizeAvailability(availability('copyright', 'network-error')), 'uncertain')
 })
 
@@ -169,4 +253,38 @@ test('availability cache stores conclusive states without response bodies', asyn
   assert.equal(cached.status, 'copyright')
   assert.equal(cached.claimant, 'FAKKU')
   assert.equal(Object.hasOwn(cached, 'html'), false)
+
+  await cache.setGdata({
+    gid: '1', token: 'token', status: 'available',
+    metadata: { gid: 1, title: 'Cached gallery', tags: [] }, checkedAt: Date.now()
+  })
+  const cachedGdata = await cache.getGdata({ gid: '1', token: 'token' })
+  assert.equal(cachedGdata.status, 'available')
+  assert.equal(cachedGdata.metadata.title, 'Cached gallery')
+
+  let requests = 0
+  const cachedBatch = await getGdataBatch({
+    identities: [{ gid: '1', token: 'token' }],
+    setting: {},
+    cache,
+    fetchImpl: async () => {
+      requests += 1
+      throw new Error('cache should avoid this request')
+    }
+  })
+  assert.equal(requests, 0)
+  assert.equal(cachedBatch.get('1:token').cached, true)
+
+  const refreshedBatch = await getGdataBatch({
+    identities: [{ gid: '1', token: 'token' }],
+    setting: {},
+    cache,
+    force: true,
+    fetchImpl: async url => {
+      requests += 1
+      return response(JSON.stringify({ gmetadata: [{ gid: 1, title: 'Refreshed gallery', tags: [] }] }), 200, url)
+    }
+  })
+  assert.equal(requests, 1)
+  assert.equal(refreshedBatch.get('1:token').metadata.title, 'Refreshed gallery')
 })

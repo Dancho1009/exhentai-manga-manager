@@ -191,7 +191,14 @@ const checkGallerySite = async ({ site, gid, token, setting, force = false, cach
     fetchImpl
   })
   const classified = response.error
-    ? { status: 'network-error', claimant: null, region: null, evidence: response.error.name === 'AbortError' ? 'request-timeout' : 'request-error', checkedAt: Date.now() }
+    ? {
+        status: 'network-error',
+        claimant: null,
+        region: null,
+        evidence: response.error.name === 'AbortError' ? 'request-timeout' : 'request-error',
+        error: response.error.message || String(response.error),
+        checkedAt: Date.now()
+      }
     : classifyGalleryHtml({ html: response.body, httpStatus: response.httpStatus, requestedUrl, finalUrl: response.finalUrl })
   const result = {
     site,
@@ -237,30 +244,87 @@ const checkGallerySites = async ({ gid, token, preferredSite = 'exhentai', strat
   }
 }
 
-const getGdata = async ({ gid, token, setting, fetchImpl }) => {
-  const response = await requestText({
-    url: 'https://api.e-hentai.org/api.php',
-    method: 'POST',
-    body: JSON.stringify({ method: 'gdata', gidlist: [[Number(gid), token]], namespace: 1 }),
-    headers: { 'Content-Type': 'application/json' },
-    setting,
-    fetchImpl
-  })
-  if (response.error) return { status: 'network-error', metadata: null, error: response.error.message }
-  if (SERVICE_HTTP_STATUS.has(Number(response.httpStatus))) return { status: 'service-unavailable', metadata: null }
-  try {
-    const metadata = JSON.parse(response.body)?.gmetadata?.[0]
-    if (!metadata || metadata.error) {
-      return {
-        status: /Gallery not found/i.test(metadata?.error || response.body) ? 'gallery-not-found' : 'unknown',
-        metadata: null,
-        error: metadata?.error || 'INVALID_GDATA_RESPONSE'
-      }
+const normalizeGdataIdentity = value => ({
+  gid: String(value?.gid || ''),
+  token: String(value?.token || '').toLowerCase()
+})
+
+const getGdataBatch = async ({ identities = [], setting, fetchImpl, cache, force = false, onProgress = () => {} }) => {
+  const unique = new Map()
+  for (const value of identities) {
+    const identity = normalizeGdataIdentity(value)
+    if (/^\d+$/.test(identity.gid) && /^[0-9a-z]+$/.test(identity.token)) {
+      unique.set(`${identity.gid}:${identity.token}`, identity)
     }
-    return { status: 'available', metadata }
-  } catch (error) {
-    return { status: 'unknown', metadata: null, error: error.message }
   }
+  const results = new Map()
+  const requests = []
+  for (const identity of unique.values()) {
+    const cached = !force && cache?.getGdata ? await cache.getGdata(identity) : null
+    if (cached) results.set(`${identity.gid}:${identity.token}`, cached)
+    else requests.push(identity)
+  }
+  const total = unique.size
+  if (total > 0 && results.size > 0) onProgress(results.size, total)
+  for (let offset = 0; offset < requests.length; offset += 25) {
+    const chunk = requests.slice(offset, offset + 25)
+    const response = await requestText({
+      url: 'https://api.e-hentai.org/api.php',
+      method: 'POST',
+      body: JSON.stringify({ method: 'gdata', gidlist: chunk.map(item => [Number(item.gid), item.token]), namespace: 1 }),
+      headers: { 'Content-Type': 'application/json' },
+      setting,
+      fetchImpl
+    })
+    if (response.error) {
+      for (const identity of chunk) {
+        results.set(`${identity.gid}:${identity.token}`, { status: 'network-error', metadata: null, error: response.error.message })
+      }
+      onProgress(Math.min(results.size, total), total)
+      continue
+    }
+    if (SERVICE_HTTP_STATUS.has(Number(response.httpStatus))) {
+      await Promise.all(chunk.map(async identity => {
+        const result = { status: 'service-unavailable', metadata: null }
+        results.set(`${identity.gid}:${identity.token}`, result)
+        if (cache?.setGdata) await cache.setGdata({ ...identity, ...result })
+      }))
+      onProgress(Math.min(results.size, total), total)
+      continue
+    }
+    let entries
+    try {
+      entries = JSON.parse(response.body)?.gmetadata
+      if (!Array.isArray(entries)) throw new Error('INVALID_GDATA_RESPONSE')
+    } catch (error) {
+      for (const identity of chunk) results.set(`${identity.gid}:${identity.token}`, { status: 'unknown', metadata: null, error: error.message })
+      onProgress(Math.min(results.size, total), total)
+      continue
+    }
+    await Promise.all(chunk.map(async (identity, index) => {
+      const metadata = entries[index]
+      const result = !metadata || metadata.error
+        ? {
+            status: /Gallery not found/i.test(metadata?.error || '') ? 'gallery-not-found' : 'unknown',
+            metadata: null,
+            error: metadata?.error || 'INVALID_GDATA_RESPONSE'
+          }
+        : { status: 'available', metadata }
+      results.set(`${identity.gid}:${identity.token}`, result)
+      if (cache?.setGdata) await cache.setGdata({ ...identity, ...result })
+    }))
+    onProgress(Math.min(results.size, total), total)
+  }
+  return results
+}
+
+const getGdata = async ({ gid, token, setting, fetchImpl, cache, force = false }) => {
+  const identity = normalizeGdataIdentity({ gid, token })
+  if (!/^\d+$/.test(identity.gid) || !/^[0-9a-z]+$/.test(identity.token)) {
+    return { status: 'unknown', metadata: null, error: 'INVALID_EHENTAI_IDENTITY' }
+  }
+  const results = await getGdataBatch({ identities: [identity], setting, fetchImpl, cache, force })
+  return results.get(`${identity.gid}:${identity.token}`) || { status: 'unknown', metadata: null, error: 'INVALID_GDATA_RESPONSE' }
 }
 
 const getGalleryPage = async ({ url, setting = {}, fetchImpl }) => {
@@ -291,7 +355,7 @@ const getGalleryPage = async ({ url, setting = {}, fetchImpl }) => {
   }
 }
 
-const getGalleryMetadata = async ({ url, gid, token, preferredSite, forceAvailability = false, setting = {}, cache, fetchImpl }) => {
+const getGalleryMetadata = async ({ url, gid, token, preferredSite, forceAvailability = false, forceGdata = forceAvailability, setting = {}, cache, fetchImpl }) => {
   const identity = gid && token ? { gid: String(gid), token: String(token) } : extractGalleryIdentity(url)
   if (!identity) throw new Error('INVALID_EHENTAI_URL')
   const requestedSite = preferredSite || getSiteFromUrl(url) || 'exhentai'
@@ -304,7 +368,7 @@ const getGalleryMetadata = async ({ url, gid, token, preferredSite, forceAvailab
     cache,
     fetchImpl
   })
-  const gdata = await getGdata({ ...identity, setting, fetchImpl })
+  const gdata = await getGdata({ ...identity, setting, fetchImpl, cache, force: forceGdata })
   return { ...availability, gdata }
 }
 
@@ -347,6 +411,7 @@ module.exports = {
   getGalleryPage,
   getGalleryMetadata,
   getGdata,
+  getGdataBatch,
   toManagerMetadata,
   isIdentityWebAvailable,
   hasUncertainSiteStatus
