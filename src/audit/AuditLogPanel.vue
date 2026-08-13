@@ -67,7 +67,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Loading, Tickets } from '@element-plus/icons-vue'
 
@@ -151,6 +151,12 @@ const optionLabels = computed(() => {
     return [options.sourceTaskType === 'dedupe' ? t('audit.dedupeTab') : t('audit.anomalyTab')]
   }
   return []
+})
+
+watch(() => props.logs[props.logs.length - 1], entry => {
+  if (entry?.level !== 'error') return
+  filter.value = 'all'
+  if (!activePanels.value.includes('logs')) activePanels.value = [...activePanels.value, 'logs']
 })
 
 </script>

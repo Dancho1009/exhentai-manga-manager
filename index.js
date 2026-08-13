@@ -31,6 +31,7 @@ const {
   checkGallerySites,
   getGalleryPage: getEhentaiGalleryPage,
   getGalleryMetadata: getEhentaiGalleryMetadata,
+  getGdata: getEhentaiGdata,
   extractGalleryIdentity: extractEhentaiIdentity,
   getSiteFromUrl: getEhentaiSiteFromUrl,
   isIdentityWebAvailable,
@@ -43,6 +44,7 @@ const { LibraryTaskCoordinator } = require('./modules/audit/task_coordinator.js'
 const { AuditWorkspaceManager } = require('./modules/audit/job_manager.js')
 const { executeApprovedActions } = require('./modules/audit/action_executor.js')
 const { buildExecutionPreview } = require('./modules/audit/review_validator.js')
+const { isConclusiveSiteUnavailable, getGalleryVersionRelation } = require('./modules/audit/online_decision.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
 const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
 const { getEhviewerDataFromZip } = require('./fileLoader/zip.js')
@@ -1918,6 +1920,7 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
       library: setting.library,
       rendererState,
       setProgress: execution.setProgress,
+      appendLog: execution.appendLog,
       isCancelled: execution.isCancelled,
       verifyRepairAction: async action => await withEhentaiAvailabilityCache(async cache => {
         const candidateIdentity = extractEhentaiIdentity(action.newUrl)
@@ -1935,7 +1938,64 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
         const identityChanged = currentIdentity && (
           currentIdentity.gid !== candidateIdentity.gid || currentIdentity.token !== candidateIdentity.token
         )
-        if (identityChanged) {
+        let verifiedCandidateGdata = null
+        if (currentIdentity && !identityChanged) {
+          const currentSite = getEhentaiSiteFromUrl(action.currentUrl)
+          const targetSite = getEhentaiSiteFromUrl(action.newUrl)
+          const currentSiteStatus = candidate.sites?.[currentSite]?.status
+          const targetSiteStatus = candidate.sites?.[targetSite]?.status
+          if (currentSiteStatus === 'available') {
+            return {
+              valid: false,
+              error: 'CURRENT_SITE_IS_AVAILABLE',
+              detail: { currentSite, currentSiteStatus, targetSite, targetSiteStatus }
+            }
+          }
+          if (!isConclusiveSiteUnavailable(currentSiteStatus)) {
+            return {
+              valid: false,
+              error: 'CURRENT_SITE_AVAILABILITY_UNCERTAIN',
+              detail: { currentSite, currentSiteStatus, targetSite, targetSiteStatus }
+            }
+          }
+          if (targetSiteStatus !== 'available') {
+            return {
+              valid: false,
+              error: 'REPAIR_CANDIDATE_UNAVAILABLE',
+              detail: { currentSite, currentSiteStatus, targetSite, targetSiteStatus }
+            }
+          }
+        } else if (identityChanged && action.repairKind === 'gallery-version-upgrade') {
+          const fetchVersionGdata = async identity => {
+            let result = await getEhentaiGdata({ ...identity, setting })
+            if (['network-error', 'service-unavailable', 'unknown'].includes(result.status)) {
+              await wait(1000)
+              result = await getEhentaiGdata({ ...identity, setting })
+            }
+            return result
+          }
+          const [currentGdata, candidateGdata] = await Promise.all([
+            fetchVersionGdata(currentIdentity),
+            fetchVersionGdata(candidateIdentity)
+          ])
+          if (currentGdata.status !== 'available' || candidateGdata.status !== 'available') {
+            return {
+              valid: false,
+              error: 'GALLERY_VERSION_GDATA_UNAVAILABLE',
+              detail: { currentGdataStatus: currentGdata.status, candidateGdataStatus: candidateGdata.status }
+            }
+          }
+          const versionRelation = getGalleryVersionRelation({
+            currentMetadata: currentGdata.metadata,
+            candidateMetadata: candidateGdata.metadata,
+            currentIdentity,
+            candidateIdentity
+          })
+          if (versionRelation.status !== 'candidate-latest') {
+            return { valid: false, error: 'GALLERY_VERSION_RELATION_CHANGED', detail: { versionStatus: versionRelation.status } }
+          }
+          verifiedCandidateGdata = candidateGdata
+        } else if (identityChanged) {
           const current = await checkGallerySites({
             ...currentIdentity,
             preferredSite: getEhentaiSiteFromUrl(action.currentUrl) || 'exhentai',
@@ -1948,14 +2008,37 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
             return { valid: false, error: 'CURRENT_GALLERY_IS_AVAILABLE_OR_UNCERTAIN' }
           }
         }
-        const metadataResult = await getEhentaiGalleryMetadata({
-          ...candidateIdentity,
-          preferredSite: candidate.preferredSite,
-          forceAvailability: false,
-          setting,
-          cache
-        })
-        if (metadataResult.gdata.status !== 'available') return { valid: false, error: 'REPAIR_GDATA_UNAVAILABLE' }
+        let metadataResult = verifiedCandidateGdata
+          ? { ...candidate, gdata: verifiedCandidateGdata }
+          : await getEhentaiGalleryMetadata({
+               ...candidateIdentity,
+               preferredSite: candidate.preferredSite,
+               forceAvailability: false,
+               forceGdata: true,
+               setting,
+               cache
+            })
+        if (['network-error', 'service-unavailable', 'unknown'].includes(metadataResult.gdata.status)) {
+          await wait(1000)
+          metadataResult = await getEhentaiGalleryMetadata({
+             ...candidateIdentity,
+             preferredSite: candidate.preferredSite,
+             forceAvailability: false,
+             forceGdata: true,
+             setting,
+             cache
+          })
+        }
+        if (metadataResult.gdata.status !== 'available') {
+          return {
+            valid: false,
+            error: 'REPAIR_GDATA_UNAVAILABLE',
+            detail: {
+              gdataStatus: metadataResult.gdata.status,
+              gdataError: metadataResult.gdata.error || null
+            }
+          }
+        }
         return {
           valid: true,
           newUrl: metadataResult.preferredUrl,

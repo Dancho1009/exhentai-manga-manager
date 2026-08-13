@@ -392,7 +392,11 @@ class AuditWorkspaceManager extends EventEmitter {
           error: cancelled ? null : error.stack || error.message,
           completedAt: new Date().toISOString()
         })
-        await this.appendLog(taskType, jobId, cancelled ? '执行已停止' : error.stack || error.message, cancelled ? 'warning' : 'error')
+        if (cancelled) {
+          await this.appendLog(taskType, jobId, '执行已停止', 'warning')
+        } else if (!error?.auditLogWritten) {
+          await this.appendLog(taskType, jobId, error?.auditLogMessage || error.stack || error.message, 'error')
+        }
         throw error
       } finally {
         this.finishActive(jobId)

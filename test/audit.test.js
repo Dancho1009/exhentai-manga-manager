@@ -771,10 +771,20 @@ test('repair execution rejects stale or legacy evidence and updates metadata ato
     quarantineRoot,
     rendererState: {}
   }
+  const repairLogs = []
   await assert.rejects(executeApprovedActions({
     ...common,
-    verifyRepairAction: async () => ({ valid: false, error: 'REPAIR_CANDIDATE_UNAVAILABLE' })
-  }), /REPAIR_CANDIDATE_UNAVAILABLE/)
+    appendLog: async (message, level) => repairLogs.push({ message, level }),
+    verifyRepairAction: async () => ({
+      valid: false,
+      error: 'REPAIR_GDATA_UNAVAILABLE',
+      detail: { gdataStatus: 'network-error', gdataError: 'socket timed out' }
+    })
+  }), error => error.code === 'REPAIR_GDATA_UNAVAILABLE' && error.auditContext?.bookId === 'repair-book')
+  assert.equal(repairLogs.length, 1)
+  assert.equal(repairLogs[0].level, 'error')
+  assert.match(repairLogs[0].message, /book\.zip/)
+  assert.match(repairLogs[0].message, /gdata=network-error/)
   assert.equal((await Manga.findByPk('repair-book')).url, oldUrl)
   await assert.rejects(executeApprovedActions({
     ...common,

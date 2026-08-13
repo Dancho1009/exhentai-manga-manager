@@ -1,3 +1,4 @@
+const path = require('path')
 const { normalizeAnomalyReview } = require('./review_validator.js')
 const {
   backupExecutionState,
@@ -13,6 +14,46 @@ const selectModelFields = (model, value) => Object.fromEntries(
     .map(key => [key, value[key]])
 )
 
+const REPAIR_ERROR_MESSAGES = {
+  CURRENT_GALLERY_IS_AVAILABLE_OR_UNCERTAIN: '当前 Gallery 已恢复可访问或状态不确定，原审批已失效',
+  CURRENT_SITE_IS_AVAILABLE: '当前站点已恢复访问，不再需要切换域名',
+  CURRENT_SITE_AVAILABILITY_UNCERTAIN: '当前站点只是网络错误或状态不确定，不能据此切换域名',
+  GALLERY_VERSION_GDATA_UNAVAILABLE: '无法重新取得版本链元数据，未执行 Gallery 版本升级',
+  GALLERY_VERSION_RELATION_CHANGED: 'Gallery 版本关系已经变化，原审批已失效',
+  REPAIR_GDATA_UNAVAILABLE: '候选 Gallery 网页可访问，但 gdata 元数据获取失败，未修改 URL',
+  REPAIR_CANDIDATE_UNAVAILABLE: '候选 Gallery 当前不可访问，原审批已失效',
+  INVALID_REPAIR_CANDIDATE_URL: '候选 Gallery URL 无效'
+}
+
+const createRepairValidationError = ({ anomaly, action, prepared, index, total }) => {
+  const code = prepared?.error || 'REPAIR_AVAILABILITY_CHANGED'
+  const filename = path.basename(action.filepath || '') || String(action.bookId || anomaly.id)
+  const detail = prepared?.detail || null
+  const detailText = detail?.gdataStatus
+    ? `；gdata=${detail.gdataStatus}${detail.gdataError ? ` (${detail.gdataError})` : ''}`
+    : detail?.currentSiteStatus
+      ? `；${detail.currentSite}=${detail.currentSiteStatus}，${detail.targetSite}=${detail.targetSiteStatus}`
+      : detail?.versionStatus
+        ? `；version=${detail.versionStatus}`
+        : detail?.currentGdataStatus
+          ? `；current-gdata=${detail.currentGdataStatus}，candidate-gdata=${detail.candidateGdataStatus}`
+      : ''
+  const error = new Error(`${code}: ${filename} (${index}/${total})${detailText}`)
+  error.code = code
+  error.auditContext = {
+    anomalyId: anomaly.id,
+    bookId: action.bookId,
+    filepath: action.filepath,
+    currentUrl: action.currentUrl || null,
+    newUrl: action.newUrl || null,
+    index,
+    total,
+    detail
+  }
+  error.auditLogMessage = `审批预检失败 ${index}/${total}：${filename}；${REPAIR_ERROR_MESSAGES[code] || code}${detailText}`
+  return error
+}
+
 const executeApprovedAnomalies = async ({
   anomalyReport,
   anomalyReview,
@@ -27,6 +68,7 @@ const executeApprovedAnomalies = async ({
   rendererState,
   verifyRepairAction,
   setProgress = async () => {},
+  appendLog = async () => {},
   isCancelled = () => false
 }) => {
   const review = normalizeAnomalyReview(anomalyReport, anomalyReview)
@@ -54,7 +96,14 @@ const executeApprovedAnomalies = async ({
       const effectiveUrl = book.url || metadata?.url || null
       if ((action.currentUrl || null) !== effectiveUrl) throw new Error(`APPROVAL_STALE_URL: ${action.bookId}`)
       const prepared = await verifyRepairAction?.(action)
-      if (!prepared?.valid) throw new Error(prepared?.error || `REPAIR_AVAILABILITY_CHANGED: ${anomaly.id}`)
+      if (!prepared?.valid) {
+        const error = createRepairValidationError({ anomaly, action, prepared, index: completed + 1, total: approvedAnomalies.length })
+        try {
+          await appendLog(error.auditLogMessage, 'error')
+          error.auditLogWritten = true
+        } catch {}
+        throw error
+      }
       if (book.hash) affectedHashes.add(book.hash)
       preparedRepairs.push({ anomaly, action, book, prepared })
       completed += 1
