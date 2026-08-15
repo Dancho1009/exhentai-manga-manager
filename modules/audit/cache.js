@@ -151,9 +151,27 @@ const clearAuditCacheDatabase = async storePath => {
   }
 }
 
+const invalidateAuditCacheEntries = async (storePath, filepaths = []) => {
+  const targets = [...new Set(filepaths.map(normalizePath).filter(Boolean))]
+  if (targets.length === 0) return
+  const db = await open({
+    filename: path.join(storePath, 'audit-cache.sqlite'),
+    driver: sqlite3.Database
+  })
+  try {
+    await db.exec('PRAGMA busy_timeout = 5000;')
+    const table = await db.get("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'cache_entries'")
+    if (!table?.found) return
+    for (const filepath of targets) await db.run('DELETE FROM cache_entries WHERE filepath = ?', filepath)
+  } finally {
+    await db.close()
+  }
+}
+
 module.exports = {
   AuditCache,
   clearAuditCacheDatabase,
+  invalidateAuditCacheEntries,
   CACHE_VERSION,
   ARCHIVE_HASH_VERSION,
   HEALTH_INSPECTION_VERSION,

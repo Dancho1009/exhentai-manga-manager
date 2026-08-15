@@ -43,7 +43,15 @@ const backupExecutionState = async ({ backupDir, databasePath, metadataPath, ren
 
 const ensureExpectedFile = async item => {
   const stat = await fs.promises.stat(item.filepath)
-  if (item.size !== null && item.size !== undefined && Number(item.size) !== stat.size) {
+  let actualSize = stat.size
+  if (stat.isDirectory() && (item.bookType === 'folder' || item.type === 'folder')) {
+    const dirents = await fs.promises.readdir(item.filepath, { withFileTypes: true })
+    actualSize = 0
+    for (const dirent of dirents) {
+      if (dirent.isFile()) actualSize += (await fs.promises.stat(path.join(item.filepath, dirent.name))).size
+    }
+  }
+  if (item.size !== null && item.size !== undefined && Number(item.size) !== actualSize) {
     throw new Error(`APPROVAL_STALE_SIZE: ${item.filepath}`)
   }
   if (item.mtimeMs && Math.abs(Number(item.mtimeMs) - stat.mtimeMs) > 2000) {

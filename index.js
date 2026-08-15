@@ -1924,6 +1924,25 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
       appendLog: execution.appendLog,
       isCancelled: execution.isCancelled,
       verifyRepairAction: async action => await withEhentaiAvailabilityCache(async cache => {
+        if (action.type === 'repair-ehviewer') {
+          const currentIdentity = extractEhentaiIdentity(action.currentUrl)
+          if (!currentIdentity || currentIdentity.gid !== String(action.identity?.gid) || currentIdentity.token !== String(action.identity?.token || '').toLowerCase()) {
+            return { valid: false, error: 'EHVIEWER_RECOVERY_IDENTITY_CHANGED' }
+          }
+          let currentGdata = await getEhentaiGdata({ ...currentIdentity, setting })
+          if (['network-error', 'service-unavailable', 'unknown'].includes(currentGdata.status)) {
+            await wait(1000)
+            currentGdata = await getEhentaiGdata({ ...currentIdentity, setting })
+          }
+          if (currentGdata.status !== 'available') {
+            return {
+              valid: false,
+              error: 'EHVIEWER_RECOVERY_GDATA_UNAVAILABLE',
+              detail: { gdataStatus: currentGdata.status, gdataError: currentGdata.error || null }
+            }
+          }
+          return { valid: true, identity: currentIdentity }
+        }
         const candidateIdentity = extractEhentaiIdentity(action.newUrl)
         if (!candidateIdentity) return { valid: false, error: 'INVALID_REPAIR_CANDIDATE_URL' }
         const candidate = await checkGallerySites({
