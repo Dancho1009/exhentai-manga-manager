@@ -328,6 +328,7 @@
     "executeDedupeQuarantine": "执行重复隔离",
     "taskLog": "任务日志",
     "currentTask": "当前任务",
+    "currentItems": "正在处理（{count} 本）",
     "startedAt": "开始时间",
     "elapsedTime": "已运行",
     "estimatedRemainingTime": "本阶段预计剩余",

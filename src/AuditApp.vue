@@ -33,6 +33,10 @@
           <span>{{ activeTaskLabel }} · {{ activeStatusLabel }}</span>
           <span>{{ activePhaseLabel }} · {{ activeCompleted }}/{{ activeTotal }}</span>
         </div>
+        <div v-if="activeCurrentItems.length" class="task-current-item" :title="activeCurrentItemTooltip">
+          <span>{{ $t('audit.currentItems', { count: activeCurrentItems.length }) }}</span>
+          <strong>{{ activeCurrentItemText }}</strong>
+        </div>
         <el-progress :percentage="progressPercentage" :stroke-width="12" />
         <audit-task-stages :summary="activeStageSummary" />
         <div class="task-estimate-line">
@@ -127,6 +131,8 @@ const idleState = taskType => ({
   phaseTotal: 0,
   phaseStartedAt: null,
   phaseStartCompleted: 0,
+  currentItem: null,
+  currentItems: [],
   latestReportId: null,
   error: null
 })
@@ -172,6 +178,14 @@ const anomalyState = computed(() => workspace.value.channels?.anomaly || idleSta
 const dedupeState = computed(() => workspace.value.channels?.dedupe || idleState('dedupe'))
 const activeTask = computed(() => workspace.value.activeTask)
 const activeState = computed(() => activeTask.value ? workspace.value.channels?.[activeTask.value.type] || idleState(activeTask.value.type) : idleState('idle'))
+const activeCurrentItems = computed(() => {
+  const items = Array.isArray(activeState.value.currentItems) && activeState.value.currentItems.length
+    ? activeState.value.currentItems
+    : activeState.value.currentItem ? [activeState.value.currentItem] : []
+  return items.filter(item => item?.title || item?.filepath)
+})
+const activeCurrentItemText = computed(() => activeCurrentItems.value.map(item => item.title || item.filepath).join('；'))
+const activeCurrentItemTooltip = computed(() => activeCurrentItems.value.map(item => item.filepath || item.title).join('\n'))
 const busy = computed(() => Boolean(activeTask.value) || actionPending.value || dataLoadCount.value > 0)
 const reviewLocked = computed(() => busy.value)
 const activeCompleted = computed(() => Number(activeState.value.phaseCompleted ?? activeState.value.completed ?? 0))
@@ -477,6 +491,8 @@ onBeforeUnmount(() => {
 .audit-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; }
 .task-band { flex: 0 0 auto; padding: 10px 18px 12px; border-bottom: 1px solid var(--el-border-color); background: var(--el-fill-color-light); }
 .task-line { display: flex; justify-content: space-between; gap: 18px; margin-bottom: 7px; }
+.task-current-item { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 9px; margin: 0 0 7px; color: var(--el-text-color-secondary); font-size: 12px; }
+.task-current-item strong { overflow: hidden; color: var(--el-text-color-primary); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .task-estimate-line { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px 26px; margin-top: 7px; color: var(--el-text-color-secondary); font-size: 12px; }
 .task-estimate-line strong { color: var(--el-text-color-regular); font-variant-numeric: tabular-nums; }
 .task-band :deep(.el-alert) { margin-top: 8px; }

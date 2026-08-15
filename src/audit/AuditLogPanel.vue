@@ -23,6 +23,10 @@
           <span>{{ phaseLabel }}</span>
           <strong>{{ progressText }}</strong>
         </div>
+        <div v-if="currentItems.length" class="active-current-item" :title="currentItemTooltip">
+          <small>{{ $t('audit.currentItems', { count: currentItems.length }) }}</small>
+          <strong>{{ currentItemText }}</strong>
+        </div>
         <el-progress
           :percentage="hasProgressTotal ? progressPercentage : 100"
           :indeterminate="!hasProgressTotal"
@@ -116,6 +120,14 @@ const statusTagType = computed(() => ({
 const completed = computed(() => Math.max(0, Number(props.activeState?.phaseCompleted ?? props.activeState?.completed ?? 0) || 0))
 const total = computed(() => Math.max(0, Number(props.activeState?.phaseTotal ?? props.activeState?.total ?? 0) || 0))
 const hasProgressTotal = computed(() => total.value > 0)
+const currentItems = computed(() => {
+  const items = Array.isArray(props.activeState?.currentItems) && props.activeState.currentItems.length
+    ? props.activeState.currentItems
+    : props.activeState?.currentItem ? [props.activeState.currentItem] : []
+  return items.filter(item => item?.title || item?.filepath)
+})
+const currentItemText = computed(() => currentItems.value.map(item => item.title || item.filepath).join('；'))
+const currentItemTooltip = computed(() => currentItems.value.map(item => item.filepath || item.title).join('\n'))
 const progressPercentage = computed(() => hasProgressTotal.value ? Math.min(100, Math.round(completed.value / total.value * 100)) : 0)
 const compactProgressText = computed(() => hasProgressTotal.value
   ? `${completed.value}/${total.value} · ${progressPercentage.value}%`
@@ -177,6 +189,9 @@ watch(() => props.logs[props.logs.length - 1], entry => {
 .active-task-progress-line { margin: 12px 0 7px; }
 .active-task-progress-line span { font-weight: 600; }
 .active-task-progress-line strong { color: var(--el-color-primary); font-size: 13px; font-variant-numeric: tabular-nums; }
+.active-current-item { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 9px; margin: -1px 0 8px; }
+.active-current-item small { color: var(--el-text-color-secondary); }
+.active-current-item strong { overflow: hidden; font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .active-task-meta { display: flex; flex-wrap: wrap; gap: 18px 32px; margin-top: 11px; }
 .active-task-meta > span { display: grid; grid-template-columns: auto auto; align-items: baseline; gap: 8px; min-width: 0; }
 .active-task-meta small { color: var(--el-text-color-secondary); }

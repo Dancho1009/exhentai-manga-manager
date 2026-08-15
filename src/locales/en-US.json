@@ -328,6 +328,7 @@
     "executeDedupeQuarantine": "Execute duplicate quarantine",
     "taskLog": "Task log",
     "currentTask": "Current task",
+    "currentItems": "Processing ({count})",
     "startedAt": "Started",
     "elapsedTime": "Elapsed",
     "estimatedRemainingTime": "Stage remaining",
