@@ -27,6 +27,12 @@ const { createWorkerRuntime, mapWithConcurrency } = require('./worker_runtime.js
 const LOCAL_INSPECTION_CONCURRENCY = 4
 const runtime = createWorkerRuntime()
 
+const toCurrentItem = wrapped => ({
+  id: wrapped?.raw?.id ? String(wrapped.raw.id) : null,
+  title: wrapped?.effective?.title || wrapped?.raw?.title || path.basename(wrapped?.raw?.filepath || ''),
+  filepath: wrapped?.raw?.filepath || null
+})
+
 const sortAnomalies = anomalies => {
   const severityOrder = { critical: 0, high: 1, medium: 2, low: 3 }
   anomalies.sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity] || left.type.localeCompare(right.type))
@@ -60,8 +66,13 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     const healthById = new Map()
     let completed = 0
     const inspectTargets = wrappedBooks.filter(item => item.actual)
+    const activeHealthItems = new Map()
     const healthResults = await mapWithConcurrency(inspectTargets, LOCAL_INSPECTION_CONCURRENCY, async wrapped => {
       assertNotCancelled()
+      const currentItem = toCurrentItem(wrapped)
+      const currentKey = currentItem.id || currentItem.filepath
+      activeHealthItems.set(currentKey, currentItem)
+      progress('inspecting-book-health', completed, inspectTargets.length, currentItem, [...activeHealthItems.values()])
       let health
       try {
         const cached = options.forceLocal ? null : await cache.get(wrapped.raw, wrapped.actual)
@@ -85,7 +96,9 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         }
       } finally {
         completed += 1
-        progress('inspecting-book-health', completed, inspectTargets.length)
+        activeHealthItems.delete(currentKey)
+        const remainingItems = [...activeHealthItems.values()]
+        progress('inspecting-book-health', completed, inspectTargets.length, remainingItems[0] || null, remainingItems)
       }
       return { wrapped, health, anomaly: null }
     }, isCancelled)
@@ -189,12 +202,16 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       const identities = new Map()
       for (const source of sources) {
         for (const identity of [source.currentIdentity, source.ehviewerIdentity]) {
-          if (identity) identities.set(`${identity.gid}:${identity.token}`, identity)
+          if (identity) identities.set(`${identity.gid}:${identity.token}`, {
+            ...identity,
+            currentItem: toCurrentItem(source.wrapped)
+          })
         }
       }
       completed = 0
       for (const [key, identity] of identities) {
         assertNotCancelled()
+        progress('checking-online-sources', completed, identities.size, identity.currentItem)
         const result = await checkGallerySites({
           ...identity,
           preferredSite: 'exhentai',
@@ -206,7 +223,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         identities.set(key, result)
         onlineChecks.push(result)
         completed += 1
-        progress('checking-online-sources', completed, identities.size)
+        progress('checking-online-sources', completed, identities.size, identity.currentItem)
       }
 
       const versionIdentities = new Map()
@@ -214,7 +231,10 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         if (!source.currentIdentity || !source.ehviewerIdentity) continue
         if (source.currentIdentity.gid === source.ehviewerIdentity.gid && source.currentIdentity.token === source.ehviewerIdentity.token) continue
         for (const identity of [source.currentIdentity, source.ehviewerIdentity]) {
-          versionIdentities.set(`${identity.gid}:${identity.token}`, identity)
+          versionIdentities.set(`${identity.gid}:${identity.token}`, {
+            ...identity,
+            currentItem: toCurrentItem(source.wrapped)
+          })
         }
       }
       const versionMetadata = versionIdentities.size > 0
@@ -223,7 +243,11 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
             setting: options.ehentaiSetting || {},
             cache: availabilityCache,
             force: Boolean(options.forceOnline),
-            onProgress: (done, total) => progress('checking-gallery-versions', done, total)
+            onProgress: (done, total) => {
+              const values = [...versionIdentities.values()]
+              const current = values[Math.min(Math.max(done, 1), values.length) - 1]
+              progress('checking-gallery-versions', done, total, current?.currentItem || null)
+            }
           })
         : new Map()
 
@@ -383,7 +407,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       }
     }
 
-    progress('finalizing-report', 0, 1)
+    progress('finalizing-report', 0, 1, null)
     sortAnomalies(anomalies)
     const report = {
       schemaVersion: REPORT_SCHEMA_VERSION,
@@ -416,7 +440,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     }
     const reportPath = path.join(jobDir, 'report.json')
     await atomicWriteJson(reportPath, report)
-    progress('finalizing-report', 1, 1)
+    progress('finalizing-report', 1, 1, null)
     return { reportPath, summary: report.summary }
   } finally {
     if (availabilityCache) await availabilityCache.close()

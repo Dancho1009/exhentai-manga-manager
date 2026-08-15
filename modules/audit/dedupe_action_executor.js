@@ -70,16 +70,26 @@ const executeApprovedDuplicates = async ({
     let completed = 0
     for (const action of duplicateActions) {
       assertNotCancelled()
+      await setProgress({
+        phase: 'validating-approvals',
+        completed,
+        total: totalActions,
+        phaseCompleted: completed,
+        phaseTotal: totalActions,
+        currentItem: { id: String(action.keep.id), title: action.keep.title || path.basename(action.keep.filepath), filepath: action.keep.filepath }
+      })
       await ensureExpectedFile(action.keep)
       for (const item of action.quarantineItems) {
+        const currentItem = { id: String(item.id), title: item.title || path.basename(item.filepath), filepath: item.filepath }
+        await setProgress({ phase: 'validating-approvals', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions, currentItem })
         await ensureExpectedFile(item)
         completed += 1
-        await setProgress({ phase: 'validating-approvals', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions })
+        await setProgress({ phase: 'validating-approvals', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions, currentItem })
       }
     }
 
     assertNotCancelled()
-    await setProgress({ phase: 'preparing-execution', completed: 0, total: totalActions, phaseCompleted: 0, phaseTotal: totalActions })
+    await setProgress({ phase: 'preparing-execution', completed: 0, total: totalActions, phaseCompleted: 0, phaseTotal: totalActions, currentItem: null })
     await backupExecutionState({ backupDir, databasePath, metadataPath, rendererState })
     const originalMetadataRows = await snapshotMetadataRows(Metadata, affectedHashes)
 
@@ -87,6 +97,8 @@ const executeApprovedDuplicates = async ({
     for (const action of duplicateActions) {
       for (const item of action.quarantineItems) {
         assertNotCancelled()
+        const currentItem = { id: String(item.id), title: item.title || path.basename(item.filepath), filepath: item.filepath }
+        await setProgress({ phase: 'quarantining-files', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions, currentItem })
         const relative = path.relative(library, item.filepath)
         if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`FILE_OUTSIDE_LIBRARY: ${item.filepath}`)
         const requestedTarget = path.join(quarantineRoot, executionId, relative)
@@ -96,7 +108,7 @@ const executeApprovedDuplicates = async ({
         movedFiles.push({ source: item.filepath, target })
         idMap[item.id] = action.keep.id
         completed += 1
-        await setProgress({ phase: 'quarantining-files', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions })
+        await setProgress({ phase: 'quarantining-files', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions, currentItem })
         await writeActionLog({ status: 'file-verified', type: 'quarantine', groupId: action.group.id, source: item.filepath, target, keepId: action.keep.id })
       }
     }
@@ -175,8 +187,8 @@ const executeApprovedDuplicates = async ({
     }
 
     const nextRendererState = mergeRendererState(rendererState, idMap)
-    await setProgress({ phase: 'writing-metadata', completed: totalActions, total: totalActions, phaseCompleted: totalActions, phaseTotal: totalActions })
-    await setProgress({ phase: 'verified', completed: totalActions, total: totalActions, phaseCompleted: totalActions, phaseTotal: totalActions })
+    await setProgress({ phase: 'writing-metadata', completed: totalActions, total: totalActions, phaseCompleted: totalActions, phaseTotal: totalActions, currentItem: null })
+    await setProgress({ phase: 'verified', completed: totalActions, total: totalActions, phaseCompleted: totalActions, phaseTotal: totalActions, currentItem: null })
     await writeActionLog({ status: 'verified', taskType: 'dedupe', movedCount: movedFiles.length, repairedCount: 0 }).catch(() => {})
     return {
       success: true,

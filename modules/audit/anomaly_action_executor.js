@@ -89,6 +89,12 @@ const executeApprovedAnomalies = async ({
     for (const anomaly of approvedAnomalies) {
       assertNotCancelled()
       const action = anomaly.action
+      const currentItem = {
+        id: action.bookId ? String(action.bookId) : null,
+        title: path.basename(action.filepath || ''),
+        filepath: action.filepath || null
+      }
+      await setProgress({ phase: 'validating-approvals', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })
       await ensureExpectedFile({ filepath: action.filepath, size: action.expectedSize, mtimeMs: action.expectedMtimeMs })
       const book = await Manga.findByPk(action.bookId, { raw: true })
       if (!book) throw new Error(`BOOK_MISSING: ${action.bookId}`)
@@ -107,11 +113,11 @@ const executeApprovedAnomalies = async ({
       if (book.hash) affectedHashes.add(book.hash)
       preparedRepairs.push({ anomaly, action, book, prepared })
       completed += 1
-      await setProgress({ phase: 'validating-approvals', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length })
+      await setProgress({ phase: 'validating-approvals', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })
     }
 
     assertNotCancelled()
-    await setProgress({ phase: 'preparing-execution', completed: 0, total: approvedAnomalies.length, phaseCompleted: 0, phaseTotal: approvedAnomalies.length })
+    await setProgress({ phase: 'preparing-execution', completed: 0, total: approvedAnomalies.length, phaseCompleted: 0, phaseTotal: approvedAnomalies.length, currentItem: null })
     await backupExecutionState({ backupDir, databasePath, metadataPath, rendererState })
     const originalMetadataRows = await snapshotMetadataRows(Metadata, affectedHashes)
 
@@ -121,6 +127,12 @@ const executeApprovedAnomalies = async ({
       completed = 0
       for (const repair of preparedRepairs) {
         assertNotCancelled()
+        const currentItem = {
+          id: repair.action.bookId ? String(repair.action.bookId) : null,
+          title: path.basename(repair.action.filepath || ''),
+          filepath: repair.action.filepath || null
+        }
+        await setProgress({ phase: 'writing-metadata', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })
         const book = await Manga.findByPk(repair.action.bookId, { transaction: mangaTransaction })
         if (!book) throw new Error(`BOOK_MISSING: ${repair.action.bookId}`)
         const nextValues = {
@@ -133,7 +145,7 @@ const executeApprovedAnomalies = async ({
           await Metadata.upsert(selectModelFields(Metadata, book.toJSON()), { transaction: metadataTransaction })
         }
         completed += 1
-        await setProgress({ phase: 'writing-metadata', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length })
+        await setProgress({ phase: 'writing-metadata', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })
         await writeActionLog({
           status: 'prepared',
           type: 'repair-url',
@@ -165,7 +177,7 @@ const executeApprovedAnomalies = async ({
       throw error
     }
 
-    await setProgress({ phase: 'verified', completed: approvedAnomalies.length, total: approvedAnomalies.length, phaseCompleted: approvedAnomalies.length, phaseTotal: approvedAnomalies.length })
+    await setProgress({ phase: 'verified', completed: approvedAnomalies.length, total: approvedAnomalies.length, phaseCompleted: approvedAnomalies.length, phaseTotal: approvedAnomalies.length, currentItem: null })
     await writeActionLog({ status: 'verified', taskType: 'anomaly', repairedCount: approvedAnomalies.length }).catch(() => {})
     return {
       success: true,

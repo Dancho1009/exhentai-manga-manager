@@ -21,6 +21,12 @@ const HASH_CONCURRENCY = 2
 const CONTENT_INSPECTION_CONCURRENCY = 2
 const runtime = createWorkerRuntime()
 
+const toCurrentItem = wrapped => ({
+  id: wrapped?.raw?.id ? String(wrapped.raw.id) : null,
+  title: wrapped?.effective?.title || wrapped?.raw?.title || path.basename(wrapped?.raw?.filepath || ''),
+  filepath: wrapped?.raw?.filepath || null
+})
+
 runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
   const { options, jobDir, jobId } = workerData
   let cache
@@ -47,8 +53,13 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     const archiveHashTargets = [...sizeGroups.values()].filter(group => group.length > 1).flat()
     const archiveHashes = new Map()
     let completed = 0
+    const activeHashItems = new Map()
     const hashResults = await mapWithConcurrency(archiveHashTargets, HASH_CONCURRENCY, async wrapped => {
       assertNotCancelled()
+      const currentItem = toCurrentItem(wrapped)
+      const currentKey = currentItem.id || currentItem.filepath
+      activeHashItems.set(currentKey, currentItem)
+      progress('hashing-archives', completed, archiveHashTargets.length, currentItem, [...activeHashItems.values()])
       try {
         const cached = options.forceContent ? null : await cache.get(wrapped.raw, wrapped.actual)
         const sha256 = cached?.archiveSha256 || await hashFile(wrapped.raw.filepath)
@@ -58,7 +69,9 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         return { wrapped, error }
       } finally {
         completed += 1
-        progress('hashing-archives', completed, archiveHashTargets.length)
+        activeHashItems.delete(currentKey)
+        const remainingItems = [...activeHashItems.values()]
+        progress('hashing-archives', completed, archiveHashTargets.length, remainingItems[0] || null, remainingItems)
       }
     }, isCancelled)
     for (const result of hashResults) {
@@ -90,8 +103,13 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     const contentTargets = [...contentPrefilter.values()].filter(group => group.length > 1).flat()
     const inspections = new Map()
     completed = 0
+    const activeContentItems = new Map()
     const inspectionResults = await mapWithConcurrency(contentTargets, CONTENT_INSPECTION_CONCURRENCY, async wrapped => {
       assertNotCancelled()
+      const currentItem = toCurrentItem(wrapped)
+      const currentKey = currentItem.id || currentItem.filepath
+      activeContentItems.set(currentKey, currentItem)
+      progress('inspecting-content', completed, contentTargets.length, currentItem, [...activeContentItems.values()])
       try {
         const cached = options.forceContent ? null : await cache.get(wrapped.raw, wrapped.actual)
         const inspection = cached?.contentInspection || await inspectBookContent(wrapped.raw, { sevenZipPath: options.sevenZipPath })
@@ -104,7 +122,9 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         return { wrapped, error }
       } finally {
         completed += 1
-        progress('inspecting-content', completed, contentTargets.length)
+        activeContentItems.delete(currentKey)
+        const remainingItems = [...activeContentItems.values()]
+        progress('inspecting-content', completed, contentTargets.length, remainingItems[0] || null, remainingItems)
       }
     }, isCancelled)
     for (const result of inspectionResults) {
@@ -120,7 +140,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       }
     }
 
-    progress('finalizing-report', 0, 1)
+    progress('finalizing-report', 0, 1, null)
     for (const candidateGroup of [...contentPrefilter.values()].filter(group => group.length > 1)) {
       const inspected = candidateGroup.filter(item => inspections.has(String(item.raw.id)))
       const imageGroups = groupBy(inspected, item => inspections.get(String(item.raw.id)).imageSignature)
@@ -184,7 +204,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     }
     const reportPath = path.join(jobDir, 'report.json')
     await atomicWriteJson(reportPath, report)
-    progress('finalizing-report', 1, 1)
+    progress('finalizing-report', 1, 1, null)
     return { reportPath, summary: report.summary }
   } finally {
     if (cache) await cache.close()

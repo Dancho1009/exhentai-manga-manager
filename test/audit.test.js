@@ -614,10 +614,15 @@ test('anomaly worker checks individual books and never emits duplicate groups', 
   }])
   const before = await fs.promises.readFile(archive)
   const phases = []
+  const currentItems = []
   const report = await writeWorkerReport({
     workerFilename: 'anomaly_worker.js', root, jobId: 'anomaly-job',
     options: { library, auditStorePath, onlinePolicy: 'none', sevenZipPath: null, ...databases },
-    onMessage: message => { if (message.type === 'progress') phases.push(message.phase) }
+    onMessage: message => {
+      if (message.type !== 'progress') return
+      phases.push(message.phase)
+      if (message.currentItem) currentItems.push(message.currentItem)
+    }
   })
   assert.equal(report.reportType, 'anomaly')
   assert.equal(report.executable, true)
@@ -627,6 +632,7 @@ test('anomaly worker checks individual books and never emits duplicate groups', 
   assert.equal(report.summary.anomalyBooks, 1)
   assert.equal('groups' in report, false)
   assert.ok(phases.includes('finalizing-report'))
+  assert.ok(currentItems.some(item => item.id === 'book-1' && item.filepath === archive))
   assert.deepEqual(await fs.promises.readFile(archive), before)
 })
 
@@ -685,10 +691,17 @@ test('dedupe worker proves byte-identical archives and never emits book anomalie
     { id: 'book-2', title: 'second', hash: 'hash-two', coverHash: 'cover-two', filepath: second, pageCount: 1, bundleSize: secondStat.size, mtime: secondStat.mtime.toISOString(), filecount: 1, url: 'https://exhentai.org/g/123456/abcdef1234/' }
   ])
   const phases = []
+  const currentItems = []
+  const concurrentItemCounts = []
   const report = await writeWorkerReport({
     workerFilename: 'dedupe_worker.js', root, jobId: 'dedupe-job',
     options: { library, auditStorePath, forceContent: false, sevenZipPath: null, ...databases },
-    onMessage: message => { if (message.type === 'progress') phases.push(message.phase) }
+    onMessage: message => {
+      if (message.type !== 'progress') return
+      phases.push(message.phase)
+      if (message.currentItem) currentItems.push(message.currentItem)
+      concurrentItemCounts.push(message.currentItems?.length || 0)
+    }
   })
   const exact = report.groups.find(group => group.kind === 'exact-archive')
   assert.equal(report.reportType, 'dedupe')
@@ -698,6 +711,8 @@ test('dedupe worker proves byte-identical archives and never emits book anomalie
   assert.match(exact.evidence.sha256, /^[a-f0-9]{64}$/)
   assert.equal('anomalies' in report, false)
   assert.ok(phases.includes('finalizing-report'))
+  assert.ok(currentItems.some(item => item.id === 'book-1' || item.id === 'book-2'))
+  assert.ok(concurrentItemCounts.some(count => count === 2))
 })
 
 test('dedupe worker excludes unreadable candidates instead of marking them duplicate', async t => {
@@ -798,7 +813,9 @@ test('approved duplicate execution quarantines one file and preserves merged use
   assert.deepEqual(savedCollections[0].list, ['hash-keep'])
   assert.equal(result.rendererState.recentRead[0].id, 'keep')
   assert.equal(result.rendererState.viewerReadingProgress[0].bookId, 'keep')
+  assert.ok(states.some(state => state.currentItem?.id === 'remove' && state.currentItem.filepath === second))
   assert.ok(states.some(state => state.phase === 'verified'))
+  assert.equal(states.at(-1).currentItem, null)
 })
 
 test('duplicate execution restores files, databases, and collections when collection persistence fails', async t => {
@@ -943,8 +960,10 @@ test('repair execution rejects stale or legacy evidence and updates metadata ato
     anomalyReport: { ...common.anomalyReport, executable: false }
   }), /ANOMALY_REPORT_NOT_EXECUTABLE/)
 
+  const repairStates = []
   const result = await executeApprovedActions({
     ...common,
+    setProgress: async state => repairStates.push(state),
     verifyRepairAction: async () => ({ valid: true, newUrl, metadata: { title: 'Fresh title', title_jpn: '新しい題名', filecount: 42, status: 'tagged' } })
   })
   const repaired = await Manga.findByPk('repair-book')
@@ -955,4 +974,6 @@ test('repair execution rejects stale or legacy evidence and updates metadata ato
   assert.equal(repaired.filecount, 42)
   assert.equal(shared.url, newUrl)
   assert.equal(shared.title, 'Fresh title')
+  assert.ok(repairStates.some(state => state.currentItem?.id === 'repair-book' && state.currentItem.filepath === filepath))
+  assert.equal(repairStates.at(-1).currentItem, null)
 })
