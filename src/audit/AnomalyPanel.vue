@@ -140,6 +140,40 @@
             </el-descriptions>
           </div>
         </div>
+        <section v-if="selectedAnomaly.type === 'ehviewer-invalid'" class="ehviewer-recovery-preview" aria-labelledby="ehviewer-recovery-title">
+          <div class="ehviewer-recovery-heading">
+            <div>
+              <strong id="ehviewer-recovery-title">{{ $t('audit.ehviewerRecoveryPreviewTitle') }}</strong>
+              <span>{{ $t('audit.ehviewerRecoveryPreviewDescription') }}</span>
+            </div>
+            <el-tag :type="selectedAnomaly.action?.type === 'repair-ehviewer' ? 'success' : 'warning'" effect="plain">
+              {{ selectedAnomaly.action?.type === 'repair-ehviewer' ? $t('audit.approvableRepair') : $t('audit.previewOnly') }}
+            </el-tag>
+          </div>
+          <el-skeleton v-if="previewLoading" :rows="3" animated />
+          <template v-else-if="ehviewerRecoveryPreview">
+            <dl class="ehviewer-recovery-meta">
+              <div>
+                <dt>{{ $t('audit.ehviewerRecoverySourceUrl') }}</dt>
+                <dd><el-link type="primary" :underline="false" @click="openExternalUrl(ehviewerRecoveryPreview.sourceUrl)">{{ ehviewerRecoveryPreview.sourceUrl }}<el-icon><TopRight /></el-icon></el-link></dd>
+              </div>
+              <div>
+                <dt>{{ $t('audit.ehviewerRecoveryFormat') }}</dt>
+                <dd>{{ ehviewerRecoveryPreview.format }}</dd>
+              </div>
+            </dl>
+            <pre class="ehviewer-recovery-content">{{ ehviewerRecoveryPreview.content }}</pre>
+            <el-alert
+              v-if="selectedAnomaly.action?.type === 'repair-ehviewer'"
+              class="ehviewer-recovery-alert"
+              type="success"
+              :closable="false"
+              :title="$t('audit.ehviewerRecoveryApprovable')"
+              show-icon
+            />
+          </template>
+          <el-alert v-else type="warning" :closable="false" :title="$t('audit.ehviewerRecoveryUnavailable')" show-icon />
+        </section>
         <pre class="evidence-block">{{ JSON.stringify(selectedAnomaly.evidence || {}, null, 2) }}</pre>
       </template>
     </el-drawer>
@@ -151,6 +185,7 @@ import { computed, defineComponent, h, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElIcon, ElMessage, ElTag } from 'element-plus'
 import { Close, Connection, DocumentChecked, FolderOpened, Picture, Search, Select, TopRight, VideoPlay } from '@element-plus/icons-vue'
+import { buildEhviewerRecoveryPreview } from './ehviewerRecoveryPreview.mjs'
 
 const props = defineProps({
   report: { type: Object, default: null },
@@ -201,7 +236,7 @@ const allFilteredSelected = computed(() => filteredActionableIds.value.length > 
 const someFilteredSelected = computed(() => !allFilteredSelected.value && filteredActionableIds.value.some(id => selectedIdSet.value.has(id)))
 const filterScopeLabel = computed(() => typeFilter.value ? auditTypeLabel(typeFilter.value) : search.value || severityFilter.value || actionableOnly.value ? t('audit.currentFilter') : t('audit.allAnomalies'))
 const pendingOnlineBookIds = computed(() => [...new Set((props.report?.anomalies || [])
-  .filter(item => item.bookId && !item.action && ['ehviewer-url-conflict', 'ehviewer-source-recoverable'].includes(item.type))
+  .filter(item => item.bookId && !item.action && ['ehviewer-invalid', 'ehviewer-url-conflict', 'ehviewer-source-recoverable'].includes(item.type))
   .map(item => String(item.bookId)))])
 const filteredBookIds = computed(() => [...new Set(filteredAnomalies.value.map(item => item.bookId).filter(Boolean).map(String))])
 const currentEvidenceUrl = computed(() => selectedAnomaly.value?.evidence?.currentUrl || '')
@@ -212,6 +247,10 @@ const ehviewerEvidenceUrl = computed(() => {
 const currentAvailability = computed(() => selectedAnomaly.value?.evidence?.currentAvailability || null)
 const ehviewerAvailability = computed(() => selectedAnomaly.value?.evidence?.ehviewerAvailability || null)
 const bookTitle = computed(() => bookPreview.value?.title_jpn || bookPreview.value?.title || '')
+const ehviewerRecoveryPreview = computed(() => buildEhviewerRecoveryPreview({
+  url: bookPreview.value?.url || currentEvidenceUrl.value,
+  title: bookTitle.value
+}))
 const reviewStatusLabel = computed(() => props.reviewSaving
   ? t('audit.reviewSaving')
   : props.reviewDirty ? t('audit.reviewUnsaved') : t('audit.reviewAutoSaved'))
@@ -294,6 +333,8 @@ watch([() => filteredAnomalies.value.length, pageSize], ([total, size]) => { pag
 .anomaly-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }.anomaly-detail-grid.has-book-preview { grid-template-columns: 150px minmax(0, 1fr); }
 .anomaly-description, .anomaly-book-preview { min-width: 0; }.anomaly-cover-button { display: block; width: 150px; padding: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }.anomaly-cover-button:disabled { cursor: wait; }.anomaly-cover-button:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }.anomaly-cover-button:not(:disabled):hover .anomaly-cover { border-color: var(--el-color-primary); box-shadow: 0 0 0 1px var(--el-color-primary-light-5); }
 .anomaly-cover { box-sizing: border-box; display: block; width: 150px; aspect-ratio: 500 / 707; overflow: hidden; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); border-radius: 4px; }.anomaly-cover-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--el-text-color-secondary); font-size: 12px; text-align: center; }.anomaly-cover-placeholder .el-icon { font-size: 28px; }.anomaly-book-preview p { display: -webkit-box; margin: 8px 0 0; overflow: hidden; color: var(--el-text-color-regular); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.ehviewer-recovery-preview { margin-top: 20px; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.ehviewer-recovery-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.ehviewer-recovery-heading strong, .ehviewer-recovery-heading span { display: block; }.ehviewer-recovery-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.ehviewer-recovery-meta { display: grid; grid-template-columns: minmax(0, 1fr) 120px; margin: 0 0 12px; border: 1px solid var(--el-border-color); }.ehviewer-recovery-meta > div { min-width: 0; padding: 10px 12px; }.ehviewer-recovery-meta > div + div { border-left: 1px solid var(--el-border-color); }.ehviewer-recovery-meta dt { color: var(--el-text-color-secondary); font-size: 12px; }.ehviewer-recovery-meta dd { min-width: 0; margin: 5px 0 0; overflow-wrap: anywhere; }.ehviewer-recovery-meta .el-link { max-width: 100%; vertical-align: top; }.ehviewer-recovery-content { min-height: 92px; margin: 0; padding: 14px; overflow: auto; color: var(--el-text-color-primary); font-family: Consolas, 'Courier New', monospace; line-height: 1.55; white-space: pre-wrap; word-break: break-all; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); }
+.ehviewer-recovery-alert { margin-top: 12px; }
 .availability-list { display: flex; flex-direction: column; gap: 8px; }.availability-item { display: inline-flex; align-items: center; gap: 8px; margin-right: 12px; }.evidence-block { padding: 14px; overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); }
-@media (max-width: 900px) { .task-toolbar, .task-toolbar-main, .review-action-bar { align-items: flex-start; flex-wrap: wrap; }.filter-row { grid-template-columns: 1fr; }.anomaly-detail-grid.has-book-preview { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 900px) { .task-toolbar, .task-toolbar-main, .review-action-bar { align-items: flex-start; flex-wrap: wrap; }.filter-row { grid-template-columns: 1fr; }.anomaly-detail-grid.has-book-preview, .ehviewer-recovery-meta { grid-template-columns: minmax(0, 1fr); }.ehviewer-recovery-meta > div + div { border-top: 1px solid var(--el-border-color); border-left: 0; } }
 </style>

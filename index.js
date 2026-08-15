@@ -1822,7 +1822,8 @@ ipcMain.handle('audit:get-book-preview', async (event, bookId) => {
     id: effective.id,
     title: effective.title || '',
     title_jpn: effective.title_jpn || '',
-    coverPath: effective.coverPath || null
+    coverPath: effective.coverPath || null,
+    url: effective.url || ''
   }
 })
 
