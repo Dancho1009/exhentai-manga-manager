@@ -119,6 +119,8 @@ class AuditWorkspaceManager extends EventEmitter {
       if (patch.phase && patch.phase !== current.phase) {
         nextPatch.phaseStartedAt = new Date().toISOString()
         nextPatch.phaseStartCompleted = Math.max(0, Number(patch.phaseCompleted ?? patch.completed ?? 0) || 0)
+        if (!Object.prototype.hasOwnProperty.call(patch, 'currentItem')) nextPatch.currentItem = null
+        if (!Object.prototype.hasOwnProperty.call(patch, 'currentItems')) nextPatch.currentItems = []
       }
       if (patch.phase && !TERMINAL_PHASES.has(patch.phase)) nextPatch.lastWorkPhase = patch.phase
       const next = await this.repository.saveChannelState(taskType, { ...current, ...nextPatch })
@@ -215,6 +217,8 @@ class AuditWorkspaceManager extends EventEmitter {
         total: 0,
         phaseCompleted: 0,
         phaseTotal: 0,
+        currentItem: null,
+        currentItems: [],
         error: null,
         options: sanitizeOptions(taskType, options),
         startedAt: new Date().toISOString(),
@@ -267,6 +271,8 @@ class AuditWorkspaceManager extends EventEmitter {
             total: payload.total ?? this.states[taskType].total,
             phaseCompleted: payload.phaseCompleted ?? this.states[taskType].phaseTotal,
             phaseTotal: payload.phaseTotal ?? this.states[taskType].phaseTotal,
+            currentItem: null,
+            currentItems: [],
             completedAt: new Date().toISOString(),
             error: null
           })
@@ -277,6 +283,8 @@ class AuditWorkspaceManager extends EventEmitter {
             latestJobId: jobId,
             status: 'interrupted',
             phase: 'cancelled',
+            currentItem: null,
+            currentItems: [],
             completedAt: new Date().toISOString(),
             error: null
           })
@@ -288,6 +296,8 @@ class AuditWorkspaceManager extends EventEmitter {
             latestJobId: jobId,
             status: 'failed',
             phase: 'failed',
+            currentItem: null,
+            currentItems: [],
             error,
             completedAt: new Date().toISOString()
           })
@@ -319,7 +329,9 @@ class AuditWorkspaceManager extends EventEmitter {
           completed: message.completed ?? message.overallCompleted ?? 0,
           total: message.total ?? message.overallTotal ?? 0,
           phaseCompleted: message.phaseCompleted ?? message.completed ?? 0,
-          phaseTotal: message.phaseTotal ?? message.total ?? 0
+          phaseTotal: message.phaseTotal ?? message.total ?? 0,
+          currentItem: message.currentItem || null,
+          currentItems: Array.isArray(message.currentItems) ? message.currentItems : message.currentItem ? [message.currentItem] : []
         })
       } else if (message.type === 'log') {
         await this.appendLog(taskType, jobId, message.message, message.level || 'info')
@@ -378,6 +390,8 @@ class AuditWorkspaceManager extends EventEmitter {
         total: 0,
         phaseCompleted: 0,
         phaseTotal: 0,
+        currentItem: null,
+        currentItems: [],
         error: null,
         options: sanitizeOptions(taskType, { sourceTaskType, reportId }),
         startedAt: new Date().toISOString(),
@@ -417,6 +431,8 @@ class AuditWorkspaceManager extends EventEmitter {
           latestJobId: jobId,
           status: 'completed',
           phase: 'verified',
+          currentItem: null,
+          currentItems: [],
           completedAt: new Date().toISOString(),
           error: null,
           summary: result
@@ -430,6 +446,8 @@ class AuditWorkspaceManager extends EventEmitter {
           latestJobId: jobId,
           status: cancelled ? 'interrupted' : 'failed',
           phase: cancelled ? 'cancelled' : 'failed',
+          currentItem: null,
+          currentItems: [],
           error: cancelled ? null : error.stack || error.message,
           completedAt: new Date().toISOString()
         })

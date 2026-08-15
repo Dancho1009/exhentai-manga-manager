@@ -10,13 +10,15 @@ const createWorkerRuntime = () => {
   const assertNotCancelled = () => {
     if (cancelled) throw new Error('AUDIT_CANCELLED')
   }
-  const progress = (phase, completed, total) => post({
+  const progress = (phase, completed, total, currentItem = null, currentItems = currentItem ? [currentItem] : []) => post({
     type: 'progress',
     phase,
     completed,
     total,
     phaseCompleted: completed,
-    phaseTotal: total
+    phaseTotal: total,
+    currentItem,
+    currentItems
   })
   const log = (message, level = 'info') => post({ type: 'log', message, level })
   const run = async task => {

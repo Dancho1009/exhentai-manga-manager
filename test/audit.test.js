@@ -201,12 +201,15 @@ test('workspace manager serializes independent channel state and throttles progr
 
   await manager.setChannelState('anomaly', { phase: 'stable-phase', phaseCompleted: 4, phaseTotal: 20 })
   const phaseStartedAt = manager.getState().channels.anomaly.phaseStartedAt
-  await manager.setChannelState('anomaly', { phase: 'stable-phase', phaseCompleted: 7, phaseTotal: 20 })
+  const currentItem = { id: 'book-1', title: 'current book', filepath: path.join(root, 'current.zip') }
+  await manager.setChannelState('anomaly', { phase: 'stable-phase', phaseCompleted: 7, phaseTotal: 20, currentItem })
   assert.equal(manager.getState().channels.anomaly.phaseStartedAt, phaseStartedAt)
   assert.equal(manager.getState().channels.anomaly.phaseStartCompleted, 4)
   assert.equal(manager.getState().channels.anomaly.lastWorkPhase, 'stable-phase')
+  assert.deepEqual(manager.getState().channels.anomaly.currentItem, currentItem)
   await manager.setChannelState('anomaly', { status: 'cancelling', phase: 'cancelling' })
   assert.equal(manager.getState().channels.anomaly.lastWorkPhase, 'stable-phase')
+  assert.equal(manager.getState().channels.anomaly.currentItem, null)
 
   manager.progressIntervalMs = 1000
   let emitted = 0

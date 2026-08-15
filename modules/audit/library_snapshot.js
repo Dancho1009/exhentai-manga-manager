@@ -51,7 +51,12 @@ const walkLibrary = async (library, onProgress, isCancelled) => {
       }
     }
     if (hasDirectImage) imageFolders.set(normalizePath(current), { filepath: current, type: 'folder' })
-    if (visitedDirectories % 25 === 0) onProgress('enumerating-library', visitedDirectories, null)
+    if (visitedDirectories % 25 === 0) {
+      onProgress('enumerating-library', visitedDirectories, null, {
+        title: path.basename(current),
+        filepath: current
+      })
+    }
   }
 
   return [...archives, ...imageFolders.values()]
@@ -99,7 +104,12 @@ const buildSnapshot = async ({ library, databasePath, metadataPath, excludeFile,
       ? await statFolder(item.filepath)
       : await fs.promises.stat(item.filepath).then(value => ({ size: value.size, mtimeMs: value.mtimeMs, mtime: value.mtime.toISOString() }))
     actualItems.push({ ...item, ...stat })
-    if (index % 50 === 0 || index + 1 === libraryItems.length) onProgress('snapshot-files', index + 1, libraryItems.length)
+    if (index % 50 === 0 || index + 1 === libraryItems.length) {
+      onProgress('snapshot-files', index + 1, libraryItems.length, {
+        title: path.basename(item.filepath),
+        filepath: item.filepath
+      })
+    }
   }
 
   const metadataByHash = new Map(databaseSnapshot.metadataRows.map(row => [row.hash, row]))
