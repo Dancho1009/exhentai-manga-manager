@@ -490,6 +490,7 @@ test('review validation keeps anomaly and duplicate approval models independent'
     anomalies: [
       { id: 'repair', action: { type: 'repair-url', currentUrl: 'https://exhentai.org/g/1/aaaaaaaaaa/', newUrl: 'https://e-hentai.org/g/1/aaaaaaaaaa/' } },
       { id: 'version', action: { type: 'repair-url', repairKind: 'gallery-version-upgrade', currentUrl: 'https://exhentai.org/g/2/bbbbbbbbbb/', newUrl: 'https://exhentai.org/g/3/cccccccccc/' } },
+      { id: 'ehviewer', action: { type: 'repair-ehviewer', repairKind: 'ehviewer-rebuild-from-current-metadata' } },
       { id: 'unknown', action: { type: 'delete-file' } }
     ]
   }
@@ -515,11 +516,12 @@ test('review validation keeps anomaly and duplicate approval models independent'
   const preview = buildExecutionPreview({
     taskType: 'anomaly',
     report: anomalyReport,
-    review: { reportId: anomalyReport.reportId, actionIds: ['repair', 'version'] },
+    review: { reportId: anomalyReport.reportId, actionIds: ['repair', 'version', 'ehviewer'] },
     library: path.join(os.tmpdir(), 'Library')
   })
   assert.equal(preview.sameIdentityCount, 1)
   assert.equal(preview.versionUpgradeCount, 1)
+  assert.equal(preview.ehviewerRebuildCount, 1)
   assert.equal(preview.identityReplacementCount, 0)
 })
 

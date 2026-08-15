@@ -20,6 +20,7 @@ const {
   isVersionChainNoise
 } = require('./online_decision.js')
 const { inspectBookHealth } = require('./archive_inspector.js')
+const { getEhviewerRepairSupport, normalizeEhviewerIdentity, sanitizeEhviewerTitle } = require('./ehviewer_repair.js')
 const { atomicWriteJson, normalizePath } = require('./utils.js')
 const { REPORT_SCHEMA_VERSION, getReportId } = require('./report_repository.js')
 const { createWorkerRuntime, mapWithConcurrency } = require('./worker_runtime.js')
@@ -128,11 +129,17 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       }
       const ehviewer = health.ehviewer
       if (['ambiguous', 'invalid'].includes(ehviewer?.status)) {
+        const recoverySupport = ehviewer.status === 'invalid'
+          ? getEhviewerRepairSupport({ filepath: wrapped.raw.filepath, type: wrapped.raw.type })
+          : null
         anomalies.push(makeAnomaly(`ehviewer-${ehviewer.status}`, 'high', {
           bookId: wrapped.raw.id,
           filepath: wrapped.raw.filepath,
           reason: ehviewer.status === 'ambiguous' ? '存在多个 .ehviewer，无法自动确认身份' : '.ehviewer 无法解析',
-          evidence: ehviewer
+          evidence: ehviewer.status === 'invalid' ? { ehviewer, recoverySupport } : ehviewer,
+          recommendedAction: ehviewer.status === 'invalid' && !recoverySupport.supported
+            ? 'manual-replace-ehviewer'
+            : null
         }))
       }
       if (!ehviewer?.gid || !ehviewer?.token) continue
@@ -176,6 +183,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         .filter(item => item.bookId && [
           'filename-url-id-conflict',
           'tagged-without-source',
+          'ehviewer-invalid',
           'ehviewer-url-conflict',
           'ehviewer-source-recoverable',
           'exact-source-page-mismatch',
@@ -191,12 +199,13 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
           ? { gid: String(ehviewer.gid), token: String(ehviewer.token).toLowerCase() }
           : null
         const identitiesConflict = Boolean(ehviewerIdentity) && (!currentIdentity || currentIdentity.gid !== ehviewerIdentity.gid || currentIdentity.token !== ehviewerIdentity.token)
+        const invalidEhviewer = ehviewer?.status === 'invalid'
         const include = onlinePolicy === 'urls'
           ? Boolean(currentIdentity)
           : onlinePolicy === 'ehviewer'
-            ? Boolean(ehviewerIdentity)
+            ? Boolean(ehviewerIdentity || (invalidEhviewer && currentIdentity))
             : identitiesConflict || localConflictIds.has(String(wrapped.raw.id))
-        if (include) sources.push({ wrapped, currentIdentity, ehviewer, ehviewerIdentity })
+        if (include) sources.push({ wrapped, currentIdentity, ehviewer, ehviewerIdentity, invalidEhviewer })
       }
 
       const identities = new Map()
@@ -228,6 +237,15 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
 
       const versionIdentities = new Map()
       for (const source of sources) {
+        const recoverySupport = source.invalidEhviewer
+          ? getEhviewerRepairSupport({ filepath: source.wrapped.raw.filepath, type: source.wrapped.raw.type })
+          : null
+        if (source.invalidEhviewer && source.currentIdentity && recoverySupport.supported) {
+          versionIdentities.set(`${source.currentIdentity.gid}:${source.currentIdentity.token}`, {
+            ...source.currentIdentity,
+            currentItem: toCurrentItem(source.wrapped)
+          })
+        }
         if (!source.currentIdentity || !source.ehviewerIdentity) continue
         if (source.currentIdentity.gid === source.ehviewerIdentity.gid && source.currentIdentity.token === source.ehviewerIdentity.token) continue
         for (const identity of [source.currentIdentity, source.ehviewerIdentity]) {
@@ -288,6 +306,43 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
                 availabilityProof: { checkedAt: Date.now(), current: currentAvailability, candidate: currentAvailability }
               }
             }))
+          }
+        }
+        if (source.invalidEhviewer) {
+          const invalidAnomaly = anomalies.find(item => item.type === 'ehviewer-invalid' && String(item.bookId) === String(wrapped.raw.id))
+          const recoverySupport = getEhviewerRepairSupport({ filepath: wrapped.raw.filepath, type: wrapped.raw.type })
+          const currentGdata = currentIdentity ? versionMetadata.get(`${currentIdentity.gid}:${currentIdentity.token}`) : null
+          const recoveryIdentity = normalizeEhviewerIdentity(currentIdentity)
+          const recoveryTitle = sanitizeEhviewerTitle(wrapped.effective.title_jpn || wrapped.effective.title)
+          if (invalidAnomaly) {
+            invalidAnomaly.evidence = {
+              ...(invalidAnomaly.evidence || {}),
+              currentUrl,
+              currentAvailability,
+              currentGdataStatus: currentGdata?.status || 'unchecked',
+              recoverySupport
+            }
+            if (recoverySupport.supported && recoveryIdentity && recoveryTitle && currentGdata?.status === 'available') {
+              invalidAnomaly.recommendedAction = 'rebuild-ehviewer-after-approval'
+              invalidAnomaly.action = {
+                type: 'repair-ehviewer',
+                repairKind: 'ehviewer-rebuild-from-current-metadata',
+                bookId: wrapped.raw.id,
+                filepath: wrapped.raw.filepath,
+                bookType: wrapped.raw.type,
+                expectedSize: wrapped.actual.size,
+                expectedMtimeMs: wrapped.actual.mtimeMs,
+                currentUrl,
+                expectedTitle: recoveryTitle,
+                entryPath: ehviewer.entryPath || '.ehviewer',
+                identity: recoveryIdentity,
+                availabilityProof: {
+                  checkedAt: Date.now(),
+                  current: currentAvailability,
+                  currentGdataStatus: currentGdata.status
+                }
+              }
+            }
           }
         }
         if (!ehviewerIdentity || !ehviewerAvailability) continue

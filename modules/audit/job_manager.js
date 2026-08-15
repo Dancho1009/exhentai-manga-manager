@@ -89,7 +89,7 @@ class AuditWorkspaceManager extends EventEmitter {
     const verified = [...entries].reverse().find(entry => entry.status === 'verified' && entry.taskType === 'anomaly')
     if (!verified) return
     const anomalyIds = [...new Set(entries
-      .filter(entry => entry.status === 'prepared' && entry.type === 'repair-url' && entry.anomalyId)
+      .filter(entry => entry.status === 'prepared' && ['repair-url', 'repair-ehviewer'].includes(entry.type) && entry.anomalyId)
       .map(entry => String(entry.anomalyId)))]
     if (anomalyIds.length === 0 || anomalyIds.length !== Number(verified.repairedCount || 0)) return
     await this.setChannelState('anomaly', {
