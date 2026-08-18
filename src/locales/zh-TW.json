@@ -456,6 +456,7 @@
     "confirmDedupeWarning": "檔案只會移動到 Library 外的隔離目錄；執行前會備份資料庫、合集和閱讀狀態。",
     "sameIdentitySwitches": "同一 Gallery 切換站點",
     "versionUpgrades": "同一 Gallery 版本升級",
+    "sourceRecoveries": "由 .ehviewer 還原來源",
     "ehviewerRebuilds": "重建 .ehviewer",
     "identityReplacements": "更換 Gallery 身份",
     "manualReviewGroups": "人工判斷重複組",

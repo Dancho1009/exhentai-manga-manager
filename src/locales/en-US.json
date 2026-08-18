@@ -456,6 +456,7 @@
     "confirmDedupeWarning": "Files are moved only to a quarantine folder outside Library. Databases, collections, and reading state are backed up first.",
     "sameIdentitySwitches": "Same-gallery site switches",
     "versionUpgrades": "Same-gallery version upgrades",
+    "sourceRecoveries": "Recover sources from .ehviewer",
     "ehviewerRebuilds": "Rebuild .ehviewer",
     "identityReplacements": "Gallery identity replacements",
     "manualReviewGroups": "Manually judged duplicate groups",
