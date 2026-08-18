@@ -18,7 +18,8 @@ const {
   decideIdentityConflict,
   buildSourceRecoveryAction,
   getGalleryVersionRelation,
-  isVersionChainNoise
+  isVersionChainNoise,
+  isConclusiveUnavailable
 } = require('./online_decision.js')
 const { inspectBookHealth } = require('./archive_inspector.js')
 const { getEhviewerRepairSupport, normalizeEhviewerIdentity, sanitizeEhviewerTitle } = require('./ehviewer_repair.js')
@@ -282,6 +283,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         const ehviewerAvailability = ehviewerIdentity ? identities.get(`${ehviewerIdentity.gid}:${ehviewerIdentity.token}`) : null
         const currentUrl = wrapped.effective.url || null
         const evidence = { currentUrl, ehviewer, currentAvailability, ehviewerAvailability }
+        const currentAvailable = isIdentityWebAvailable(currentAvailability)
         const currentStatus = summarizeAvailability(currentAvailability)
         if (currentAvailability && currentStatus !== 'available') {
           anomalies.push(makeAnomaly(`gallery-${currentStatus}`, currentStatus === 'copyright' ? 'high' : 'medium', {
@@ -379,9 +381,49 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
           sourceRecoverableAnomaly.action = sourceRecoveryAction
           continue
         }
+        const currentGdata = currentIdentity ? versionMetadata.get(`${currentIdentity.gid}:${currentIdentity.token}`) : null
+        const currentTitle = sanitizeEhviewerTitle(wrapped.effective.title_jpn || wrapped.effective.title)
+        const currentRecoveryIdentity = normalizeEhviewerIdentity(currentIdentity)
+        if (currentIdentity && currentAvailable && isConclusiveUnavailable(ehviewerAvailability)) {
+          const syncAnomaly = makeAnomaly('ehviewer-url-conflict-online', 'high', {
+            bookId: wrapped.raw.id,
+            filepath: wrapped.raw.filepath,
+            reason: '当前 URL 可访问，但 .ehviewer 对应 Gallery 不可用',
+            evidence: {
+              ...evidence,
+              currentGdataStatus: currentGdata?.status || 'unchecked',
+              repairTarget: 'current-url'
+            },
+            recommendedAction: currentRecoveryIdentity && currentTitle && currentGdata?.status === 'available'
+              ? 'rebuild-ehviewer-after-approval'
+              : 'manual-review',
+            action: currentRecoveryIdentity && currentTitle && currentGdata?.status === 'available'
+              ? {
+                  type: 'repair-ehviewer',
+                  repairKind: 'ehviewer-sync-to-current-metadata',
+                  bookId: wrapped.raw.id,
+                  filepath: wrapped.raw.filepath,
+                  bookType: wrapped.raw.type,
+                  expectedSize: wrapped.actual.size,
+                  expectedMtimeMs: wrapped.actual.mtimeMs,
+                  currentUrl,
+                  expectedTitle: currentTitle,
+                  entryPath: ehviewer.entryPath || '.ehviewer',
+                  identity: currentRecoveryIdentity,
+                  availabilityProof: {
+                    checkedAt: Date.now(),
+                    current: currentAvailability,
+                    candidate: ehviewerAvailability,
+                    currentGdataStatus: currentGdata.status
+                  }
+                }
+              : null
+          })
+          anomalies.push(syncAnomaly)
+          continue
+        }
         const sameIdentity = currentIdentity && currentIdentity.gid === ehviewerIdentity.gid && currentIdentity.token === ehviewerIdentity.token
         if (sameIdentity) continue
-        const currentGdata = currentIdentity ? versionMetadata.get(`${currentIdentity.gid}:${currentIdentity.token}`) : null
         const candidateGdata = versionMetadata.get(`${ehviewerIdentity.gid}:${ehviewerIdentity.token}`)
         const versionRelation = currentGdata?.status === 'available' && candidateGdata?.status === 'available'
           ? getGalleryVersionRelation({
@@ -447,7 +489,6 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
           candidateAvailability: ehviewerAvailability,
           currentIdentityPresent: Boolean(currentIdentity)
         })
-        const currentAvailable = isIdentityWebAvailable(currentAvailability)
         const candidateAvailable = isIdentityWebAvailable(ehviewerAvailability)
         let action = null
         let recommendation = 'manual-review'

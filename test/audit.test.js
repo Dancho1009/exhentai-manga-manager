@@ -744,6 +744,75 @@ test('online audit promotes .ehviewer source recovery into the original approvab
   assert.equal(shared.title, repaired.title)
 })
 
+test('online audit offers to rebuild a stale unavailable .ehviewer from the current available URL', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-ehviewer-sync-'))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const archive = path.join(library, '2000000-current-url.zip')
+  await fs.promises.writeFile(archive, makeArchiveBuffer({ gid: '1000000', token: 'aaaaaaaaaa' }))
+  const stat = await fs.promises.stat(archive)
+  const databases = await createDatabases(root, [{
+    id: 'sync-book', title: 'Current title', hash: 'sync-hash', coverHash: 'sync-cover', filepath: archive,
+    pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), filecount: 1,
+    status: 'tagged', tags: { artist: ['current'] }, url: 'https://exhentai.org/g/2000000/bbbbbbbbbb/'
+  }])
+  const cache = await EhentaiAvailabilityCache.open(auditStorePath)
+  await cache.set({ site: 'ehentai', gid: '2000000', token: 'bbbbbbbbbb', status: 'available', httpStatus: 200, checkedAt: Date.now(), evidence: 'test' })
+  await cache.set({ site: 'exhentai', gid: '2000000', token: 'bbbbbbbbbb', status: 'available', httpStatus: 200, checkedAt: Date.now(), evidence: 'test' })
+  await cache.set({ site: 'ehentai', gid: '1000000', token: 'aaaaaaaaaa', status: 'generic-unavailable', httpStatus: 404, checkedAt: Date.now(), evidence: 'test' })
+  await cache.set({ site: 'exhentai', gid: '1000000', token: 'aaaaaaaaaa', status: 'gallery-not-found', httpStatus: 404, checkedAt: Date.now(), evidence: 'test' })
+  await cache.setGdata({ gid: '2000000', token: 'bbbbbbbbbb', status: 'available', checkedAt: Date.now(), metadata: { gid: 2000000, token: 'bbbbbbbbbb', title: 'Current title', filecount: 1 } })
+  await cache.close()
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+
+  const report = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js', root, jobId: 'ehviewer-sync-job',
+    options: { library, auditStorePath, onlinePolicy: 'conflicts', forceLocal: false, forceOnline: false, sevenZipPath: null, ehentaiSetting: {}, ...databases }
+  })
+  const sync = report.anomalies.find(item => item.bookId === 'sync-book' && item.type === 'ehviewer-url-conflict-online')
+  assert.ok(sync)
+  assert.equal(sync.reason, '当前 URL 可访问，但 .ehviewer 对应 Gallery 不可用')
+  assert.equal(sync.action?.type, 'repair-ehviewer')
+  assert.equal(sync.action?.repairKind, 'ehviewer-sync-to-current-metadata')
+  assert.equal(sync.action?.currentUrl, 'https://exhentai.org/g/2000000/bbbbbbbbbb/')
+  assert.deepEqual(sync.action?.identity, { gid: '2000000', token: 'bbbbbbbbbb' })
+})
+
+test('online audit makes an unavailable current identity replaceable when the .ehviewer identity is available', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-identity-replacement-'))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const archive = path.join(library, '3000000-candidate.zip')
+  await fs.promises.writeFile(archive, makeArchiveBuffer({ gid: '3000000', token: 'cccccccccc' }))
+  const stat = await fs.promises.stat(archive)
+  const databases = await createDatabases(root, [{
+    id: 'replacement-book', title: 'Candidate title', hash: 'replacement-hash', coverHash: 'replacement-cover', filepath: archive,
+    pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), filecount: 1,
+    status: 'tagged', tags: { artist: ['candidate'] }, url: 'https://exhentai.org/g/4000000/dddddddddd/'
+  }])
+  const cache = await EhentaiAvailabilityCache.open(auditStorePath)
+  await cache.set({ site: 'ehentai', gid: '4000000', token: 'dddddddddd', status: 'generic-unavailable', httpStatus: 404, checkedAt: Date.now(), evidence: 'test' })
+  await cache.set({ site: 'exhentai', gid: '4000000', token: 'dddddddddd', status: 'gallery-not-found', httpStatus: 404, checkedAt: Date.now(), evidence: 'test' })
+  await cache.set({ site: 'ehentai', gid: '3000000', token: 'cccccccccc', status: 'available', httpStatus: 200, checkedAt: Date.now(), evidence: 'test' })
+  await cache.set({ site: 'exhentai', gid: '3000000', token: 'cccccccccc', status: 'available', httpStatus: 200, checkedAt: Date.now(), evidence: 'test' })
+  await cache.setGdata({ gid: '3000000', token: 'cccccccccc', status: 'available', checkedAt: Date.now(), metadata: { gid: 3000000, token: 'cccccccccc', title: 'Candidate title', filecount: 1 } })
+  await cache.close()
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+
+  const report = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js', root, jobId: 'identity-replacement-job',
+    options: { library, auditStorePath, onlinePolicy: 'conflicts', forceLocal: false, forceOnline: false, sevenZipPath: null, ehentaiSetting: {}, ...databases }
+  })
+  const replacement = report.anomalies.find(item => item.bookId === 'replacement-book' && item.type === 'ehviewer-url-conflict-online')
+  assert.ok(replacement)
+  assert.equal(replacement.action?.type, 'repair-url')
+  assert.equal(replacement.action?.repairKind, 'identity-replacement')
+  assert.equal(replacement.action?.currentUrl, 'https://exhentai.org/g/4000000/dddddddddd/')
+  assert.equal(replacement.action?.newUrl, 'https://exhentai.org/g/3000000/cccccccccc/')
+})
+
 test('workspace manager releases the library lock after a worker completes', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-manager-worker-'))
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
