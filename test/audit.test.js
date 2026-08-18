@@ -655,6 +655,14 @@ test('online audit promotes .ehviewer source recovery into the original approvab
     pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), filecount: 1,
     status: 'tagged', tags: { artist: ['local'] }, url: ''
   }])
+  // Metadata is authoritative for the audit snapshot, even when Manga.url
+  // contains a stale value left by an earlier partial metadata update.
+  const mangaDatabase = await open({ filename: databases.databasePath, driver: sqlite3.Database })
+  await mangaDatabase.run(
+    'UPDATE Mangas SET url = ? WHERE id = ?',
+    ['https://exhentai.org/g/4049796/bc7704fe8b/', 'source-book']
+  )
+  await mangaDatabase.close()
   const availabilityCache = await EhentaiAvailabilityCache.open(auditStorePath)
   await availabilityCache.set({
     site: 'ehentai', gid: '4049796', token: 'bc7704fe8b', status: 'available', httpStatus: 200,

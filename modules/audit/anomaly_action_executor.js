@@ -16,6 +16,27 @@ const selectModelFields = (model, value) => Object.fromEntries(
     .map(key => [key, value[key]])
 )
 
+// Keep approval validation consistent with the audit snapshot merge rule:
+// an existing Metadata row is authoritative even when its URL is empty.
+const normalizeApprovalUrl = value => {
+  const url = typeof value === 'string' ? value.trim() : ''
+  return url || null
+}
+
+const createStaleUrlError = ({ action, book, metadata, effectiveUrl }) => {
+  const error = new Error(`APPROVAL_STALE_URL: ${action.bookId}`)
+  error.code = 'APPROVAL_STALE_URL'
+  error.auditContext = {
+    bookId: action.bookId,
+    repairKind: action.repairKind || null,
+    actionCurrentUrl: normalizeApprovalUrl(action.currentUrl),
+    mangaUrl: normalizeApprovalUrl(book?.url),
+    metadataUrl: normalizeApprovalUrl(metadata?.url),
+    effectiveUrl
+  }
+  return error
+}
+
 const REPAIR_ERROR_MESSAGES = {
   CURRENT_GALLERY_IS_AVAILABLE_OR_UNCERTAIN: '当前 Gallery 已恢复可访问或状态不确定，原审批已失效',
   CURRENT_SITE_IS_AVAILABLE: '当前站点已恢复访问，不再需要切换域名',
@@ -27,7 +48,8 @@ const REPAIR_ERROR_MESSAGES = {
   INVALID_REPAIR_CANDIDATE_URL: '候选 Gallery URL 无效',
   EHVIEWER_RECOVERY_GDATA_UNAVAILABLE: '当前 Gallery 的 gdata 元数据验证失败，未重写 .ehviewer',
   EHVIEWER_RECOVERY_IDENTITY_CHANGED: '当前元数据 URL 已变化，原 .ehviewer 修复审批已失效',
-  APPROVAL_STALE_TITLE: '当前元数据标题已变化，原 .ehviewer 修复审批已失效'
+  APPROVAL_STALE_TITLE: '当前元数据标题已变化，原 .ehviewer 修复审批已失效',
+  APPROVAL_STALE_URL: '当前元数据 URL 已变化，原审批已失效，请重新检查后再执行'
 }
 
 const createRepairValidationError = ({ anomaly, action, prepared, index, total }) => {
@@ -105,8 +127,9 @@ const executeApprovedAnomalies = async ({
       const book = await Manga.findByPk(action.bookId, { raw: true })
       if (!book) throw new Error(`BOOK_MISSING: ${action.bookId}`)
       const metadata = book.hash ? await Metadata.findByPk(book.hash, { raw: true }) : null
-      const effectiveUrl = metadata?.url || book.url || null
-      if ((action.currentUrl || null) !== effectiveUrl) throw new Error(`APPROVAL_STALE_URL: ${action.bookId}`)
+      const effectiveUrl = normalizeApprovalUrl(metadata ? metadata.url : book.url)
+      const approvedUrl = normalizeApprovalUrl(action.currentUrl)
+      if (approvedUrl !== effectiveUrl) throw createStaleUrlError({ action, book, metadata, effectiveUrl })
       if (action.type === 'repair-ehviewer') {
         const effectiveTitle = sanitizeEhviewerTitle(metadata
           ? metadata.title_jpn || metadata.title || book.title_jpn || book.title
