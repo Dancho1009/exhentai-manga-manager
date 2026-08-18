@@ -12,6 +12,7 @@ const {
 const { EhentaiAvailabilityCache } = require('../modules/ehentai_availability_cache.js')
 const {
   decideIdentityConflict,
+  buildSourceRecoveryAction,
   getSameIdentityFallbackUrl,
   summarizeAvailability,
   getGalleryVersionRelation,
@@ -218,6 +219,28 @@ test('identity conflict matrix only allows a conclusively available candidate', 
   assert.equal(decideIdentityConflict({ currentAvailability: uncertain, candidateAvailability: available }).outcome, 'no-action')
   assert.equal(decideIdentityConflict({ currentAvailability: unavailable, candidateAvailability: availability('available', 'network-error') }).outcome, 'allow-candidate')
   assert.equal(decideIdentityConflict({ currentAvailability: null, candidateAvailability: available, currentIdentityPresent: false }).outcome, 'allow-candidate')
+})
+
+test('source recovery action requires an available .ehviewer gallery and valid gdata', () => {
+  const candidateAvailability = availability('available', 'generic-unavailable', '4049796', 'bc7704fe8b')
+  const input = {
+    bookId: 'book-1',
+    filepath: 'book.zip',
+    expectedSize: 123,
+    expectedMtimeMs: 456,
+    currentUrl: null,
+    candidateIdentity: { gid: '4049796', token: 'bc7704fe8b' },
+    candidateAvailability,
+    candidateGdata: { status: 'available', metadata: { gid: 4049796 } }
+  }
+  const action = buildSourceRecoveryAction(input)
+  assert.equal(action.type, 'repair-url')
+  assert.equal(action.repairKind, 'source-recovery')
+  assert.equal(action.currentUrl, null)
+  assert.equal(action.newUrl, 'https://e-hentai.org/g/4049796/bc7704fe8b/')
+  assert.equal(buildSourceRecoveryAction({ ...input, currentUrl: 'https://example.com/' }), null)
+  assert.equal(buildSourceRecoveryAction({ ...input, candidateGdata: { status: 'network-error' } }), null)
+  assert.equal(buildSourceRecoveryAction({ ...input, candidateAvailability: availability('copyright', 'generic-unavailable') }), null)
 })
 
 test('same identity changes domain only when the current site is unavailable', () => {

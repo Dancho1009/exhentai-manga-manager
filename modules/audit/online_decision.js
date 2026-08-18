@@ -140,6 +140,37 @@ const decideIdentityConflict = ({ currentAvailability, candidateAvailability, cu
   return { outcome: 'no-action', actionable: false, reason: 'no-confirmed-available-candidate' }
 }
 
+const buildSourceRecoveryAction = ({
+  bookId,
+  filepath,
+  expectedSize,
+  expectedMtimeMs,
+  currentUrl,
+  candidateIdentity,
+  candidateAvailability,
+  candidateGdata
+}) => {
+  if (currentUrl || !candidateIdentity || !isIdentityWebAvailable(candidateAvailability) || candidateGdata?.status !== 'available') return null
+  const newUrl = pickAvailableUrl(candidateAvailability, 'exhentai')
+  if (!newUrl) return null
+  return {
+    type: 'repair-url',
+    repairKind: 'source-recovery',
+    bookId,
+    filepath,
+    expectedSize,
+    expectedMtimeMs,
+    currentUrl: null,
+    newUrl,
+    availabilityProof: {
+      checkedAt: Date.now(),
+      current: null,
+      candidate: candidateAvailability,
+      candidateGdataStatus: candidateGdata.status
+    }
+  }
+}
+
 module.exports = {
   FINAL_UNAVAILABLE_STATUSES,
   isConclusiveSiteUnavailable,
@@ -149,5 +180,6 @@ module.exports = {
   summarizeAvailability,
   pickAvailableUrl,
   getSameIdentityFallbackUrl,
-  decideIdentityConflict
+  decideIdentityConflict,
+  buildSourceRecoveryAction
 }
