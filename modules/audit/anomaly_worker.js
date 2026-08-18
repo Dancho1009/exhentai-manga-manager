@@ -16,6 +16,7 @@ const {
   pickAvailableUrl,
   getSameIdentityFallbackUrl,
   decideIdentityConflict,
+  buildSourceRecoveryAction,
   getGalleryVersionRelation,
   isVersionChainNoise
 } = require('./online_decision.js')
@@ -246,6 +247,12 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
             currentItem: toCurrentItem(source.wrapped)
           })
         }
+        if (!source.currentIdentity && source.ehviewerIdentity) {
+          versionIdentities.set(`${source.ehviewerIdentity.gid}:${source.ehviewerIdentity.token}`, {
+            ...source.ehviewerIdentity,
+            currentItem: toCurrentItem(source.wrapped)
+          })
+        }
         if (!source.currentIdentity || !source.ehviewerIdentity) continue
         if (source.currentIdentity.gid === source.ehviewerIdentity.gid && source.currentIdentity.token === source.ehviewerIdentity.token) continue
         for (const identity of [source.currentIdentity, source.ehviewerIdentity]) {
@@ -346,6 +353,32 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
           }
         }
         if (!ehviewerIdentity || !ehviewerAvailability) continue
+        const sourceRecoverableAnomaly = !currentIdentity
+          ? anomalies.find(item => item.type === 'ehviewer-source-recoverable' && String(item.bookId) === String(wrapped.raw.id))
+          : null
+        if (sourceRecoverableAnomaly) {
+          const candidateGdata = versionMetadata.get(`${ehviewerIdentity.gid}:${ehviewerIdentity.token}`)
+          const sourceRecoveryAction = buildSourceRecoveryAction({
+            bookId: wrapped.raw.id,
+            filepath: wrapped.raw.filepath,
+            expectedSize: wrapped.actual.size,
+            expectedMtimeMs: wrapped.actual.mtimeMs,
+            currentUrl,
+            candidateIdentity: ehviewerIdentity,
+            candidateAvailability: ehviewerAvailability,
+            candidateGdata
+          })
+          sourceRecoverableAnomaly.evidence = {
+            ...(sourceRecoverableAnomaly.evidence || {}),
+            ehviewerAvailability,
+            candidateGdataStatus: candidateGdata?.status || 'unchecked'
+          }
+          sourceRecoverableAnomaly.recommendedAction = sourceRecoveryAction
+            ? 'recover-source-after-approval'
+            : 'review-source-availability'
+          sourceRecoverableAnomaly.action = sourceRecoveryAction
+          continue
+        }
         const sameIdentity = currentIdentity && currentIdentity.gid === ehviewerIdentity.gid && currentIdentity.token === ehviewerIdentity.token
         if (sameIdentity) continue
         const currentGdata = currentIdentity ? versionMetadata.get(`${currentIdentity.gid}:${currentIdentity.token}`) : null

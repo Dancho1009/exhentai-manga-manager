@@ -29,14 +29,16 @@ const createDatabases = async (root, books) => {
       pageCount INTEGER, bundleSize INTEGER, mtime TEXT, coverHash TEXT, status TEXT,
       date INTEGER, rating REAL, tags TEXT, title_jpn TEXT, filecount INTEGER,
       posted INTEGER, filesize INTEGER, category TEXT, url TEXT, mark INTEGER,
-      hiddenBook INTEGER, readCount INTEGER, exist INTEGER
+      hiddenBook INTEGER, readCount INTEGER, exist INTEGER,
+      createdAt DATETIME, updatedAt DATETIME
     )
   `)
   await metadata.exec(`
     CREATE TABLE Metadata (
       hash TEXT PRIMARY KEY, title TEXT, status TEXT, rating REAL, tags TEXT,
       title_jpn TEXT, filecount INTEGER, posted INTEGER, filesize INTEGER,
-      category TEXT, url TEXT, mark INTEGER
+      category TEXT, url TEXT, mark INTEGER,
+      createdAt DATETIME, updatedAt DATETIME
     )
   `)
   for (const book of books) {
@@ -490,6 +492,7 @@ test('review validation keeps anomaly and duplicate approval models independent'
     anomalies: [
       { id: 'repair', action: { type: 'repair-url', currentUrl: 'https://exhentai.org/g/1/aaaaaaaaaa/', newUrl: 'https://e-hentai.org/g/1/aaaaaaaaaa/' } },
       { id: 'version', action: { type: 'repair-url', repairKind: 'gallery-version-upgrade', currentUrl: 'https://exhentai.org/g/2/bbbbbbbbbb/', newUrl: 'https://exhentai.org/g/3/cccccccccc/' } },
+      { id: 'source', action: { type: 'repair-url', repairKind: 'source-recovery', currentUrl: null, newUrl: 'https://exhentai.org/g/4/dddddddddd/' } },
       { id: 'ehviewer', action: { type: 'repair-ehviewer', repairKind: 'ehviewer-rebuild-from-current-metadata' } },
       { id: 'unknown', action: { type: 'delete-file' } }
     ]
@@ -516,11 +519,12 @@ test('review validation keeps anomaly and duplicate approval models independent'
   const preview = buildExecutionPreview({
     taskType: 'anomaly',
     report: anomalyReport,
-    review: { reportId: anomalyReport.reportId, actionIds: ['repair', 'version', 'ehviewer'] },
+    review: { reportId: anomalyReport.reportId, actionIds: ['repair', 'version', 'source', 'ehviewer'] },
     library: path.join(os.tmpdir(), 'Library')
   })
   assert.equal(preview.sameIdentityCount, 1)
   assert.equal(preview.versionUpgradeCount, 1)
+  assert.equal(preview.sourceRecoveryCount, 1)
   assert.equal(preview.ehviewerRebuildCount, 1)
   assert.equal(preview.identityReplacementCount, 0)
 })
@@ -636,6 +640,100 @@ test('anomaly worker checks individual books and never emits duplicate groups', 
   assert.ok(phases.includes('finalizing-report'))
   assert.ok(currentItems.some(item => item.id === 'book-1' && item.filepath === archive))
   assert.deepEqual(await fs.promises.readFile(archive), before)
+})
+
+test('online audit promotes .ehviewer source recovery into the original approvable anomaly and execution restores metadata', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-source-recovery-'))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const archive = path.join(library, '4049796-source-recovery.zip')
+  await fs.promises.writeFile(archive, makeArchiveBuffer({ gid: '4049796', token: 'bc7704fe8b' }))
+  const stat = await fs.promises.stat(archive)
+  const databases = await createDatabases(root, [{
+    id: 'source-book', title: 'Local title', hash: 'source-hash', coverHash: 'source-cover', filepath: archive,
+    pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), filecount: 1,
+    status: 'tagged', tags: { artist: ['local'] }, url: ''
+  }])
+  const availabilityCache = await EhentaiAvailabilityCache.open(auditStorePath)
+  await availabilityCache.set({
+    site: 'ehentai', gid: '4049796', token: 'bc7704fe8b', status: 'available', httpStatus: 200,
+    finalUrl: 'https://e-hentai.org/g/4049796/bc7704fe8b/', checkedAt: Date.now(), evidence: 'test-fixture'
+  })
+  await availabilityCache.set({
+    site: 'exhentai', gid: '4049796', token: 'bc7704fe8b', status: 'generic-unavailable', httpStatus: 404,
+    finalUrl: 'https://exhentai.org/g/4049796/bc7704fe8b/', checkedAt: Date.now(), evidence: 'test-fixture'
+  })
+  await availabilityCache.setGdata({
+    gid: '4049796', token: 'bc7704fe8b', status: 'available', checkedAt: Date.now(),
+    metadata: { gid: 4049796, token: 'bc7704fe8b', title: 'Recovered online title', tags: [], filecount: 24 }
+  })
+  await availabilityCache.close()
+
+  let Manga
+  let Metadata
+  t.after(async () => {
+    await Promise.allSettled([Manga?.sequelize.close(), Metadata?.sequelize.close()].filter(Boolean))
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
+  const report = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js',
+    root,
+    jobId: 'source-recovery-job',
+    options: {
+      library,
+      auditStorePath,
+      onlinePolicy: 'conflicts',
+      forceLocal: false,
+      forceOnline: false,
+      sevenZipPath: null,
+      ehentaiSetting: {},
+      ...databases
+    }
+  })
+  const recovery = report.anomalies.find(item => item.type === 'ehviewer-source-recoverable' && item.bookId === 'source-book')
+  assert.ok(recovery)
+  assert.equal(recovery.action?.type, 'repair-url')
+  assert.equal(recovery.action?.repairKind, 'source-recovery')
+  assert.equal(recovery.action?.currentUrl, null)
+  assert.equal(recovery.action?.newUrl, 'https://e-hentai.org/g/4049796/bc7704fe8b/')
+  assert.equal(recovery.evidence?.candidateGdataStatus, 'available')
+  assert.equal(report.anomalies.some(item => item.type === 'ehviewer-url-conflict-online' && item.bookId === 'source-book'), false)
+
+  Manga = prepareMangaModel(databases.databasePath)
+  Metadata = prepareMetadataModel(databases.metadataPath)
+  const executionDir = path.join(auditStorePath, 'executions', 'source-recovery-execution')
+  await fs.promises.mkdir(executionDir, { recursive: true })
+  const result = await executeApprovedActions({
+    taskType: 'anomaly',
+    anomalyReport: report,
+    anomalyReview: { reportId: report.reportId, actionIds: [recovery.id] },
+    executionId: 'source-recovery-execution',
+    executionDir,
+    auditStorePath,
+    Manga,
+    Metadata,
+    databasePath: databases.databasePath,
+    metadataPath: databases.metadataPath,
+    collectionList: [],
+    rendererState: {},
+    verifyRepairAction: async action => {
+      assert.equal(action.currentUrl, null)
+      return {
+        valid: true,
+        newUrl: action.newUrl,
+        metadata: { title: 'Recovered online title', filecount: 24, status: 'tagged' }
+      }
+    }
+  })
+  const repaired = await Manga.findByPk('source-book')
+  const shared = await Metadata.findByPk('source-hash')
+  assert.equal(result.repairedCount, 1)
+  assert.equal(repaired.url, 'https://e-hentai.org/g/4049796/bc7704fe8b/')
+  assert.equal(repaired.title, 'Recovered online title')
+  assert.equal(repaired.filecount, 24)
+  assert.equal(shared.url, repaired.url)
+  assert.equal(shared.title, repaired.title)
 })
 
 test('workspace manager releases the library lock after a worker completes', async t => {

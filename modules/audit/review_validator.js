@@ -102,8 +102,9 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
     const anomalies = (report.anomalies || []).filter(item => item.action && selected.has(normalizeId(item.id)))
     const sameIdentityCount = anomalies.filter(item => getRepairKind(item) === 'same-identity-domain-switch').length
     const versionUpgradeCount = anomalies.filter(item => getRepairKind(item) === 'gallery-version-upgrade').length
+    const sourceRecoveryCount = anomalies.filter(item => getRepairKind(item) === 'source-recovery').length
     const ehviewerRebuildCount = anomalies.filter(item => item.action?.type === 'repair-ehviewer').length
-    const identityReplacementCount = anomalies.length - sameIdentityCount - versionUpgradeCount - ehviewerRebuildCount
+    const identityReplacementCount = anomalies.length - sameIdentityCount - versionUpgradeCount - sourceRecoveryCount - ehviewerRebuildCount
     if (anomalies.length === 0) throw new Error('NO_APPROVED_ACTIONS')
     return {
       valid: true,
@@ -112,6 +113,7 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
       selectedCount: anomalies.length,
       sameIdentityCount,
       versionUpgradeCount,
+      sourceRecoveryCount,
       ehviewerRebuildCount,
       identityReplacementCount
     }
