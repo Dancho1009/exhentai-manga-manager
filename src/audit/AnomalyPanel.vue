@@ -186,6 +186,7 @@ import { useI18n } from 'vue-i18n'
 import { ElIcon, ElMessage, ElTag } from 'element-plus'
 import { Close, Connection, DocumentChecked, FolderOpened, Picture, Search, Select, TopRight, VideoPlay } from '@element-plus/icons-vue'
 import { buildEhviewerRecoveryPreview } from './ehviewerRecoveryPreview.mjs'
+import { collectOnlineSourceBookIds } from './anomalyOnlineSelection.mjs'
 
 const props = defineProps({
   report: { type: Object, default: null },
@@ -235,9 +236,7 @@ const selectedFilteredCount = computed(() => filteredAnomalies.value.reduce((cou
 const allFilteredSelected = computed(() => filteredActionableIds.value.length > 0 && filteredActionableIds.value.every(id => selectedIdSet.value.has(id)))
 const someFilteredSelected = computed(() => !allFilteredSelected.value && filteredActionableIds.value.some(id => selectedIdSet.value.has(id)))
 const filterScopeLabel = computed(() => typeFilter.value ? auditTypeLabel(typeFilter.value) : search.value || severityFilter.value || actionableOnly.value ? t('audit.currentFilter') : t('audit.allAnomalies'))
-const pendingOnlineBookIds = computed(() => [...new Set((props.report?.anomalies || [])
-  .filter(item => item.bookId && !item.action && ['ehviewer-invalid', 'ehviewer-url-conflict', 'ehviewer-source-recoverable'].includes(item.type))
-  .map(item => String(item.bookId)))])
+const pendingOnlineBookIds = computed(() => collectOnlineSourceBookIds(props.report?.anomalies))
 const filteredBookIds = computed(() => [...new Set(filteredAnomalies.value.map(item => item.bookId).filter(Boolean).map(String))])
 const currentEvidenceUrl = computed(() => selectedAnomaly.value?.evidence?.currentUrl || '')
 const ehviewerEvidenceUrl = computed(() => {
