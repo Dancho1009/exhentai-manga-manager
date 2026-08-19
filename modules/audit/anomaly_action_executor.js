@@ -16,6 +16,12 @@ const selectModelFields = (model, value) => Object.fromEntries(
     .map(key => [key, value[key]])
 )
 
+const selectLocalScanFields = value => Object.fromEntries(
+  ['pageCount', 'bundleSize', 'mtime']
+    .filter(key => value?.[key] !== undefined)
+    .map(key => [key, value[key]])
+)
+
 // Keep approval validation consistent with the audit snapshot merge rule:
 // an existing Metadata row is authoritative even when its URL is empty.
 const normalizeApprovalUrl = value => {
@@ -49,22 +55,27 @@ const REPAIR_ERROR_MESSAGES = {
   EHVIEWER_RECOVERY_GDATA_UNAVAILABLE: '当前 Gallery 的 gdata 元数据验证失败，未重写 .ehviewer',
   EHVIEWER_RECOVERY_IDENTITY_CHANGED: '当前元数据 URL 已变化，原 .ehviewer 修复审批已失效',
   APPROVAL_STALE_TITLE: '当前元数据标题已变化，原 .ehviewer 修复审批已失效',
-  APPROVAL_STALE_URL: '当前元数据 URL 已变化，原审批已失效，请重新检查后再执行'
+  APPROVAL_STALE_URL: '当前元数据 URL 已变化，原审批已失效，请重新检查后再执行',
+  LOCAL_SCAN_PAGE_COUNT_CHANGED: '文件页数已经变化，原本地扫描修复审批已失效',
+  LOCAL_SCAN_REPAIR_INVALID: '本地扫描修复数据无效，未修改数据库'
+}
+
+const formatRepairDetail = detail => {
+  if (!detail) return ''
+  if (detail.gdataStatus) return `；gdata=${detail.gdataStatus}${detail.gdataError ? ` (${detail.gdataError})` : ''}`
+  if (detail.currentSiteStatus) return `；${detail.currentSite}=${detail.currentSiteStatus}，${detail.targetSite}=${detail.targetSiteStatus}`
+  if (detail.versionStatus) return `；version=${detail.versionStatus}`
+  if (detail.currentGdataStatus) return `；current-gdata=${detail.currentGdataStatus}，candidate-gdata=${detail.candidateGdataStatus}`
+  if (detail.actualPageCount !== undefined) return `；page-count=${detail.actualPageCount}，expected=${detail.expectedPageCount}`
+  if (detail.inspectionError) return `；inspection=${detail.inspectionError}`
+  return ''
 }
 
 const createRepairValidationError = ({ anomaly, action, prepared, index, total }) => {
   const code = prepared?.error || 'REPAIR_AVAILABILITY_CHANGED'
   const filename = path.basename(action.filepath || '') || String(action.bookId || anomaly.id)
   const detail = prepared?.detail || null
-  const detailText = detail?.gdataStatus
-    ? `；gdata=${detail.gdataStatus}${detail.gdataError ? ` (${detail.gdataError})` : ''}`
-    : detail?.currentSiteStatus
-      ? `；${detail.currentSite}=${detail.currentSiteStatus}，${detail.targetSite}=${detail.targetSiteStatus}`
-      : detail?.versionStatus
-        ? `；version=${detail.versionStatus}`
-        : detail?.currentGdataStatus
-          ? `；current-gdata=${detail.currentGdataStatus}，candidate-gdata=${detail.candidateGdataStatus}`
-      : ''
+  const detailText = formatRepairDetail(detail)
   const error = new Error(`${code}: ${filename} (${index}/${total})${detailText}`)
   error.code = code
   error.auditContext = {
@@ -127,9 +138,11 @@ const executeApprovedAnomalies = async ({
       const book = await Manga.findByPk(action.bookId, { raw: true })
       if (!book) throw new Error(`BOOK_MISSING: ${action.bookId}`)
       const metadata = book.hash ? await Metadata.findByPk(book.hash, { raw: true }) : null
-      const effectiveUrl = normalizeApprovalUrl(metadata ? metadata.url : book.url)
-      const approvedUrl = normalizeApprovalUrl(action.currentUrl)
-      if (approvedUrl !== effectiveUrl) throw createStaleUrlError({ action, book, metadata, effectiveUrl })
+      if (action.type !== 'repair-local-scan') {
+        const effectiveUrl = normalizeApprovalUrl(metadata ? metadata.url : book.url)
+        const approvedUrl = normalizeApprovalUrl(action.currentUrl)
+        if (approvedUrl !== effectiveUrl) throw createStaleUrlError({ action, book, metadata, effectiveUrl })
+      }
       if (action.type === 'repair-ehviewer') {
         const effectiveTitle = sanitizeEhviewerTitle(metadata
           ? metadata.title_jpn || metadata.title || book.title_jpn || book.title
@@ -183,6 +196,10 @@ const executeApprovedAnomalies = async ({
           const fileSnapshot = await repair.fileRepair.snapshot()
           nextValues = { bundleSize: fileSnapshot.bundleSize, mtime: fileSnapshot.mtime }
           await book.update(nextValues, { transaction: mangaTransaction })
+        } else if (repair.action.type === 'repair-local-scan') {
+          nextValues = selectLocalScanFields(repair.prepared.localUpdates || repair.action.updates || {})
+          if (Object.keys(nextValues).length === 0) throw new Error('LOCAL_SCAN_REPAIR_INVALID')
+          await book.update(nextValues, { transaction: mangaTransaction })
         } else {
           nextValues = {
             ...(repair.prepared.metadata || {}),
@@ -209,7 +226,9 @@ const executeApprovedAnomalies = async ({
                 token: repair.action.identity?.token,
                 backupPath: repair.fileRepair.backupPath
               }
-            : { oldUrl: repair.action.currentUrl, newUrl: nextValues.url })
+            : repair.action.type === 'repair-local-scan'
+              ? { updates: nextValues }
+              : { oldUrl: repair.action.currentUrl, newUrl: nextValues.url })
         })
       }
 
@@ -249,7 +268,7 @@ const executeApprovedAnomalies = async ({
     }
     await invalidateAuditCacheEntries(
       auditStorePath,
-      preparedRepairs.filter(item => item.action.type === 'repair-ehviewer').map(item => item.action.filepath)
+      preparedRepairs.filter(item => ['repair-ehviewer', 'repair-local-scan'].includes(item.action.type)).map(item => item.action.filepath)
     ).catch(async error => {
       await writeActionLog({ status: 'cache-invalidation-pending', error: error.stack || error.message }).catch(() => {})
     })

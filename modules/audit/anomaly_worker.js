@@ -1,7 +1,7 @@
 const path = require('path')
 const { workerData } = require('worker_threads')
 const { buildSnapshot } = require('./library_snapshot.js')
-const { analyzeEntityAnomalies, makeAnomaly } = require('./anomaly_analyzer.js')
+const { analyzeEntityAnomalies, makeAnomaly, buildLocalScanAction } = require('./anomaly_analyzer.js')
 const { AuditCache } = require('./cache.js')
 const { EhentaiAvailabilityCache } = require('../ehentai_availability_cache.js')
 const {
@@ -121,13 +121,29 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         }))
       }
       if (Number(wrapped.raw.pageCount || 0) !== Number(health.pageCount || 0)) {
-        anomalies.push(makeAnomaly('scan-page-count-stale', 'medium', {
+        const pageCountAnomaly = makeAnomaly('scan-page-count-stale', 'medium', {
           bookId: wrapped.raw.id,
           filepath: wrapped.raw.filepath,
           reason: '数据库本地页数与实际图片数量不一致',
           evidence: { databasePages: wrapped.raw.pageCount, actualPages: health.pageCount },
           recommendedAction: 'targeted-rescan'
-        }))
+        })
+        const canRepairPageCount = Number(health.pageCount) > 0
+        const existingLocalScan = canRepairPageCount
+          ? anomalies.find(item => String(item.bookId) === String(wrapped.raw.id) && item.action?.repairKind === 'local-scan-sync')
+          : null
+        if (existingLocalScan) {
+          existingLocalScan.action.expectedPageCount = Number(health.pageCount)
+          existingLocalScan.action.updates.pageCount = Number(health.pageCount)
+          pageCountAnomaly.evidence.repairActionId = existingLocalScan.id
+        } else if (canRepairPageCount) {
+          pageCountAnomaly.action = buildLocalScanAction({
+            raw: wrapped.raw,
+            actual: wrapped.actual,
+            pageCount: health.pageCount
+          })
+        }
+        anomalies.push(pageCountAnomaly)
       }
       const ehviewer = health.ehviewer
       if (['ambiguous', 'invalid'].includes(ehviewer?.status)) {

@@ -45,6 +45,7 @@ const { AuditWorkspaceManager } = require('./modules/audit/job_manager.js')
 const { executeApprovedActions } = require('./modules/audit/action_executor.js')
 const { buildExecutionPreview } = require('./modules/audit/review_validator.js')
 const { isConclusiveSiteUnavailable, getGalleryVersionRelation } = require('./modules/audit/online_decision.js')
+const { inspectBookHealth } = require('./modules/audit/archive_inspector.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
 const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
 const { getEhviewerDataFromZip } = require('./fileLoader/zip.js')
@@ -1924,7 +1925,44 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
       setProgress: execution.setProgress,
       appendLog: execution.appendLog,
       isCancelled: execution.isCancelled,
-      verifyRepairAction: async action => await withEhentaiAvailabilityCache(async cache => {
+      verifyRepairAction: async action => {
+        if (action.type === 'repair-local-scan') {
+          const expectedPageCount = Number(action.expectedPageCount)
+          const updates = action.updates && typeof action.updates === 'object' ? action.updates : null
+          if (!updates || !Number.isFinite(Number(updates.bundleSize)) || !updates.mtime ||
+            (action.expectedPageCount !== null && action.expectedPageCount !== undefined && !Number.isFinite(expectedPageCount))) {
+            return { valid: false, error: 'LOCAL_SCAN_REPAIR_INVALID' }
+          }
+          try {
+            const health = await inspectBookHealth(
+              { filepath: action.filepath, type: action.bookType },
+              { sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe') }
+            )
+            if (action.expectedPageCount !== null && action.expectedPageCount !== undefined && health.pageCount !== expectedPageCount) {
+              return {
+                valid: false,
+                error: 'LOCAL_SCAN_PAGE_COUNT_CHANGED',
+                detail: { expectedPageCount, actualPageCount: health.pageCount }
+              }
+            }
+            return {
+              valid: true,
+              localUpdates: {
+                ...updates,
+                ...(action.expectedPageCount !== null && action.expectedPageCount !== undefined
+                  ? { pageCount: health.pageCount }
+                  : {})
+              }
+            }
+          } catch (error) {
+            return {
+              valid: false,
+              error: 'LOCAL_SCAN_REPAIR_INVALID',
+              detail: { inspectionError: error.message }
+            }
+          }
+        }
+        return await withEhentaiAvailabilityCache(async cache => {
         if (action.type === 'repair-ehviewer') {
           const currentIdentity = extractEhentaiIdentity(action.currentUrl)
           if (!currentIdentity || currentIdentity.gid !== String(action.identity?.gid) || currentIdentity.token !== String(action.identity?.token || '').toLowerCase()) {
@@ -2065,7 +2103,8 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
           newUrl: metadataResult.preferredUrl,
           metadata: toEhentaiManagerMetadata(metadataResult.gdata.metadata)
         }
-      })
+        })
+      }
     })
   }, { sourceTaskType: taskType, reportId })
   collectionList = result.collectionList

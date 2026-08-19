@@ -604,7 +604,12 @@ test('lightweight ehviewer inspection marks multiple candidates as ambiguous', a
 
 test('anomaly worker checks individual books and never emits duplicate groups', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-anomaly-worker-'))
-  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  let Manga
+  let Metadata
+  t.after(async () => {
+    await Promise.allSettled([Manga?.sequelize.close(), Metadata?.sequelize.close()].filter(Boolean))
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
   const library = path.join(root, 'Library')
   const auditStorePath = path.join(root, 'audit')
   await fs.promises.mkdir(library, { recursive: true })
@@ -635,11 +640,46 @@ test('anomaly worker checks individual books and never emits duplicate groups', 
   assert.ok(report.anomalies.some(item => item.type === 'scan-stale-size'))
   assert.ok(report.anomalies.some(item => item.type === 'scan-page-count-stale'))
   assert.ok(report.anomalies.some(item => item.type === 'library-file-untracked'))
+  const localRepairs = report.anomalies.filter(item => item.action?.type === 'repair-local-scan')
+  assert.equal(localRepairs.length, 1)
+  assert.equal(localRepairs[0].action.repairKind, 'local-scan-sync')
+  assert.equal(localRepairs[0].action.expectedPageCount, 1)
+  assert.equal(localRepairs[0].action.updates.pageCount, 1)
+  assert.equal(localRepairs[0].action.updates.bundleSize, stat.size)
+  const pageCountAnomaly = report.anomalies.find(item => item.type === 'scan-page-count-stale')
+  assert.equal(pageCountAnomaly.action, null)
+  assert.equal(pageCountAnomaly.evidence.repairActionId, localRepairs[0].id)
+  assert.equal(report.summary.actionableAnomalies, 1)
   assert.equal(report.summary.anomalyBooks, 1)
   assert.equal('groups' in report, false)
   assert.ok(phases.includes('finalizing-report'))
   assert.ok(currentItems.some(item => item.id === 'book-1' && item.filepath === archive))
   assert.deepEqual(await fs.promises.readFile(archive), before)
+
+  Manga = prepareMangaModel(databases.databasePath)
+  Metadata = prepareMetadataModel(databases.metadataPath)
+  const executionDir = path.join(auditStorePath, 'executions', 'local-scan-execution')
+  await fs.promises.mkdir(executionDir, { recursive: true })
+  const result = await executeApprovedActions({
+    taskType: 'anomaly',
+    anomalyReport: report,
+    anomalyReview: { reportId: report.reportId, actionIds: [localRepairs[0].id] },
+    executionId: 'local-scan-execution',
+    executionDir,
+    auditStorePath,
+    Manga,
+    Metadata,
+    databasePath: databases.databasePath,
+    metadataPath: databases.metadataPath,
+    collectionList: [],
+    rendererState: {},
+    verifyRepairAction: async action => ({ valid: true, localUpdates: action.updates })
+  })
+  const repaired = await Manga.findByPk('book-1', { raw: true })
+  assert.equal(result.repairedCount, 1)
+  assert.equal(repaired.pageCount, 1)
+  assert.equal(repaired.bundleSize, stat.size)
+  assert.equal(repaired.url, 'https://exhentai.org/g/123456/abcdef1234/')
 })
 
 test('online audit promotes .ehviewer source recovery into the original approvable anomaly and execution restores metadata', async t => {

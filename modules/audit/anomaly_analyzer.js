@@ -19,6 +19,26 @@ const makeAnomaly = (type, severity, data = {}) => ({
   action: data.action || null
 })
 
+const buildLocalScanAction = ({ raw, actual, pageCount } = {}) => {
+  if (!raw?.id || !raw.filepath || !actual) return null
+  const updates = {
+    bundleSize: actual.size,
+    mtime: actual.mtime
+  }
+  if (Number.isFinite(Number(pageCount))) updates.pageCount = Number(pageCount)
+  return {
+    type: 'repair-local-scan',
+    repairKind: 'local-scan-sync',
+    bookId: raw.id,
+    filepath: raw.filepath,
+    bookType: raw.type,
+    expectedSize: actual.size,
+    expectedMtimeMs: actual.mtimeMs,
+    expectedPageCount: Number.isFinite(Number(pageCount)) ? Number(pageCount) : null,
+    updates
+  }
+}
+
 const analyzeEntityAnomalies = snapshot => {
   const anomalies = []
   const actualByPath = new Map(snapshot.actualItems.map(item => [normalizePath(item.filepath), item]))
@@ -34,17 +54,25 @@ const analyzeEntityAnomalies = snapshot => {
       }))
       continue
     }
+    let localScanAction = null
     if (Number(raw.bundleSize) !== Number(actual.size)) {
+      localScanAction = buildLocalScanAction({ raw, actual })
       anomalies.push(makeAnomaly('scan-stale-size', 'high', {
         bookId: raw.id, filepath: raw.filepath, reason: '文件实际大小与数据库快照不一致',
-        evidence: { databaseSize: raw.bundleSize, actualSize: actual.size }, recommendedAction: 'targeted-rescan'
+        evidence: { databaseSize: raw.bundleSize, actualSize: actual.size },
+        recommendedAction: 'targeted-rescan', action: localScanAction
       }))
     }
     const storedMtime = new Date(raw.mtime || 0).getTime()
     if (Number.isFinite(storedMtime) && storedMtime > 0 && Math.abs(storedMtime - actual.mtimeMs) > 2000) {
+      if (!localScanAction) localScanAction = buildLocalScanAction({ raw, actual })
       anomalies.push(makeAnomaly('scan-stale-mtime', 'medium', {
         bookId: raw.id, filepath: raw.filepath, reason: '文件修改时间与数据库快照不一致',
-        evidence: { databaseMtime: raw.mtime, actualMtime: actual.mtime }, recommendedAction: 'targeted-rescan'
+        evidence: { databaseMtime: raw.mtime, actualMtime: actual.mtime },
+        recommendedAction: 'targeted-rescan',
+        action: localScanAction && !anomalies.some(item => item.bookId === raw.id && item.action?.repairKind === 'local-scan-sync')
+          ? localScanAction
+          : null
       }))
     }
     if (raw.coverPath && !fs.existsSync(raw.coverPath)) {
@@ -98,4 +126,4 @@ const analyzeEntityAnomalies = snapshot => {
   return anomalies
 }
 
-module.exports = { makeAnomaly, analyzeEntityAnomalies }
+module.exports = { makeAnomaly, buildLocalScanAction, analyzeEntityAnomalies }
