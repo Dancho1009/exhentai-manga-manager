@@ -9,6 +9,7 @@ const {
 } = require('./execution_common.js')
 const { sanitizeEhviewerTitle, prepareEhviewerRepair } = require('./ehviewer_repair.js')
 const { invalidateAuditCacheEntries } = require('./cache.js')
+const { mergeEffectiveBook } = require('../book_detail.js')
 
 const selectModelFields = (model, value) => Object.fromEntries(
   Object.keys(model.rawAttributes || {})
@@ -137,16 +138,20 @@ const executeApprovedAnomalies = async ({
       await ensureExpectedFile({ filepath: action.filepath, size: action.expectedSize, mtimeMs: action.expectedMtimeMs, bookType: action.bookType })
       const book = await Manga.findByPk(action.bookId, { raw: true })
       if (!book) throw new Error(`BOOK_MISSING: ${action.bookId}`)
-      const metadata = book.hash ? await Metadata.findByPk(book.hash, { raw: true }) : null
+      const [metadata, hashPeers] = book.hash
+        ? await Promise.all([
+            Metadata.findByPk(book.hash, { raw: true }),
+            Manga.findAll({ where: { hash: book.hash }, raw: true })
+          ])
+        : [null, []]
+      const effectiveBook = mergeEffectiveBook({ manga: book, metadata, hashPeers })
       if (action.type !== 'repair-local-scan') {
-        const effectiveUrl = normalizeApprovalUrl(metadata ? metadata.url : book.url)
+        const effectiveUrl = normalizeApprovalUrl(effectiveBook.url)
         const approvedUrl = normalizeApprovalUrl(action.currentUrl)
         if (approvedUrl !== effectiveUrl) throw createStaleUrlError({ action, book, metadata, effectiveUrl })
       }
       if (action.type === 'repair-ehviewer') {
-        const effectiveTitle = sanitizeEhviewerTitle(metadata
-          ? metadata.title_jpn || metadata.title || book.title_jpn || book.title
-          : book.title_jpn || book.title)
+        const effectiveTitle = sanitizeEhviewerTitle(effectiveBook.title_jpn || effectiveBook.title)
         if (effectiveTitle !== action.expectedTitle) throw new Error(`APPROVAL_STALE_TITLE: ${action.bookId}`)
       }
       const prepared = await verifyRepairAction?.(action)
@@ -206,10 +211,7 @@ const executeApprovedAnomalies = async ({
             url: repair.prepared.newUrl || repair.action.newUrl
           }
           await book.update(nextValues, { transaction: mangaTransaction })
-          const hashCount = book.hash ? await Manga.count({ where: { hash: book.hash }, transaction: mangaTransaction }) : 0
-          if (book.hash && hashCount === 1) {
-            await Metadata.upsert(selectModelFields(Metadata, book.toJSON()), { transaction: metadataTransaction })
-          }
+          if (book.hash) await Metadata.upsert(selectModelFields(Metadata, book.toJSON()), { transaction: metadataTransaction })
         }
         completed += 1
         await setProgress({ phase: 'writing-metadata', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })

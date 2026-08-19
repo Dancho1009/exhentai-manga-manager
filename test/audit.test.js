@@ -786,6 +786,123 @@ test('online audit promotes .ehviewer source recovery into the original approvab
   assert.equal(shared.title, repaired.title)
 })
 
+test('source recovery repairs one book independently when another book shares its hash', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-shared-source-recovery-'))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const archiveA = path.join(library, '4049796-source-a.zip')
+  const archiveB = path.join(library, '4049796-source-b.zip')
+  const archiveBuffer = makeArchiveBuffer({ gid: '4049796', token: 'bc7704fe8b' })
+  await Promise.all([
+    fs.promises.writeFile(archiveA, archiveBuffer),
+    fs.promises.writeFile(archiveB, archiveBuffer)
+  ])
+  const [statA, statB] = await Promise.all([fs.promises.stat(archiveA), fs.promises.stat(archiveB)])
+  const databases = await createDatabases(root, [
+    {
+      id: 'source-a', title: 'Local title', hash: 'shared-source-hash', coverHash: 'source-cover', filepath: archiveA,
+      pageCount: 1, bundleSize: statA.size, mtime: statA.mtime.toISOString(), filecount: 1,
+      status: 'tagged', tags: { artist: ['local'] }, url: ''
+    },
+    {
+      id: 'source-b', title: 'Local title', hash: 'shared-source-hash', coverHash: 'source-cover', filepath: archiveB,
+      pageCount: 1, bundleSize: statB.size, mtime: statB.mtime.toISOString(), filecount: 1,
+      status: 'tagged', tags: { artist: ['local'] }, url: ''
+    }
+  ])
+  const availabilityCache = await EhentaiAvailabilityCache.open(auditStorePath)
+  await availabilityCache.set({
+    site: 'ehentai', gid: '4049796', token: 'bc7704fe8b', status: 'available', httpStatus: 200,
+    finalUrl: 'https://e-hentai.org/g/4049796/bc7704fe8b/', checkedAt: Date.now(), evidence: 'test-fixture'
+  })
+  await availabilityCache.set({
+    site: 'exhentai', gid: '4049796', token: 'bc7704fe8b', status: 'generic-unavailable', httpStatus: 404,
+    finalUrl: 'https://exhentai.org/g/4049796/bc7704fe8b/', checkedAt: Date.now(), evidence: 'test-fixture'
+  })
+  await availabilityCache.setGdata({
+    gid: '4049796', token: 'bc7704fe8b', status: 'available', checkedAt: Date.now(),
+    metadata: { gid: 4049796, token: 'bc7704fe8b', title: 'Recovered online title', tags: [], filecount: 24 }
+  })
+  await availabilityCache.close()
+
+  let Manga
+  let Metadata
+  t.after(async () => {
+    await Promise.allSettled([Manga?.sequelize.close(), Metadata?.sequelize.close()].filter(Boolean))
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
+  const report = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js',
+    root,
+    jobId: 'shared-source-recovery-job',
+    options: {
+      library,
+      auditStorePath,
+      onlinePolicy: 'conflicts',
+      forceLocal: false,
+      forceOnline: false,
+      sevenZipPath: null,
+      ehentaiSetting: {},
+      ...databases
+    }
+  })
+  const recoveries = report.anomalies.filter(item => item.type === 'ehviewer-source-recoverable')
+  assert.equal(recoveries.length, 2)
+  assert.ok(recoveries.every(item => item.action?.repairKind === 'source-recovery'))
+
+  Manga = prepareMangaModel(databases.databasePath)
+  Metadata = prepareMetadataModel(databases.metadataPath)
+  const verifySharedRepair = async action => ({
+    valid: true,
+    newUrl: action.newUrl,
+    metadata: { title: 'Recovered online title', filecount: 24, status: 'tagged' }
+  })
+  const executionDir = path.join(auditStorePath, 'executions', 'shared-source-recovery-execution')
+  await fs.promises.mkdir(executionDir, { recursive: true })
+  const result = await executeApprovedActions({
+    taskType: 'anomaly',
+    anomalyReport: report,
+    anomalyReview: { reportId: report.reportId, actionIds: [recoveries[0].id] },
+    executionId: 'shared-source-recovery-execution',
+    executionDir,
+    auditStorePath,
+    Manga,
+    Metadata,
+    databasePath: databases.databasePath,
+    metadataPath: databases.metadataPath,
+    collectionList: [],
+    rendererState: {},
+    verifyRepairAction: verifySharedRepair
+  })
+  const repairedBooks = await Manga.findAll({ where: { hash: 'shared-source-hash' }, raw: true })
+  const shared = await Metadata.findByPk('shared-source-hash', { raw: true })
+  assert.equal(result.repairedCount, 1)
+  assert.equal(repairedBooks.find(item => item.id === recoveries[0].bookId).url, 'https://e-hentai.org/g/4049796/bc7704fe8b/')
+  assert.equal(repairedBooks.find(item => item.id !== recoveries[0].bookId).url, '')
+  assert.equal(shared.url, 'https://e-hentai.org/g/4049796/bc7704fe8b/')
+  assert.equal(shared.title, 'Recovered online title')
+
+  const rescanned = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js',
+    root,
+    jobId: 'shared-source-recovery-rescan',
+    options: {
+      library,
+      auditStorePath,
+      onlinePolicy: 'none',
+      forceLocal: false,
+      forceOnline: false,
+      sevenZipPath: null,
+      ehentaiSetting: {},
+      ...databases
+    }
+  })
+  const remainingRecoveries = rescanned.anomalies.filter(item => item.type === 'ehviewer-source-recoverable')
+  assert.equal(remainingRecoveries.length, 1)
+  assert.notEqual(remainingRecoveries[0].bookId, recoveries[0].bookId)
+})
+
 test('online audit offers to rebuild a stale unavailable .ehviewer from the current available URL', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-ehviewer-sync-'))
   const library = path.join(root, 'Library')
