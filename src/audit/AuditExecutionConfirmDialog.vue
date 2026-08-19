@@ -18,6 +18,7 @@
         <el-descriptions-item :label="$t('audit.versionUpgrades')">{{ preview.versionUpgradeCount || 0 }}</el-descriptions-item>
         <el-descriptions-item :label="$t('audit.sourceRecoveries')">{{ preview.sourceRecoveryCount || 0 }}</el-descriptions-item>
         <el-descriptions-item :label="$t('audit.ehviewerRebuilds')">{{ preview.ehviewerRebuildCount || 0 }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('audit.localScanRepairs')">{{ preview.localScanCount || 0 }}</el-descriptions-item>
         <el-descriptions-item :label="$t('audit.identityReplacements')">{{ preview.identityReplacementCount }}</el-descriptions-item>
       </template>
       <template v-else>

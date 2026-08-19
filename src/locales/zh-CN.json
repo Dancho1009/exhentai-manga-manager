@@ -458,6 +458,7 @@
     "versionUpgrades": "同一 Gallery 版本升级",
     "sourceRecoveries": "由 .ehviewer 恢复来源",
     "ehviewerRebuilds": "重建 .ehviewer",
+    "localScanRepairs": "校正本地扫描数据",
     "identityReplacements": "更换 Gallery 身份",
     "manualReviewGroups": "人工判断重复组",
     "confirmIdentityReplacement": "我已逐项核对 .ehviewer 与当前 URL，确认允许更换 Gallery 身份。",

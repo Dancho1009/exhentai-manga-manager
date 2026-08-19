@@ -458,6 +458,7 @@
     "versionUpgrades": "Same-gallery version upgrades",
     "sourceRecoveries": "Recover sources from .ehviewer",
     "ehviewerRebuilds": "Rebuild .ehviewer",
+    "localScanRepairs": "Correct local scan data",
     "identityReplacements": "Gallery identity replacements",
     "manualReviewGroups": "Manually judged duplicate groups",
     "confirmIdentityReplacement": "I reviewed each .ehviewer and current URL and approve replacing the Gallery identity.",

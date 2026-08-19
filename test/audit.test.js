@@ -494,6 +494,7 @@ test('review validation keeps anomaly and duplicate approval models independent'
       { id: 'version', action: { type: 'repair-url', repairKind: 'gallery-version-upgrade', currentUrl: 'https://exhentai.org/g/2/bbbbbbbbbb/', newUrl: 'https://exhentai.org/g/3/cccccccccc/' } },
       { id: 'source', action: { type: 'repair-url', repairKind: 'source-recovery', currentUrl: null, newUrl: 'https://exhentai.org/g/4/dddddddddd/' } },
       { id: 'ehviewer', action: { type: 'repair-ehviewer', repairKind: 'ehviewer-rebuild-from-current-metadata' } },
+      { id: 'local', action: { type: 'repair-local-scan', repairKind: 'local-scan-sync', updates: { pageCount: 1 } } },
       { id: 'unknown', action: { type: 'delete-file' } }
     ]
   }
@@ -519,13 +520,14 @@ test('review validation keeps anomaly and duplicate approval models independent'
   const preview = buildExecutionPreview({
     taskType: 'anomaly',
     report: anomalyReport,
-    review: { reportId: anomalyReport.reportId, actionIds: ['repair', 'version', 'source', 'ehviewer'] },
+    review: { reportId: anomalyReport.reportId, actionIds: ['repair', 'version', 'source', 'ehviewer', 'local'] },
     library: path.join(os.tmpdir(), 'Library')
   })
   assert.equal(preview.sameIdentityCount, 1)
   assert.equal(preview.versionUpgradeCount, 1)
   assert.equal(preview.sourceRecoveryCount, 1)
   assert.equal(preview.ehviewerRebuildCount, 1)
+  assert.equal(preview.localScanCount, 1)
   assert.equal(preview.identityReplacementCount, 0)
 })
 

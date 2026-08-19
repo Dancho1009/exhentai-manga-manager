@@ -1,7 +1,7 @@
 const path = require('path')
 const { extractGalleryIdentity, normalizePath } = require('./utils.js')
 
-const SUPPORTED_ANOMALY_ACTIONS = new Set(['repair-url', 'repair-ehviewer'])
+const SUPPORTED_ANOMALY_ACTIONS = new Set(['repair-url', 'repair-ehviewer', 'repair-local-scan'])
 
 const normalizeId = value => String(value ?? '').trim()
 
@@ -104,7 +104,8 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
     const versionUpgradeCount = anomalies.filter(item => getRepairKind(item) === 'gallery-version-upgrade').length
     const sourceRecoveryCount = anomalies.filter(item => getRepairKind(item) === 'source-recovery').length
     const ehviewerRebuildCount = anomalies.filter(item => item.action?.type === 'repair-ehviewer').length
-    const identityReplacementCount = anomalies.length - sameIdentityCount - versionUpgradeCount - sourceRecoveryCount - ehviewerRebuildCount
+    const localScanCount = anomalies.filter(item => item.action?.type === 'repair-local-scan').length
+    const identityReplacementCount = anomalies.length - sameIdentityCount - versionUpgradeCount - sourceRecoveryCount - ehviewerRebuildCount - localScanCount
     if (anomalies.length === 0) throw new Error('NO_APPROVED_ACTIONS')
     return {
       valid: true,
@@ -115,6 +116,7 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
       versionUpgradeCount,
       sourceRecoveryCount,
       ehviewerRebuildCount,
+      localScanCount,
       identityReplacementCount
     }
   }
