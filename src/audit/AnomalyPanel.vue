@@ -13,7 +13,7 @@
         <el-button type="primary" :icon="VideoPlay" :disabled="busy" @click="start">{{ $t('audit.startAnomaly') }}</el-button>
         <el-tooltip v-if="pendingOnlineBookIds.length" :content="$t('audit.verifyPendingConflictsInfo')">
           <el-button type="warning" plain :icon="Connection" :disabled="busy" @click="$emit('verify-conflicts', pendingOnlineBookIds)">
-            {{ $t('audit.verifyPendingConflicts', { count: pendingOnlineBookIds.length }) }}
+            {{ $t(report?.options?.onlinePolicy !== 'none' ? 'audit.reverifyEhviewerSources' : 'audit.verifyPendingConflicts', { count: pendingOnlineBookIds.length }) }}
           </el-button>
         </el-tooltip>
       </div>
@@ -54,7 +54,11 @@
         </div>
       </div>
       <div class="audit-table-region">
-        <el-table :data="pagedAnomalies" height="100%" row-key="id" @row-click="openAnomaly">
+        <el-empty v-if="showActionableEmpty" class="filtered-empty" :description="actionableEmptyDescription">
+          <el-button v-if="onlineDecisionSummary.total" type="primary" plain @click="showOnlineDecisionResults">{{ $t('audit.showOnlineDecisionResults') }}</el-button>
+          <el-button v-else type="primary" plain @click="actionableOnly = false">{{ $t('audit.showReportOnlyResults') }}</el-button>
+        </el-empty>
+        <el-table v-else :data="pagedAnomalies" height="100%" row-key="id" @row-click="openAnomaly">
           <el-table-column width="78" align="center">
             <template #header>
               <el-tooltip :content="$t('audit.selectAllFiltered')">
@@ -87,6 +91,7 @@
         </el-table>
       </div>
       <el-pagination
+        v-if="!showActionableEmpty"
         v-model:current-page="page"
         v-model:page-size="pageSize"
         class="table-pagination"
@@ -186,7 +191,7 @@ import { useI18n } from 'vue-i18n'
 import { ElIcon, ElMessage, ElTag } from 'element-plus'
 import { Close, Connection, DocumentChecked, FolderOpened, Picture, Search, Select, TopRight, VideoPlay } from '@element-plus/icons-vue'
 import { buildEhviewerRecoveryPreview } from './ehviewerRecoveryPreview.mjs'
-import { collectOnlineSourceBookIds } from './anomalyOnlineSelection.mjs'
+import { collectOnlineSourceBookIds, summarizeOnlineSourceDecisions } from './anomalyOnlineSelection.mjs'
 
 const props = defineProps({
   report: { type: Object, default: null },
@@ -237,6 +242,11 @@ const allFilteredSelected = computed(() => filteredActionableIds.value.length > 
 const someFilteredSelected = computed(() => !allFilteredSelected.value && filteredActionableIds.value.some(id => selectedIdSet.value.has(id)))
 const filterScopeLabel = computed(() => typeFilter.value ? auditTypeLabel(typeFilter.value) : search.value || severityFilter.value || actionableOnly.value ? t('audit.currentFilter') : t('audit.allAnomalies'))
 const pendingOnlineBookIds = computed(() => collectOnlineSourceBookIds(props.report?.anomalies))
+const onlineDecisionSummary = computed(() => summarizeOnlineSourceDecisions(props.report?.anomalies))
+const showActionableEmpty = computed(() => actionableOnly.value && filteredAnomalies.value.length === 0)
+const actionableEmptyDescription = computed(() => onlineDecisionSummary.value.total
+  ? t('audit.noActionableSourceConflicts', onlineDecisionSummary.value)
+  : t('audit.noActionableInFilter'))
 const filteredBookIds = computed(() => [...new Set(filteredAnomalies.value.map(item => item.bookId).filter(Boolean).map(String))])
 const currentEvidenceUrl = computed(() => selectedAnomaly.value?.evidence?.currentUrl || '')
 const ehviewerEvidenceUrl = computed(() => {
@@ -279,6 +289,11 @@ const toggleAnomaly = (id, value) => emit('update:actionIds', value ? [...new Se
 const toggleAllFiltered = value => {
   const ids = new Set(filteredActionableIds.value)
   emit('update:actionIds', value ? [...new Set([...props.actionIds, ...ids])] : props.actionIds.filter(id => !ids.has(id)))
+}
+const showOnlineDecisionResults = () => {
+  actionableOnly.value = false
+  if (anomalyTypes.value.includes('ehviewer-url-conflict-online')) typeFilter.value = 'ehviewer-url-conflict-online'
+  page.value = 1
 }
 const locate = filepath => filepath && window.auditApi.showFile(filepath)
 const openExternalUrl = url => url && window.auditApi.openUrl(url)
@@ -326,7 +341,7 @@ watch([() => filteredAnomalies.value.length, pageSize], ([total, size]) => { pag
 .filter-row { flex: 0 0 auto; display: grid; grid-template-columns: minmax(280px, 1fr) 180px 240px; margin-bottom: 8px; }
 .filter-meta-row { flex: 0 0 auto; min-height: 30px; justify-content: space-between; }
 .filter-counts { color: var(--el-text-color-secondary); font-size: 12px; }.filter-counts strong { color: var(--el-color-primary); }
-.audit-table-region { flex: 1 1 auto; min-height: 220px; }.table-pagination { flex: 0 0 auto; justify-content: flex-end; padding-top: 8px; }
+.audit-table-region { flex: 1 1 auto; min-height: 220px; }.filtered-empty { height: 100%; display: flex; align-items: center; justify-content: center; }.table-pagination { flex: 0 0 auto; justify-content: flex-end; padding-top: 8px; }
 .review-action-bar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 58px; margin-top: 8px; padding: 8px 12px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-lighter); }.review-action-summary { min-width: 0; }.review-action-summary strong, .review-action-summary span { display: block; }.review-action-summary span { margin-top: 3px; color: var(--el-text-color-secondary); font-size: 12px; }.review-action-buttons { display: flex; flex: 0 0 auto; gap: 8px; }
 .anomaly-checkbox { display: inline-flex; align-items: center; justify-content: center; }
 .anomaly-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }.anomaly-detail-grid.has-book-preview { grid-template-columns: 150px minmax(0, 1fr); }
