@@ -947,7 +947,7 @@ test('online audit offers to rebuild a stale unavailable .ehviewer from the curr
   const stat = await fs.promises.stat(archive)
   const databases = await createDatabases(root, [{
     id: 'sync-book', title: 'Current title', hash: 'sync-hash', coverHash: 'sync-cover', filepath: archive,
-    pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), filecount: 1,
+    pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), filecount: 10,
     status: 'tagged', tags: { artist: ['current'] }, url: 'https://exhentai.org/g/2000000/bbbbbbbbbb/'
   }])
   const cache = await EhentaiAvailabilityCache.open(auditStorePath)
@@ -955,7 +955,8 @@ test('online audit offers to rebuild a stale unavailable .ehviewer from the curr
   await cache.set({ site: 'exhentai', gid: '2000000', token: 'bbbbbbbbbb', status: 'available', httpStatus: 200, checkedAt: Date.now(), evidence: 'test' })
   await cache.set({ site: 'ehentai', gid: '1000000', token: 'aaaaaaaaaa', status: 'generic-unavailable', httpStatus: 404, checkedAt: Date.now(), evidence: 'test' })
   await cache.set({ site: 'exhentai', gid: '1000000', token: 'aaaaaaaaaa', status: 'gallery-not-found', httpStatus: 404, checkedAt: Date.now(), evidence: 'test' })
-  await cache.setGdata({ gid: '2000000', token: 'bbbbbbbbbb', status: 'available', checkedAt: Date.now(), metadata: { gid: 2000000, token: 'bbbbbbbbbb', title: 'Current title', filecount: 1 } })
+  await cache.setGdata({ gid: '2000000', token: 'bbbbbbbbbb', status: 'available', checkedAt: Date.now(), metadata: { gid: 2000000, token: 'bbbbbbbbbb', title: 'Current title', filecount: 10 } })
+  await cache.setGdata({ gid: '1000000', token: 'aaaaaaaaaa', status: 'available', checkedAt: Date.now(), metadata: { gid: 1000000, token: 'aaaaaaaaaa', title: 'Old source title', filecount: 7 } })
   await cache.close()
   let Manga
   let Metadata
@@ -975,6 +976,12 @@ test('online audit offers to rebuild a stale unavailable .ehviewer from the curr
   assert.equal(sync.action?.repairKind, 'ehviewer-sync-to-current-metadata')
   assert.equal(sync.action?.currentUrl, 'https://exhentai.org/g/2000000/bbbbbbbbbb/')
   assert.deepEqual(sync.action?.identity, { gid: '2000000', token: 'bbbbbbbbbb' })
+  assert.equal(sync.evidence?.pageSources?.currentUrl?.pages, 10)
+  assert.equal(sync.evidence?.pageSources?.ehviewerUrl?.pages, 7)
+  const pageMismatch = report.anomalies.find(item => item.bookId === 'sync-book' && item.type === 'unverified-page-mismatch')
+  assert.equal(pageMismatch.evidence?.localPages, 1)
+  assert.equal(pageMismatch.evidence?.pageSources?.currentUrl?.pages, 10)
+  assert.equal(pageMismatch.evidence?.pageSources?.ehviewerUrl?.pages, 7)
 
   Manga = prepareMangaModel(databases.databasePath)
   Metadata = prepareMetadataModel(databases.metadataPath)

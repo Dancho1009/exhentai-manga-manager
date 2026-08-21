@@ -8,6 +8,7 @@ const {
   checkGallerySites,
   getGalleryMetadata,
   getGdataBatch,
+  buildGalleryUrl,
   extractGalleryIdentity: extractEhentaiIdentity,
   isIdentityWebAvailable
 } = require('../ehentai.js')
@@ -36,6 +37,16 @@ const toCurrentItem = wrapped => ({
   title: wrapped?.effective?.title || wrapped?.raw?.title || path.basename(wrapped?.raw?.filepath || ''),
   filepath: wrapped?.raw?.filepath || null
 })
+
+const toPageSourceEvidence = ({ url, gdata } = {}) => {
+  const count = Number(gdata?.metadata?.filecount)
+  return {
+    url: url || null,
+    status: gdata?.status || 'unchecked',
+    pages: gdata?.status === 'available' && Number.isFinite(count) && count >= 0 ? count : null,
+    error: gdata?.error || null
+  }
+}
 
 const sortAnomalies = anomalies => {
   const severityOrder = { critical: 0, high: 1, medium: 2, low: 3 }
@@ -298,8 +309,22 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         const { wrapped, currentIdentity, ehviewer, ehviewerIdentity } = source
         const currentAvailability = currentIdentity ? identities.get(`${currentIdentity.gid}:${currentIdentity.token}`) : null
         const ehviewerAvailability = ehviewerIdentity ? identities.get(`${ehviewerIdentity.gid}:${ehviewerIdentity.token}`) : null
+        const currentPageGdata = currentIdentity ? versionMetadata.get(`${currentIdentity.gid}:${currentIdentity.token}`) : null
+        const ehviewerPageGdata = ehviewerIdentity ? versionMetadata.get(`${ehviewerIdentity.gid}:${ehviewerIdentity.token}`) : null
         const currentUrl = wrapped.effective.url || null
-        const evidence = { currentUrl, ehviewer, currentAvailability, ehviewerAvailability }
+        const pageSources = {
+          currentUrl: toPageSourceEvidence({ url: currentUrl, gdata: currentPageGdata }),
+          ehviewerUrl: toPageSourceEvidence({
+            url: ehviewerIdentity ? buildGalleryUrl('exhentai', ehviewerIdentity.gid, ehviewerIdentity.token) : null,
+            gdata: ehviewerPageGdata
+          })
+        }
+        const pageMismatchAnomaly = anomalies.find(item => String(item.bookId) === String(wrapped.raw.id) &&
+          ['unverified-page-mismatch', 'exact-source-page-mismatch'].includes(item.type))
+        if (pageMismatchAnomaly) {
+          pageMismatchAnomaly.evidence = { ...(pageMismatchAnomaly.evidence || {}), pageSources }
+        }
+        const evidence = { currentUrl, ehviewer, currentAvailability, ehviewerAvailability, pageSources }
         const currentAvailable = isIdentityWebAvailable(currentAvailability)
         const currentStatus = summarizeAvailability(currentAvailability)
         if (currentAvailability && currentStatus !== 'available') {
