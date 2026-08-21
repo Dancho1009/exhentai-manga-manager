@@ -82,11 +82,14 @@ const classifyGalleryHtml = ({ html, httpStatus, requestedUrl, finalUrl }) => {
   if (/Your IP address has been/i.test(text)) {
     return { status: 'ip-banned', claimant: null, region: null, evidence: 'ip-banned-template', checkedAt }
   }
-  if (/sad panda|You must be logged on|please log in/i.test(text)) {
-    return { status: 'auth-required', claimant: null, region: null, evidence: 'auth-template', checkedAt }
-  }
   if (/id=["'](?:gn|gd1)["']/i.test(String(html || ''))) {
     return { status: 'available', claimant: null, region: null, evidence: 'gallery-dom', checkedAt }
+  }
+  // A valid gallery can mention "sad panda" or login instructions inside a
+  // user comment. Only classify authentication pages after ruling out the
+  // gallery DOM, and require a login-page phrase rather than a loose keyword.
+  if (/You must be logged (?:on|in)\s+to\s+(?:access|view|use)\s+this page|please log in to continue|you are not logged in/i.test(text)) {
+    return { status: 'auth-required', claimant: null, region: null, evidence: 'auth-template', checkedAt }
   }
   if (SERVICE_HTTP_STATUS.has(Number(httpStatus))) {
     return { status: 'service-unavailable', claimant: null, region: null, evidence: `http-${httpStatus}`, checkedAt }

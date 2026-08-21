@@ -66,6 +66,16 @@ test('classifier separates authentication, IP bans, service errors, redirects, a
   assert.equal(classifyGalleryHtml({ ...base, html: '<html>unexpected response</html>', httpStatus: 200 }).status, 'unknown')
 })
 
+test('classifier does not treat gallery comments mentioning sad panda as authentication', () => {
+  const result = classifyGalleryHtml({
+    html: '<div id="gn">Replaced gallery</div><div id="cdiv">I directly got sad panda from this one.</div>',
+    httpStatus: 200,
+    requestedUrl: 'https://exhentai.org/g/1/abc/',
+    finalUrl: 'https://exhentai.org/g/1/abc/'
+  })
+  assert.equal(result.status, 'available')
+})
+
 test('request failures and timeouts remain network errors instead of removal states', async () => {
   const requestError = await checkGallerySites({
     gid: '1', token: 'token', preferredSite: 'exhentai', strategy: 'both', setting: {},
