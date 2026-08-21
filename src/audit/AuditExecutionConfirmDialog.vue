@@ -19,6 +19,7 @@
         <el-descriptions-item :label="$t('audit.sourceRecoveries')">{{ preview.sourceRecoveryCount || 0 }}</el-descriptions-item>
         <el-descriptions-item :label="$t('audit.ehviewerRebuilds')">{{ preview.ehviewerRebuildCount || 0 }}</el-descriptions-item>
         <el-descriptions-item :label="$t('audit.localScanRepairs')">{{ preview.localScanCount || 0 }}</el-descriptions-item>
+        <el-descriptions-item :label="$t('audit.orphanMetadataCount')">{{ preview.orphanMetadataCount || 0 }}</el-descriptions-item>
         <el-descriptions-item :label="$t('audit.identityReplacements')">{{ preview.identityReplacementCount }}</el-descriptions-item>
       </template>
       <template v-else>
@@ -61,15 +62,22 @@ const dialogTitle = computed(() => props.preview?.taskType === 'dedupe'
   : t('audit.confirmAnomalyTitle'))
 const warningText = computed(() => props.preview?.taskType === 'dedupe'
   ? t('audit.confirmDedupeWarning')
+  : Number(props.preview?.orphanMetadataCount || 0) > 0
+    ? t('audit.confirmAnomalyMetadataWarning', { count: props.preview.orphanMetadataCount })
   : t('audit.confirmAnomalyWarning'))
 const confirmLabel = computed(() => props.preview?.taskType === 'dedupe'
   ? t('audit.executeDedupeQuarantine')
   : t('audit.executeAnomalyRepairs'))
 const requiresRiskConfirmation = computed(() => props.preview?.taskType === 'anomaly'
-  ? Number(props.preview?.identityReplacementCount || 0) > 0
+  ? Number(props.preview?.identityReplacementCount || 0) > 0 || Number(props.preview?.orphanMetadataCount || 0) > 0
   : Number(props.preview?.manualReviewGroupCount || 0) > 0)
 const riskConfirmationText = computed(() => props.preview?.taskType === 'anomaly'
-  ? t('audit.confirmIdentityReplacement')
+  ? Number(props.preview?.orphanMetadataCount || 0) > 0
+    ? t('audit.confirmAnomalyRisk', {
+        orphan: props.preview.orphanMetadataCount,
+        identity: props.preview.identityReplacementCount || 0
+      })
+    : t('audit.confirmIdentityReplacement')
   : t('audit.confirmManualDedupe'))
 
 const formatBytes = value => {

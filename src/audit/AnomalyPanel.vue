@@ -146,7 +146,7 @@
               <el-descriptions-item :label="$t('audit.severity')">{{ $t(`audit.${selectedAnomaly.severity}`) }}</el-descriptions-item>
               <el-descriptions-item :label="$t('audit.reason')">{{ selectedAnomaly.reason }}</el-descriptions-item>
               <el-descriptions-item :label="$t('audit.filepath')">{{ selectedAnomaly.filepath || '-' }}</el-descriptions-item>
-              <el-descriptions-item :label="$t('audit.recommendation')">{{ selectedAnomaly.recommendedAction }}</el-descriptions-item>
+              <el-descriptions-item :label="$t('audit.recommendation')">{{ recommendationLabel(selectedAnomaly.recommendedAction) }}</el-descriptions-item>
               <el-descriptions-item v-if="currentEvidenceUrl" :label="$t('audit.currentUrl')">
                 <el-link type="primary" :underline="false" @click="openExternalUrl(currentEvidenceUrl)"><span>{{ currentEvidenceUrl }}</span><el-icon><TopRight /></el-icon></el-link>
               </el-descriptions-item>
@@ -350,6 +350,10 @@ const AvailabilityList = defineComponent({
 
 const normalizeSearchText = value => String(value || '').trim().toLocaleLowerCase()
 const auditTypeLabel = value => { const key = `audit.type_${value}`; return value && te(key) ? t(key) : value || '' }
+const recommendationLabel = value => {
+  const key = `audit.recommendation_${value}`
+  return value && te(key) ? t(key) : value || ''
+}
 const severityTag = severity => ({ critical: 'danger', high: 'danger', medium: 'warning', low: 'info' })[severity] || 'info'
 const start = () => emit('start', { onlinePolicy: onlinePolicy.value, forceLocal: forceLocal.value, forceOnline: forceOnline.value })
 const toggleAnomaly = (id, value) => emit('update:actionIds', value ? [...new Set([...props.actionIds, id])] : props.actionIds.filter(item => item !== id))
