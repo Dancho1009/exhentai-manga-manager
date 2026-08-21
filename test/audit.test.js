@@ -923,7 +923,12 @@ test('online audit offers to rebuild a stale unavailable .ehviewer from the curr
   await cache.set({ site: 'exhentai', gid: '1000000', token: 'aaaaaaaaaa', status: 'gallery-not-found', httpStatus: 404, checkedAt: Date.now(), evidence: 'test' })
   await cache.setGdata({ gid: '2000000', token: 'bbbbbbbbbb', status: 'available', checkedAt: Date.now(), metadata: { gid: 2000000, token: 'bbbbbbbbbb', title: 'Current title', filecount: 1 } })
   await cache.close()
-  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  let Manga
+  let Metadata
+  t.after(async () => {
+    await Promise.allSettled([Manga?.sequelize.close(), Metadata?.sequelize.close()].filter(Boolean))
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
 
   const report = await writeWorkerReport({
     workerFilename: 'anomaly_worker.js', root, jobId: 'ehviewer-sync-job',
@@ -936,6 +941,44 @@ test('online audit offers to rebuild a stale unavailable .ehviewer from the curr
   assert.equal(sync.action?.repairKind, 'ehviewer-sync-to-current-metadata')
   assert.equal(sync.action?.currentUrl, 'https://exhentai.org/g/2000000/bbbbbbbbbb/')
   assert.deepEqual(sync.action?.identity, { gid: '2000000', token: 'bbbbbbbbbb' })
+
+  Manga = prepareMangaModel(databases.databasePath)
+  Metadata = prepareMetadataModel(databases.metadataPath)
+  const executionDir = path.join(auditStorePath, 'executions', 'ehviewer-sync-execution')
+  await fs.promises.mkdir(executionDir, { recursive: true })
+  const result = await executeApprovedActions({
+    taskType: 'anomaly',
+    anomalyReport: report,
+    anomalyReview: { reportId: report.reportId, actionIds: [sync.id] },
+    executionId: 'ehviewer-sync-execution',
+    executionDir,
+    auditStorePath,
+    Manga,
+    Metadata,
+    databasePath: databases.databasePath,
+    metadataPath: databases.metadataPath,
+    collectionList: [],
+    rendererState: {},
+    verifyRepairAction: async action => ({ valid: true, identity: action.identity })
+  })
+  assert.equal(result.repairedCount, 1)
+  assert.deepEqual(await inspectEhviewerIdentity({ filepath: archive, type: 'zip' }), {
+    status: 'parsed',
+    format: 'version2',
+    entryPath: '.ehviewer',
+    candidateCount: 1,
+    gid: '2000000',
+    token: 'bbbbbbbbbb'
+  })
+  const repairedBook = await Manga.findByPk('sync-book', { raw: true })
+  assert.equal(repairedBook.url, 'https://exhentai.org/g/2000000/bbbbbbbbbb/')
+  assert.equal(repairedBook.bundleSize, (await fs.promises.stat(archive)).size)
+
+  const rescanned = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js', root, jobId: 'ehviewer-sync-rescan',
+    options: { library, auditStorePath, onlinePolicy: 'none', forceLocal: false, forceOnline: false, sevenZipPath: null, ehentaiSetting: {}, ...databases }
+  })
+  assert.equal(rescanned.anomalies.some(item => item.bookId === 'sync-book' && ['ehviewer-url-conflict', 'ehviewer-url-conflict-online'].includes(item.type)), false)
 })
 
 test('online audit makes an unavailable current identity replaceable when the .ehviewer identity is available', async t => {
@@ -958,7 +1001,12 @@ test('online audit makes an unavailable current identity replaceable when the .e
   await cache.set({ site: 'exhentai', gid: '3000000', token: 'cccccccccc', status: 'available', httpStatus: 200, checkedAt: Date.now(), evidence: 'test' })
   await cache.setGdata({ gid: '3000000', token: 'cccccccccc', status: 'available', checkedAt: Date.now(), metadata: { gid: 3000000, token: 'cccccccccc', title: 'Candidate title', filecount: 1 } })
   await cache.close()
-  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  let Manga
+  let Metadata
+  t.after(async () => {
+    await Promise.allSettled([Manga?.sequelize.close(), Metadata?.sequelize.close()].filter(Boolean))
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
 
   const report = await writeWorkerReport({
     workerFilename: 'anomaly_worker.js', root, jobId: 'identity-replacement-job',
@@ -970,6 +1018,138 @@ test('online audit makes an unavailable current identity replaceable when the .e
   assert.equal(replacement.action?.repairKind, 'identity-replacement')
   assert.equal(replacement.action?.currentUrl, 'https://exhentai.org/g/4000000/dddddddddd/')
   assert.equal(replacement.action?.newUrl, 'https://exhentai.org/g/3000000/cccccccccc/')
+
+  Manga = prepareMangaModel(databases.databasePath)
+  Metadata = prepareMetadataModel(databases.metadataPath)
+  const executionDir = path.join(auditStorePath, 'executions', 'identity-replacement-execution')
+  await fs.promises.mkdir(executionDir, { recursive: true })
+  const result = await executeApprovedActions({
+    taskType: 'anomaly',
+    anomalyReport: report,
+    anomalyReview: { reportId: report.reportId, actionIds: [replacement.id] },
+    executionId: 'identity-replacement-execution',
+    executionDir,
+    auditStorePath,
+    Manga,
+    Metadata,
+    databasePath: databases.databasePath,
+    metadataPath: databases.metadataPath,
+    collectionList: [],
+    rendererState: {},
+    verifyRepairAction: async action => ({
+      valid: true,
+      newUrl: action.newUrl,
+      metadata: { title: 'Candidate online title', filecount: 1, status: 'tagged' }
+    })
+  })
+  const repairedBook = await Manga.findByPk('replacement-book', { raw: true })
+  const repairedMetadata = await Metadata.findByPk('replacement-hash', { raw: true })
+  assert.equal(result.repairedCount, 1)
+  assert.equal(repairedBook.url, 'https://exhentai.org/g/3000000/cccccccccc/')
+  assert.equal(repairedBook.title, 'Candidate online title')
+  assert.equal(repairedMetadata.url, repairedBook.url)
+
+  const rescanned = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js', root, jobId: 'identity-replacement-rescan',
+    options: { library, auditStorePath, onlinePolicy: 'none', forceLocal: false, forceOnline: false, sevenZipPath: null, ehentaiSetting: {}, ...databases }
+  })
+  assert.equal(rescanned.anomalies.some(item => item.bookId === 'replacement-book' && ['ehviewer-url-conflict', 'ehviewer-url-conflict-online'].includes(item.type)), false)
+})
+
+test('online audit makes a newer .ehviewer gallery version approvable and the repair survives rescan', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-version-upgrade-'))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const archive = path.join(library, '4055722-latest-version.zip')
+  await fs.promises.writeFile(archive, makeArchiveBuffer({ gid: '4055722', token: 'd7df36ff21' }))
+  const stat = await fs.promises.stat(archive)
+  const databases = await createDatabases(root, [{
+    id: 'version-book', title: 'Historical title', hash: 'version-hash', coverHash: 'version-cover', filepath: archive,
+    pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), filecount: 1,
+    status: 'tagged', tags: { artist: ['historical'] }, url: 'https://exhentai.org/g/4050179/09c3a040d0/'
+  }])
+  const cache = await EhentaiAvailabilityCache.open(auditStorePath)
+  for (const site of ['ehentai', 'exhentai']) {
+    await cache.set({ site, gid: '4050179', token: '09c3a040d0', status: 'available', httpStatus: 200, checkedAt: Date.now(), evidence: 'test' })
+    await cache.set({ site, gid: '4055722', token: 'd7df36ff21', status: 'available', httpStatus: 200, checkedAt: Date.now(), evidence: 'test' })
+  }
+  await cache.setGdata({
+    gid: '4050179', token: '09c3a040d0', status: 'available', checkedAt: Date.now(),
+    metadata: {
+      gid: 4050179,
+      token: '09c3a040d0',
+      title: 'Historical title',
+      parent_gid: '4050161', parent_key: '1961fe3850',
+      current_gid: '4055722', current_key: 'd7df36ff21',
+      first_gid: '4050161', first_key: '1961fe3850',
+      filecount: 1
+    }
+  })
+  await cache.setGdata({
+    gid: '4055722', token: 'd7df36ff21', status: 'available', checkedAt: Date.now(),
+    metadata: {
+      gid: 4055722,
+      token: 'd7df36ff21',
+      title: 'Latest title',
+      parent_gid: '4050179', parent_key: '09c3a040d0',
+      first_gid: '4050161', first_key: '1961fe3850',
+      filecount: 1
+    }
+  })
+  await cache.close()
+  let Manga
+  let Metadata
+  t.after(async () => {
+    await Promise.allSettled([Manga?.sequelize.close(), Metadata?.sequelize.close()].filter(Boolean))
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
+
+  const report = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js', root, jobId: 'version-upgrade-job',
+    options: { library, auditStorePath, onlinePolicy: 'conflicts', forceLocal: false, forceOnline: false, sevenZipPath: null, ehentaiSetting: {}, ...databases }
+  })
+  const upgrade = report.anomalies.find(item => item.bookId === 'version-book' && item.type === 'gallery-version-outdated')
+  assert.ok(upgrade)
+  assert.equal(upgrade.action?.type, 'repair-url')
+  assert.equal(upgrade.action?.repairKind, 'gallery-version-upgrade')
+  assert.equal(upgrade.action?.currentUrl, 'https://exhentai.org/g/4050179/09c3a040d0/')
+  assert.equal(upgrade.action?.newUrl, 'https://exhentai.org/g/4055722/d7df36ff21/')
+  assert.equal(report.anomalies.some(item => item.bookId === 'version-book' && item.type === 'ehviewer-url-conflict-online'), false)
+
+  Manga = prepareMangaModel(databases.databasePath)
+  Metadata = prepareMetadataModel(databases.metadataPath)
+  const executionDir = path.join(auditStorePath, 'executions', 'version-upgrade-execution')
+  await fs.promises.mkdir(executionDir, { recursive: true })
+  const result = await executeApprovedActions({
+    taskType: 'anomaly',
+    anomalyReport: report,
+    anomalyReview: { reportId: report.reportId, actionIds: [upgrade.id] },
+    executionId: 'version-upgrade-execution',
+    executionDir,
+    auditStorePath,
+    Manga,
+    Metadata,
+    databasePath: databases.databasePath,
+    metadataPath: databases.metadataPath,
+    collectionList: [],
+    rendererState: {},
+    verifyRepairAction: async action => ({
+      valid: true,
+      newUrl: action.newUrl,
+      metadata: { title: 'Latest title', filecount: 1, status: 'tagged' }
+    })
+  })
+  const repairedBook = await Manga.findByPk('version-book', { raw: true })
+  assert.equal(result.repairedCount, 1)
+  assert.equal(repairedBook.url, 'https://exhentai.org/g/4055722/d7df36ff21/')
+  assert.equal(repairedBook.title, 'Latest title')
+
+  const rescanned = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js', root, jobId: 'version-upgrade-rescan',
+    options: { library, auditStorePath, onlinePolicy: 'none', forceLocal: false, forceOnline: false, sevenZipPath: null, ehentaiSetting: {}, ...databases }
+  })
+  assert.equal(rescanned.anomalies.some(item => item.bookId === 'version-book' && ['ehviewer-url-conflict', 'gallery-version-outdated'].includes(item.type)), false)
 })
 
 test('workspace manager releases the library lock after a worker completes', async t => {

@@ -171,6 +171,43 @@ const buildSourceRecoveryAction = ({
   }
 }
 
+const buildEhviewerSyncAction = ({
+  bookId,
+  filepath,
+  bookType,
+  expectedSize,
+  expectedMtimeMs,
+  currentUrl,
+  currentIdentity,
+  currentTitle,
+  entryPath,
+  recoverySupport,
+  currentAvailability,
+  candidateAvailability,
+  currentGdata
+}) => {
+  if (!recoverySupport?.supported || !currentIdentity || !currentTitle || currentGdata?.status !== 'available') return null
+  return {
+    type: 'repair-ehviewer',
+    repairKind: 'ehviewer-sync-to-current-metadata',
+    bookId,
+    filepath,
+    bookType,
+    expectedSize,
+    expectedMtimeMs,
+    currentUrl,
+    expectedTitle: currentTitle,
+    entryPath: entryPath || '.ehviewer',
+    identity: currentIdentity,
+    availabilityProof: {
+      checkedAt: Date.now(),
+      current: currentAvailability,
+      candidate: candidateAvailability,
+      currentGdataStatus: currentGdata.status
+    }
+  }
+}
+
 module.exports = {
   FINAL_UNAVAILABLE_STATUSES,
   isConclusiveSiteUnavailable,
@@ -181,5 +218,6 @@ module.exports = {
   pickAvailableUrl,
   getSameIdentityFallbackUrl,
   decideIdentityConflict,
-  buildSourceRecoveryAction
+  buildSourceRecoveryAction,
+  buildEhviewerSyncAction
 }

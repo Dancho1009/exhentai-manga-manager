@@ -13,6 +13,7 @@ const { EhentaiAvailabilityCache } = require('../modules/ehentai_availability_ca
 const {
   decideIdentityConflict,
   buildSourceRecoveryAction,
+  buildEhviewerSyncAction,
   getSameIdentityFallbackUrl,
   summarizeAvailability,
   getGalleryVersionRelation,
@@ -241,6 +242,30 @@ test('source recovery action requires an available .ehviewer gallery and valid g
   assert.equal(buildSourceRecoveryAction({ ...input, currentUrl: 'https://example.com/' }), null)
   assert.equal(buildSourceRecoveryAction({ ...input, candidateGdata: { status: 'network-error' } }), null)
   assert.equal(buildSourceRecoveryAction({ ...input, candidateAvailability: availability('copyright', 'generic-unavailable') }), null)
+})
+
+test('ehviewer sync action is only generated for archive formats that can be rewritten safely', () => {
+  const input = {
+    bookId: 'book-1',
+    filepath: 'book.zip',
+    bookType: 'zip',
+    expectedSize: 123,
+    expectedMtimeMs: 456,
+    currentUrl: 'https://exhentai.org/g/2000000/bbbbbbbbbb/',
+    currentIdentity: { gid: '2000000', token: 'bbbbbbbbbb' },
+    currentTitle: 'Current title',
+    entryPath: '.ehviewer',
+    recoverySupport: { supported: true, format: 'zip' },
+    currentAvailability: availability('available', 'available', '2000000', 'bbbbbbbbbb'),
+    candidateAvailability: availability('generic-unavailable', 'gallery-not-found', '1000000', 'aaaaaaaaaa'),
+    currentGdata: { status: 'available' }
+  }
+  const action = buildEhviewerSyncAction(input)
+  assert.equal(action.type, 'repair-ehviewer')
+  assert.equal(action.repairKind, 'ehviewer-sync-to-current-metadata')
+  assert.deepEqual(action.identity, input.currentIdentity)
+  assert.equal(buildEhviewerSyncAction({ ...input, filepath: 'book.rar', bookType: 'rar', recoverySupport: { supported: false, format: 'rar' } }), null)
+  assert.equal(buildEhviewerSyncAction({ ...input, currentGdata: { status: 'network-error' } }), null)
 })
 
 test('same identity changes domain only when the current site is unavailable', () => {

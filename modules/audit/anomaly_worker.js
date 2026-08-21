@@ -17,6 +17,7 @@ const {
   getSameIdentityFallbackUrl,
   decideIdentityConflict,
   buildSourceRecoveryAction,
+  buildEhviewerSyncAction,
   getGalleryVersionRelation,
   isVersionChainNoise,
   isConclusiveUnavailable
@@ -401,6 +402,22 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         const currentTitle = sanitizeEhviewerTitle(wrapped.effective.title_jpn || wrapped.effective.title)
         const currentRecoveryIdentity = normalizeEhviewerIdentity(currentIdentity)
         if (currentIdentity && currentAvailable && isConclusiveUnavailable(ehviewerAvailability)) {
+          const recoverySupport = getEhviewerRepairSupport({ filepath: wrapped.raw.filepath, type: wrapped.raw.type })
+          const syncAction = buildEhviewerSyncAction({
+            bookId: wrapped.raw.id,
+            filepath: wrapped.raw.filepath,
+            bookType: wrapped.raw.type,
+            expectedSize: wrapped.actual.size,
+            expectedMtimeMs: wrapped.actual.mtimeMs,
+            currentUrl,
+            currentIdentity: currentRecoveryIdentity,
+            currentTitle,
+            entryPath: ehviewer.entryPath,
+            recoverySupport,
+            currentAvailability,
+            candidateAvailability: ehviewerAvailability,
+            currentGdata
+          })
           const syncAnomaly = makeAnomaly('ehviewer-url-conflict-online', 'high', {
             bookId: wrapped.raw.id,
             filepath: wrapped.raw.filepath,
@@ -408,32 +425,13 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
             evidence: {
               ...evidence,
               currentGdataStatus: currentGdata?.status || 'unchecked',
+              recoverySupport,
               repairTarget: 'current-url'
             },
-            recommendedAction: currentRecoveryIdentity && currentTitle && currentGdata?.status === 'available'
+            recommendedAction: syncAction
               ? 'rebuild-ehviewer-after-approval'
-              : 'manual-review',
-            action: currentRecoveryIdentity && currentTitle && currentGdata?.status === 'available'
-              ? {
-                  type: 'repair-ehviewer',
-                  repairKind: 'ehviewer-sync-to-current-metadata',
-                  bookId: wrapped.raw.id,
-                  filepath: wrapped.raw.filepath,
-                  bookType: wrapped.raw.type,
-                  expectedSize: wrapped.actual.size,
-                  expectedMtimeMs: wrapped.actual.mtimeMs,
-                  currentUrl,
-                  expectedTitle: currentTitle,
-                  entryPath: ehviewer.entryPath || '.ehviewer',
-                  identity: currentRecoveryIdentity,
-                  availabilityProof: {
-                    checkedAt: Date.now(),
-                    current: currentAvailability,
-                    candidate: ehviewerAvailability,
-                    currentGdataStatus: currentGdata.status
-                  }
-                }
-              : null
+              : recoverySupport.supported ? 'manual-review' : 'manual-replace-ehviewer',
+            action: syncAction
           })
           anomalies.push(syncAnomaly)
           continue
