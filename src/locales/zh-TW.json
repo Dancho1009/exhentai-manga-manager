@@ -464,6 +464,8 @@
     "confirmIdentityReplacement": "我已逐項核對 .ehviewer 與目前 URL，確認允許更換 Gallery 身份。",
     "confirmManualDedupe": "我已逐組核對人工複核項，確認所選保留項和隔離檔案無誤。",
     "executionComplete": "執行完成，共處理 {count} 項",
+    "executionPartial": "執行完成：修復 {repaired} 項，略過 {skipped} 項失效審批",
+    "executionSkipped": "未執行修復：{skipped} 項審批已失效或驗證失敗",
     "status_idle": "閒置",
     "status_running": "任務進行中",
     "status_cancelling": "正在停止",

@@ -464,6 +464,8 @@
     "confirmIdentityReplacement": "I reviewed each .ehviewer and current URL and approve replacing the Gallery identity.",
     "confirmManualDedupe": "I reviewed each manual group and confirm the selected keeper and quarantine files.",
     "executionComplete": "Execution complete: {count} items processed",
+    "executionPartial": "Execution complete: {repaired} repaired, {skipped} stale approvals skipped",
+    "executionSkipped": "No repairs applied: {skipped} approvals were stale or failed validation",
     "status_idle": "Idle",
     "status_running": "Running",
     "status_cancelling": "Stopping",

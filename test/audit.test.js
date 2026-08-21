@@ -1409,7 +1409,7 @@ test('duplicate execution restores files, databases, and collections when collec
   assert.deepEqual(collectionWrites[1], [{ id: 'collection', list: ['hash-remove'] }])
 })
 
-test('repair execution rejects stale or legacy evidence and updates metadata atomically after revalidation', async t => {
+test('repair execution skips stale approvals and continues valid repairs atomically', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-repair-'))
   const library = path.join(root, 'Library')
   const auditStorePath = path.join(root, 'audit')
@@ -1417,8 +1417,12 @@ test('repair execution rejects stale or legacy evidence and updates metadata ato
   const quarantineRoot = path.join(root, 'DedupeReview')
   await Promise.all([fs.promises.mkdir(library, { recursive: true }), fs.promises.mkdir(executionDir, { recursive: true })])
   const filepath = path.join(library, 'book.zip')
-  await fs.promises.writeFile(filepath, makeArchiveBuffer())
-  const stat = await fs.promises.stat(filepath)
+  const secondFilepath = path.join(library, 'second-book.zip')
+  await Promise.all([
+    fs.promises.writeFile(filepath, makeArchiveBuffer()),
+    fs.promises.writeFile(secondFilepath, makeArchiveBuffer())
+  ])
+  const [stat, secondStat] = await Promise.all([fs.promises.stat(filepath), fs.promises.stat(secondFilepath)])
   const databasePath = path.join(root, 'database.sqlite')
   const metadataPath = path.join(root, 'metadata.sqlite')
   const Manga = prepareMangaModel(databasePath)
@@ -1430,11 +1434,23 @@ test('repair execution rejects stale or legacy evidence and updates metadata ato
   await Promise.all([Manga.sync(), Metadata.sync()])
   const oldUrl = 'https://exhentai.org/g/111111/oldtoken/'
   const newUrl = 'https://e-hentai.org/g/222222/newtoken/'
-  await Manga.create({ id: 'repair-book', title: 'Old title', hash: 'repair-hash', filepath, type: 'zip', pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), coverHash: 'cover', status: 'tagged', url: oldUrl })
-  await Metadata.create({ hash: 'repair-hash', title: 'Old title', status: 'tagged', url: oldUrl })
+  const secondOldUrl = 'https://exhentai.org/g/333333/oldtoken2/'
+  const secondNewUrl = 'https://e-hentai.org/g/444444/newtoken2/'
+  await Manga.bulkCreate([
+    { id: 'repair-book', title: 'Old title', hash: 'repair-hash', filepath, type: 'zip', pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), coverHash: 'cover', status: 'tagged', url: oldUrl },
+    { id: 'second-repair-book', title: 'Second old title', hash: 'second-repair-hash', filepath: secondFilepath, type: 'zip', pageCount: 1, bundleSize: secondStat.size, mtime: secondStat.mtime.toISOString(), coverHash: 'cover-2', status: 'tagged', url: secondOldUrl }
+  ])
+  await Metadata.bulkCreate([
+    { hash: 'repair-hash', title: 'Old title', status: 'tagged', url: oldUrl },
+    { hash: 'second-repair-hash', title: 'Second old title', status: 'tagged', url: secondOldUrl }
+  ])
   const anomaly = {
     id: 'repair-anomaly',
     action: { type: 'repair-url', bookId: 'repair-book', filepath, expectedSize: stat.size, expectedMtimeMs: stat.mtimeMs, currentUrl: oldUrl, newUrl }
+  }
+  const secondAnomaly = {
+    id: 'second-repair-anomaly',
+    action: { type: 'repair-url', bookId: 'second-repair-book', filepath: secondFilepath, expectedSize: secondStat.size, expectedMtimeMs: secondStat.mtimeMs, currentUrl: secondOldUrl, newUrl: secondNewUrl }
   }
   const reportId = 'anomaly:repair-report'
   const common = {
@@ -1457,7 +1473,7 @@ test('repair execution rejects stale or legacy evidence and updates metadata ato
     rendererState: {}
   }
   const repairLogs = []
-  await assert.rejects(executeApprovedActions({
+  const skippedResult = await executeApprovedActions({
     ...common,
     appendLog: async (message, level) => repairLogs.push({ message, level }),
     verifyRepairAction: async () => ({
@@ -1465,9 +1481,13 @@ test('repair execution rejects stale or legacy evidence and updates metadata ato
       error: 'REPAIR_GDATA_UNAVAILABLE',
       detail: { gdataStatus: 'network-error', gdataError: 'socket timed out' }
     })
-  }), error => error.code === 'REPAIR_GDATA_UNAVAILABLE' && error.auditContext?.bookId === 'repair-book')
+  })
+  assert.equal(skippedResult.repairedCount, 0)
+  assert.equal(skippedResult.skippedCount, 1)
+  assert.deepEqual(skippedResult.repairedAnomalyIds, [])
+  assert.equal(skippedResult.skippedItems[0].code, 'REPAIR_GDATA_UNAVAILABLE')
   assert.equal(repairLogs.length, 1)
-  assert.equal(repairLogs[0].level, 'error')
+  assert.equal(repairLogs[0].level, 'warning')
   assert.match(repairLogs[0].message, /book\.zip/)
   assert.match(repairLogs[0].message, /gdata=network-error/)
   assert.equal((await Manga.findByPk('repair-book')).url, oldUrl)
@@ -1476,20 +1496,35 @@ test('repair execution rejects stale or legacy evidence and updates metadata ato
     anomalyReport: { ...common.anomalyReport, executable: false }
   }), /ANOMALY_REPORT_NOT_EXECUTABLE/)
 
+  const changedUrl = 'https://exhentai.org/g/555555/changedurl/'
+  await Promise.all([
+    Manga.update({ url: changedUrl }, { where: { id: 'repair-book' } }),
+    Metadata.update({ url: changedUrl }, { where: { hash: 'repair-hash' } })
+  ])
   const repairStates = []
   const result = await executeApprovedActions({
     ...common,
+    anomalyReport: { reportId, executable: true, anomalies: [anomaly, secondAnomaly] },
+    anomalyReview: { reportId, actionIds: [anomaly.id, secondAnomaly.id] },
     setProgress: async state => repairStates.push(state),
-    verifyRepairAction: async () => ({ valid: true, newUrl, metadata: { title: 'Fresh title', title_jpn: '新しい題名', filecount: 42, status: 'tagged' } })
+    verifyRepairAction: async action => {
+      assert.notEqual(action.bookId, 'repair-book', 'stale URL must be rejected before online verification')
+      return { valid: true, newUrl: secondNewUrl, metadata: { title: 'Fresh title', title_jpn: '新しい題名', filecount: 42, status: 'tagged' } }
+    }
   })
-  const repaired = await Manga.findByPk('repair-book')
-  const shared = await Metadata.findByPk('repair-hash')
+  const skippedBook = await Manga.findByPk('repair-book')
+  const repaired = await Manga.findByPk('second-repair-book')
+  const shared = await Metadata.findByPk('second-repair-hash')
   assert.equal(result.repairedCount, 1)
-  assert.equal(repaired.url, newUrl)
+  assert.equal(result.skippedCount, 1)
+  assert.equal(result.skippedItems[0].code, 'APPROVAL_STALE_URL')
+  assert.deepEqual(result.repairedAnomalyIds, [secondAnomaly.id])
+  assert.equal(skippedBook.url, changedUrl)
+  assert.equal(repaired.url, secondNewUrl)
   assert.equal(repaired.title, 'Fresh title')
   assert.equal(repaired.filecount, 42)
-  assert.equal(shared.url, newUrl)
+  assert.equal(shared.url, secondNewUrl)
   assert.equal(shared.title, 'Fresh title')
-  assert.ok(repairStates.some(state => state.currentItem?.id === 'repair-book' && state.currentItem.filepath === filepath))
+  assert.ok(repairStates.some(state => state.currentItem?.id === 'second-repair-book' && state.currentItem.filepath === secondFilepath))
   assert.equal(repairStates.at(-1).currentItem, null)
 })

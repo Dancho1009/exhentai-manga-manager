@@ -437,7 +437,10 @@ class AuditWorkspaceManager extends EventEmitter {
           error: null,
           summary: result
         })
-        await this.appendLog(taskType, jobId, '执行完成')
+        const completionMessage = sourceTaskType === 'anomaly' && Number(result.skippedCount || 0) > 0
+          ? `执行完成：修复 ${Number(result.repairedCount || 0)} 项，跳过 ${Number(result.skippedCount || 0)} 项审批失效或验证失败的异常`
+          : '执行完成'
+        await this.appendLog(taskType, jobId, completionMessage, Number(result.skippedCount || 0) > 0 ? 'warning' : 'info')
         return result
       } catch (error) {
         const cancelled = error?.message === 'AUDIT_CANCELLED'

@@ -415,7 +415,16 @@ const confirmExecution = async () => {
   try {
     await runAction(async () => {
       const result = await window.auditApi.executeApproved({ taskType: preview.taskType, reportId: preview.reportId })
-      ElMessage.success(t('audit.executionComplete', { count: Number(result?.movedCount || 0) + Number(result?.repairedCount || 0) }))
+      const repairedCount = Number(result?.repairedCount || 0)
+      const skippedCount = Number(result?.skippedCount || 0)
+      if (preview.taskType === 'anomaly' && skippedCount > 0) {
+        const message = repairedCount > 0
+          ? t('audit.executionPartial', { repaired: repairedCount, skipped: skippedCount })
+          : t('audit.executionSkipped', { skipped: skippedCount })
+        ElMessage.warning(message)
+      } else {
+        ElMessage.success(t('audit.executionComplete', { count: Number(result?.movedCount || 0) + repairedCount }))
+      }
       await reloadAllData()
       return result?.state || workspace.value
     })

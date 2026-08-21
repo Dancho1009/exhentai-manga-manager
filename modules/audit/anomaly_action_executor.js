@@ -57,8 +57,38 @@ const REPAIR_ERROR_MESSAGES = {
   EHVIEWER_RECOVERY_IDENTITY_CHANGED: '当前元数据 URL 已变化，原 .ehviewer 修复审批已失效',
   APPROVAL_STALE_TITLE: '当前元数据标题已变化，原 .ehviewer 修复审批已失效',
   APPROVAL_STALE_URL: '当前元数据 URL 已变化，原审批已失效，请重新检查后再执行',
+  APPROVAL_STALE_SIZE: '文件大小已变化，原审批已失效',
+  APPROVAL_STALE_MTIME: '文件修改时间已变化，原审批已失效',
+  APPROVAL_FILE_MISSING: '文件已不存在，原审批已失效',
+  BOOK_MISSING: '数据库记录已不存在，原审批已失效',
   LOCAL_SCAN_PAGE_COUNT_CHANGED: '文件页数已经变化，原本地扫描修复审批已失效',
   LOCAL_SCAN_REPAIR_INVALID: '本地扫描修复数据无效，未修改数据库'
+}
+
+const SKIPPABLE_APPROVAL_ERRORS = new Set(Object.keys(REPAIR_ERROR_MESSAGES))
+
+const getErrorCode = error => {
+  const messageCode = String(error?.message || '').match(/^([A-Z][A-Z0-9_]+)(?::|$)/)?.[1]
+  if (error?.code === 'ENOENT') return 'APPROVAL_FILE_MISSING'
+  return SKIPPABLE_APPROVAL_ERRORS.has(error?.code)
+    ? error.code
+    : SKIPPABLE_APPROVAL_ERRORS.has(messageCode) ? messageCode : null
+}
+
+const createSkippedApproval = ({ anomaly, action, error, index, total }) => {
+  const code = getErrorCode(error)
+  if (!code) return null
+  const filename = path.basename(action.filepath || '') || String(action.bookId || anomaly.id)
+  const detail = error?.auditContext?.detail || null
+  const detailText = formatRepairDetail(detail)
+  return {
+    anomalyId: String(anomaly.id),
+    bookId: action.bookId ? String(action.bookId) : null,
+    filepath: action.filepath || null,
+    code,
+    detail,
+    logMessage: error?.auditLogMessage || `审批预检跳过 ${index}/${total}：${filename}；${REPAIR_ERROR_MESSAGES[code] || code}${detailText}`
+  }
 }
 
 const formatRepairDetail = detail => {
@@ -119,6 +149,7 @@ const executeApprovedAnomalies = async ({
   const { backupDir, writeActionLog, assertNotCancelled } = context
   const preparedRepairs = []
   const preparedFileRepairs = []
+  const skippedItems = []
   const affectedHashes = new Set()
   let databaseCommitted = false
   let metadataCommitted = false
@@ -135,42 +166,74 @@ const executeApprovedAnomalies = async ({
         filepath: action.filepath || null
       }
       await setProgress({ phase: 'validating-approvals', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })
-      await ensureExpectedFile({ filepath: action.filepath, size: action.expectedSize, mtimeMs: action.expectedMtimeMs, bookType: action.bookType })
-      const book = await Manga.findByPk(action.bookId, { raw: true })
-      if (!book) throw new Error(`BOOK_MISSING: ${action.bookId}`)
-      const [metadata, hashPeers] = book.hash
-        ? await Promise.all([
-            Metadata.findByPk(book.hash, { raw: true }),
-            Manga.findAll({ where: { hash: book.hash }, raw: true })
-          ])
-        : [null, []]
-      const effectiveBook = mergeEffectiveBook({ manga: book, metadata, hashPeers })
-      if (action.type !== 'repair-local-scan') {
-        const effectiveUrl = normalizeApprovalUrl(effectiveBook.url)
-        const approvedUrl = normalizeApprovalUrl(action.currentUrl)
-        if (approvedUrl !== effectiveUrl) throw createStaleUrlError({ action, book, metadata, effectiveUrl })
-      }
-      if (action.type === 'repair-ehviewer') {
-        const effectiveTitle = sanitizeEhviewerTitle(effectiveBook.title_jpn || effectiveBook.title)
-        if (effectiveTitle !== action.expectedTitle) throw new Error(`APPROVAL_STALE_TITLE: ${action.bookId}`)
-      }
-      const prepared = await verifyRepairAction?.(action)
-      if (!prepared?.valid) {
-        const error = createRepairValidationError({ anomaly, action, prepared, index: completed + 1, total: approvedAnomalies.length })
+      try {
+        await ensureExpectedFile({ filepath: action.filepath, size: action.expectedSize, mtimeMs: action.expectedMtimeMs, bookType: action.bookType })
+        const book = await Manga.findByPk(action.bookId, { raw: true })
+        if (!book) throw new Error(`BOOK_MISSING: ${action.bookId}`)
+        const [metadata, hashPeers] = book.hash
+          ? await Promise.all([
+              Metadata.findByPk(book.hash, { raw: true }),
+              Manga.findAll({ where: { hash: book.hash }, raw: true })
+            ])
+          : [null, []]
+        const effectiveBook = mergeEffectiveBook({ manga: book, metadata, hashPeers })
+        if (action.type !== 'repair-local-scan') {
+          const effectiveUrl = normalizeApprovalUrl(effectiveBook.url)
+          const approvedUrl = normalizeApprovalUrl(action.currentUrl)
+          if (approvedUrl !== effectiveUrl) throw createStaleUrlError({ action, book, metadata, effectiveUrl })
+        }
+        if (action.type === 'repair-ehviewer') {
+          const effectiveTitle = sanitizeEhviewerTitle(effectiveBook.title_jpn || effectiveBook.title)
+          if (effectiveTitle !== action.expectedTitle) throw new Error(`APPROVAL_STALE_TITLE: ${action.bookId}`)
+        }
+        const prepared = await verifyRepairAction?.(action)
+        if (!prepared?.valid) {
+          throw createRepairValidationError({ anomaly, action, prepared, index: completed + 1, total: approvedAnomalies.length })
+        }
+        if (book.hash) affectedHashes.add(book.hash)
+        preparedRepairs.push({ anomaly, action, book, prepared })
+      } catch (error) {
+        if (error?.message === 'AUDIT_CANCELLED') throw error
+        const skipped = createSkippedApproval({ anomaly, action, error, index: completed + 1, total: approvedAnomalies.length })
+        if (!skipped) throw error
+        skippedItems.push(skipped)
         try {
-          await appendLog(error.auditLogMessage, 'error')
-          error.auditLogWritten = true
+          await appendLog(skipped.logMessage, 'warning')
         } catch {}
-        throw error
+        await writeActionLog({
+          status: 'skipped',
+          type: action.type,
+          repairKind: action.repairKind || null,
+          anomalyId: skipped.anomalyId,
+          bookId: skipped.bookId,
+          filepath: skipped.filepath,
+          code: skipped.code,
+          detail: skipped.detail
+        }).catch(() => {})
       }
-      if (book.hash) affectedHashes.add(book.hash)
-      preparedRepairs.push({ anomaly, action, book, prepared })
       completed += 1
       await setProgress({ phase: 'validating-approvals', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })
     }
 
     assertNotCancelled()
-    await setProgress({ phase: 'preparing-execution', completed: 0, total: approvedAnomalies.length, phaseCompleted: 0, phaseTotal: approvedAnomalies.length, currentItem: null })
+    if (preparedRepairs.length === 0) {
+      await setProgress({ phase: 'verified', completed: approvedAnomalies.length, total: approvedAnomalies.length, phaseCompleted: approvedAnomalies.length, phaseTotal: approvedAnomalies.length, currentItem: null })
+      await writeActionLog({ status: 'verified', taskType: 'anomaly', repairedCount: 0, skippedCount: skippedItems.length }).catch(() => {})
+      return {
+        success: true,
+        taskType: 'anomaly',
+        backupDir: null,
+        rendererState,
+        collectionList,
+        movedCount: 0,
+        repairedCount: 0,
+        skippedCount: skippedItems.length,
+        skippedItems,
+        repairedAnomalyIds: []
+      }
+    }
+
+    await setProgress({ phase: 'preparing-execution', completed: 0, total: preparedRepairs.length, phaseCompleted: 0, phaseTotal: preparedRepairs.length, currentItem: null })
     await backupExecutionState({ backupDir, databasePath, metadataPath, rendererState })
     const originalMetadataRows = await snapshotMetadataRows(Metadata, affectedHashes)
 
@@ -192,7 +255,7 @@ const executeApprovedAnomalies = async ({
           title: path.basename(repair.action.filepath || ''),
           filepath: repair.action.filepath || null
         }
-        await setProgress({ phase: 'writing-metadata', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })
+        await setProgress({ phase: 'writing-metadata', completed, total: preparedRepairs.length, phaseCompleted: completed, phaseTotal: preparedRepairs.length, currentItem })
         const book = await Manga.findByPk(repair.action.bookId, { transaction: mangaTransaction })
         if (!book) throw new Error(`BOOK_MISSING: ${repair.action.bookId}`)
         let nextValues
@@ -214,7 +277,7 @@ const executeApprovedAnomalies = async ({
           if (book.hash) await Metadata.upsert(selectModelFields(Metadata, book.toJSON()), { transaction: metadataTransaction })
         }
         completed += 1
-        await setProgress({ phase: 'writing-metadata', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })
+        await setProgress({ phase: 'writing-metadata', completed, total: preparedRepairs.length, phaseCompleted: completed, phaseTotal: preparedRepairs.length, currentItem })
         await writeActionLog({
           status: 'prepared',
           type: repair.action.type,
@@ -276,7 +339,7 @@ const executeApprovedAnomalies = async ({
     })
 
     await setProgress({ phase: 'verified', completed: approvedAnomalies.length, total: approvedAnomalies.length, phaseCompleted: approvedAnomalies.length, phaseTotal: approvedAnomalies.length, currentItem: null })
-    await writeActionLog({ status: 'verified', taskType: 'anomaly', repairedCount: approvedAnomalies.length }).catch(() => {})
+    await writeActionLog({ status: 'verified', taskType: 'anomaly', repairedCount: preparedRepairs.length, skippedCount: skippedItems.length }).catch(() => {})
     return {
       success: true,
       taskType: 'anomaly',
@@ -284,8 +347,10 @@ const executeApprovedAnomalies = async ({
       rendererState,
       collectionList,
       movedCount: 0,
-      repairedCount: approvedAnomalies.length,
-      repairedAnomalyIds: approvedAnomalies.map(item => String(item.id))
+      repairedCount: preparedRepairs.length,
+      skippedCount: skippedItems.length,
+      skippedItems,
+      repairedAnomalyIds: preparedRepairs.map(item => String(item.anomaly.id))
     }
   } catch (error) {
     for (const fileRepair of [...preparedFileRepairs].reverse()) {

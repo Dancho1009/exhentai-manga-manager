@@ -2108,6 +2108,7 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
     })
   }, { sourceTaskType: taskType, reportId })
   collectionList = result.collectionList
+  const libraryChanged = taskType !== 'anomaly' || Number(result.repairedCount || 0) > 0
   if (taskType === 'anomaly') {
     await auditWorkspaceManager.markAnomaliesResolved(reportId, result.repairedAnomalyIds || [])
     await auditWorkspaceManager.saveReview('anomaly', { reportId, actionIds: [] })
@@ -2115,12 +2116,14 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
     const dedupeReview = await auditWorkspaceManager.getReview('dedupe')
     await auditWorkspaceManager.saveReview('dedupe', { reportId, selections: {}, quarantineRoot: dedupeReview?.quarantineRoot || '' })
   }
-  await auditWorkspaceManager.markReportsStale(`${taskType}-execution:${result.taskType || taskType}`)
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('audit:library-changed', { rendererState: result.rendererState })
+  if (libraryChanged) {
+    await auditWorkspaceManager.markReportsStale(`${taskType}-execution:${result.taskType || taskType}`)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('audit:library-changed', { rendererState: result.rendererState })
+    }
+    bookDetailService.invalidateTagCatalog()
+    notifyLibraryChanged({ sourceWebContents: mainWindow?.webContents })
   }
-  bookDetailService.invalidateTagCatalog()
-  notifyLibraryChanged({ sourceWebContents: mainWindow?.webContents })
   return result
 })
 
