@@ -2,7 +2,7 @@ const path = require('path')
 const { extractGalleryIdentity, normalizePath } = require('./utils.js')
 const { MANUAL_SOURCE_ANOMALY_TYPES } = require('./manual_source_action.js')
 
-const SUPPORTED_ANOMALY_ACTIONS = new Set(['repair-url', 'repair-ehviewer', 'repair-local-scan'])
+const SUPPORTED_ANOMALY_ACTIONS = new Set(['repair-url', 'repair-ehviewer', 'repair-local-scan', 'delete-orphan-metadata'])
 
 const normalizeId = value => String(value ?? '').trim()
 
@@ -70,6 +70,13 @@ const normalizeAnomalyReview = (report, review = {}) => {
     if (!anomaly || !action) throw new Error(`ANOMALY_ACTION_MISSING: ${actionId}`)
     if (!SUPPORTED_ANOMALY_ACTIONS.has(action.type)) {
       throw new Error(`UNSUPPORTED_ANOMALY_ACTION: ${action.type}`)
+    }
+    if (action.type === 'delete-orphan-metadata' && (
+      anomaly.type !== 'orphan-metadata' ||
+      normalizeId(action.metadataHash) !== normalizeId(anomaly.metadataHash) ||
+      !String(action.expectedFingerprint || '').trim()
+    )) {
+      throw new Error(`INVALID_ORPHAN_METADATA_ACTION: ${actionId}`)
     }
   }
 
@@ -147,7 +154,8 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
     const manualSourceCount = anomalies.filter(item => getRepairKind(item) === 'manual-source-selection').length
     const ehviewerRebuildCount = anomalies.filter(item => item.action?.type === 'repair-ehviewer').length
     const localScanCount = anomalies.filter(item => item.action?.type === 'repair-local-scan').length
-    const identityReplacementCount = anomalies.length - sameIdentityCount - versionUpgradeCount - sourceRecoveryCount - manualSourceCount - ehviewerRebuildCount - localScanCount
+    const orphanMetadataCount = anomalies.filter(item => item.action?.type === 'delete-orphan-metadata').length
+    const identityReplacementCount = anomalies.length - sameIdentityCount - versionUpgradeCount - sourceRecoveryCount - manualSourceCount - ehviewerRebuildCount - localScanCount - orphanMetadataCount
     if (anomalies.length === 0) throw new Error('NO_APPROVED_ACTIONS')
     return {
       valid: true,
@@ -160,6 +168,7 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
       manualSourceCount,
       ehviewerRebuildCount,
       localScanCount,
+      orphanMetadataCount,
       identityReplacementCount
     }
   }

@@ -11,6 +11,7 @@ const { sanitizeEhviewerTitle, prepareEhviewerRepair } = require('./ehviewer_rep
 const { invalidateAuditCacheEntries } = require('./cache.js')
 const { mergeEffectiveBook } = require('../book_detail.js')
 const { getAnomalyAction } = require('./review_validator.js')
+const { metadataFingerprint } = require('./utils.js')
 
 const selectModelFields = (model, value) => Object.fromEntries(
   Object.keys(model.rawAttributes || {})
@@ -63,7 +64,10 @@ const REPAIR_ERROR_MESSAGES = {
   APPROVAL_FILE_MISSING: '文件已不存在，原审批已失效',
   BOOK_MISSING: '数据库记录已不存在，原审批已失效',
   LOCAL_SCAN_PAGE_COUNT_CHANGED: '文件页数已经变化，原本地扫描修复审批已失效',
-  LOCAL_SCAN_REPAIR_INVALID: '本地扫描修复数据无效，未修改数据库'
+  LOCAL_SCAN_REPAIR_INVALID: '本地扫描修复数据无效，未修改数据库',
+  ORPHAN_METADATA_MISSING: '孤立元数据记录已不存在，原审批已失效',
+  ORPHAN_METADATA_NO_LONGER_ORPHAN: '元数据已重新关联 Manga，原删除审批已失效',
+  ORPHAN_METADATA_CHANGED: '孤立元数据内容已变化，原删除审批已失效'
 }
 
 const SKIPPABLE_APPROVAL_ERRORS = new Set(Object.keys(REPAIR_ERROR_MESSAGES))
@@ -165,36 +169,49 @@ const executeApprovedAnomalies = async ({
       const action = anomaly.action
       const currentItem = {
         id: action.bookId ? String(action.bookId) : null,
-        title: path.basename(action.filepath || ''),
+        title: path.basename(action.filepath || '') || action.expectedTitle || action.metadataHash || String(action.bookId || ''),
         filepath: action.filepath || null
       }
       await setProgress({ phase: 'validating-approvals', completed, total: approvedAnomalies.length, phaseCompleted: completed, phaseTotal: approvedAnomalies.length, currentItem })
       try {
-        await ensureExpectedFile({ filepath: action.filepath, size: action.expectedSize, mtimeMs: action.expectedMtimeMs, bookType: action.bookType })
-        const book = await Manga.findByPk(action.bookId, { raw: true })
-        if (!book) throw new Error(`BOOK_MISSING: ${action.bookId}`)
-        const [metadata, hashPeers] = book.hash
-          ? await Promise.all([
-              Metadata.findByPk(book.hash, { raw: true }),
-              Manga.findAll({ where: { hash: book.hash }, raw: true })
-            ])
-          : [null, []]
-        const effectiveBook = mergeEffectiveBook({ manga: book, metadata, hashPeers })
-        if (action.type !== 'repair-local-scan') {
-          const effectiveUrl = normalizeApprovalUrl(effectiveBook.url)
-          const approvedUrl = normalizeApprovalUrl(action.currentUrl)
-          if (approvedUrl !== effectiveUrl) throw createStaleUrlError({ action, book, metadata, effectiveUrl })
+        if (action.type === 'delete-orphan-metadata') {
+          const metadataHash = String(action.metadataHash || '')
+          const metadata = await Metadata.findByPk(metadataHash, { raw: true })
+          if (!metadata) throw new Error(`ORPHAN_METADATA_MISSING: ${metadataHash}`)
+          const mangaReferences = await Manga.count({ where: { hash: metadataHash } })
+          if (mangaReferences > 0) throw new Error(`ORPHAN_METADATA_NO_LONGER_ORPHAN: ${metadataHash}`)
+          if (metadataFingerprint(metadata) !== action.expectedFingerprint) {
+            throw new Error(`ORPHAN_METADATA_CHANGED: ${metadataHash}`)
+          }
+          affectedHashes.add(metadataHash)
+          preparedRepairs.push({ anomaly, action, book: null, metadata, prepared: { valid: true } })
+        } else {
+          await ensureExpectedFile({ filepath: action.filepath, size: action.expectedSize, mtimeMs: action.expectedMtimeMs, bookType: action.bookType })
+          const book = await Manga.findByPk(action.bookId, { raw: true })
+          if (!book) throw new Error(`BOOK_MISSING: ${action.bookId}`)
+          const [metadata, hashPeers] = book.hash
+            ? await Promise.all([
+                Metadata.findByPk(book.hash, { raw: true }),
+                Manga.findAll({ where: { hash: book.hash }, raw: true })
+              ])
+            : [null, []]
+          const effectiveBook = mergeEffectiveBook({ manga: book, metadata, hashPeers })
+          if (action.type !== 'repair-local-scan') {
+            const effectiveUrl = normalizeApprovalUrl(effectiveBook.url)
+            const approvedUrl = normalizeApprovalUrl(action.currentUrl)
+            if (approvedUrl !== effectiveUrl) throw createStaleUrlError({ action, book, metadata, effectiveUrl })
+          }
+          if (action.type === 'repair-ehviewer') {
+            const effectiveTitle = sanitizeEhviewerTitle(effectiveBook.title_jpn || effectiveBook.title)
+            if (effectiveTitle !== action.expectedTitle) throw new Error(`APPROVAL_STALE_TITLE: ${action.bookId}`)
+          }
+          const prepared = await verifyRepairAction?.(action)
+          if (!prepared?.valid) {
+            throw createRepairValidationError({ anomaly, action, prepared, index: completed + 1, total: approvedAnomalies.length })
+          }
+          if (book.hash) affectedHashes.add(book.hash)
+          preparedRepairs.push({ anomaly, action, book, prepared })
         }
-        if (action.type === 'repair-ehviewer') {
-          const effectiveTitle = sanitizeEhviewerTitle(effectiveBook.title_jpn || effectiveBook.title)
-          if (effectiveTitle !== action.expectedTitle) throw new Error(`APPROVAL_STALE_TITLE: ${action.bookId}`)
-        }
-        const prepared = await verifyRepairAction?.(action)
-        if (!prepared?.valid) {
-          throw createRepairValidationError({ anomaly, action, prepared, index: completed + 1, total: approvedAnomalies.length })
-        }
-        if (book.hash) affectedHashes.add(book.hash)
-        preparedRepairs.push({ anomaly, action, book, prepared })
       } catch (error) {
         if (error?.message === 'AUDIT_CANCELLED') throw error
         const skipped = createSkippedApproval({ anomaly, action, error, index: completed + 1, total: approvedAnomalies.length })
@@ -255,29 +272,35 @@ const executeApprovedAnomalies = async ({
         assertNotCancelled()
         const currentItem = {
           id: repair.action.bookId ? String(repair.action.bookId) : null,
-          title: path.basename(repair.action.filepath || ''),
+          title: path.basename(repair.action.filepath || '') || repair.action.expectedTitle || repair.action.metadataHash || String(repair.action.bookId || ''),
           filepath: repair.action.filepath || null
         }
         await setProgress({ phase: 'writing-metadata', completed, total: preparedRepairs.length, phaseCompleted: completed, phaseTotal: preparedRepairs.length, currentItem })
-        const book = await Manga.findByPk(repair.action.bookId, { transaction: mangaTransaction })
-        if (!book) throw new Error(`BOOK_MISSING: ${repair.action.bookId}`)
         let nextValues
-        if (repair.action.type === 'repair-ehviewer') {
-          await repair.fileRepair.apply()
-          const fileSnapshot = await repair.fileRepair.snapshot()
-          nextValues = { bundleSize: fileSnapshot.bundleSize, mtime: fileSnapshot.mtime }
-          await book.update(nextValues, { transaction: mangaTransaction })
-        } else if (repair.action.type === 'repair-local-scan') {
-          nextValues = selectLocalScanFields(repair.prepared.localUpdates || repair.action.updates || {})
-          if (Object.keys(nextValues).length === 0) throw new Error('LOCAL_SCAN_REPAIR_INVALID')
-          await book.update(nextValues, { transaction: mangaTransaction })
+        if (repair.action.type === 'delete-orphan-metadata') {
+          const deleted = await Metadata.destroy({ where: { hash: repair.action.metadataHash }, transaction: metadataTransaction })
+          if (deleted !== 1) throw new Error(`ORPHAN_METADATA_MISSING: ${repair.action.metadataHash}`)
+          nextValues = { metadataHash: repair.action.metadataHash }
         } else {
-          nextValues = {
-            ...(repair.prepared.metadata || {}),
-            url: repair.prepared.newUrl || repair.action.newUrl
+          const book = await Manga.findByPk(repair.action.bookId, { transaction: mangaTransaction })
+          if (!book) throw new Error(`BOOK_MISSING: ${repair.action.bookId}`)
+          if (repair.action.type === 'repair-ehviewer') {
+            await repair.fileRepair.apply()
+            const fileSnapshot = await repair.fileRepair.snapshot()
+            nextValues = { bundleSize: fileSnapshot.bundleSize, mtime: fileSnapshot.mtime }
+            await book.update(nextValues, { transaction: mangaTransaction })
+          } else if (repair.action.type === 'repair-local-scan') {
+            nextValues = selectLocalScanFields(repair.prepared.localUpdates || repair.action.updates || {})
+            if (Object.keys(nextValues).length === 0) throw new Error('LOCAL_SCAN_REPAIR_INVALID')
+            await book.update(nextValues, { transaction: mangaTransaction })
+          } else {
+            nextValues = {
+              ...(repair.prepared.metadata || {}),
+              url: repair.prepared.newUrl || repair.action.newUrl
+            }
+            await book.update(nextValues, { transaction: mangaTransaction })
+            if (book.hash) await Metadata.upsert(selectModelFields(Metadata, book.toJSON()), { transaction: metadataTransaction })
           }
-          await book.update(nextValues, { transaction: mangaTransaction })
-          if (book.hash) await Metadata.upsert(selectModelFields(Metadata, book.toJSON()), { transaction: metadataTransaction })
         }
         completed += 1
         await setProgress({ phase: 'writing-metadata', completed, total: preparedRepairs.length, phaseCompleted: completed, phaseTotal: preparedRepairs.length, currentItem })
@@ -285,8 +308,10 @@ const executeApprovedAnomalies = async ({
           status: 'prepared',
           type: repair.action.type,
           anomalyId: repair.anomaly.id,
-          bookId: book.id,
-          ...(repair.action.type === 'repair-ehviewer'
+          bookId: repair.action.bookId ? String(repair.action.bookId) : null,
+          ...(repair.action.type === 'delete-orphan-metadata'
+            ? { metadataHash: repair.action.metadataHash }
+            : repair.action.type === 'repair-ehviewer'
             ? {
                 filepath: repair.action.filepath,
                 entryPath: repair.action.entryPath,

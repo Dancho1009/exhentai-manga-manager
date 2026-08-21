@@ -12,7 +12,8 @@ const { AuditWorkspaceManager } = require('../modules/audit/job_manager.js')
 const { AuditReportRepository } = require('../modules/audit/report_repository.js')
 const { AuditCache } = require('../modules/audit/cache.js')
 const { EhentaiAvailabilityCache } = require('../modules/ehentai_availability_cache.js')
-const { atomicWriteJson, normalizePath } = require('../modules/audit/utils.js')
+const { atomicWriteJson, normalizePath, metadataFingerprint } = require('../modules/audit/utils.js')
+const { analyzeEntityAnomalies } = require('../modules/audit/anomaly_analyzer.js')
 const { inspectBookContent, inspectEhviewerIdentity, inspectBookHealth } = require('../modules/audit/archive_inspector.js')
 const { executeApprovedActions } = require('../modules/audit/action_executor.js')
 const { normalizeAnomalyReview, normalizeDedupeReview, buildExecutionPreview, getAnomalyAction } = require('../modules/audit/review_validator.js')
@@ -530,6 +531,65 @@ test('review validation keeps anomaly and duplicate approval models independent'
   assert.equal(preview.ehviewerRebuildCount, 1)
   assert.equal(preview.localScanCount, 1)
   assert.equal(preview.identityReplacementCount, 0)
+})
+
+test('orphan metadata produces a batchable delete approval and deletes only the orphan row', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-orphan-metadata-'))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  const executionId = 'orphan-metadata-execution'
+  const executionDir = path.join(auditStorePath, 'executions', executionId)
+  await Promise.all([
+    fs.promises.mkdir(library, { recursive: true }),
+    fs.promises.mkdir(executionDir, { recursive: true })
+  ])
+  const filepath = path.join(library, 'book.zip')
+  await fs.promises.writeFile(filepath, makeArchiveBuffer())
+  const stat = await fs.promises.stat(filepath)
+  const databases = await createDatabases(root, [{
+    id: 'book-1', title: 'book', hash: 'book-hash', filepath, pageCount: 1,
+    bundleSize: stat.size, mtime: stat.mtime.toISOString(), coverHash: 'cover',
+    filecount: 1, tags: { artist: ['author'] }, url: 'https://exhentai.org/g/123456/abcdef1234/'
+  }])
+  const Manga = prepareMangaModel(databases.databasePath)
+  const Metadata = prepareMetadataModel(databases.metadataPath)
+  t.after(async () => {
+    await Promise.all([Manga.sequelize.close(), Metadata.sequelize.close()])
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
+
+  const orphan = await Metadata.create({
+    hash: 'orphan-hash', title: 'orphan metadata', status: 'tagged',
+    tags: { artist: ['orphan'] }, filecount: 12, category: 'Doujinshi', url: 'https://exhentai.org/g/999999/fffffffffff/'
+  })
+  const orphanAnomalies = analyzeEntityAnomalies({
+    actualItems: [{ filepath, size: stat.size, mtimeMs: stat.mtimeMs }],
+    books: [{ raw: (await Manga.findByPk('book-1', { raw: true })), effective: await Manga.findByPk('book-1', { raw: true }) }],
+    metadataRows: [orphan.toJSON()]
+  }).filter(item => item.type === 'orphan-metadata')
+  assert.equal(orphanAnomalies.length, 1)
+  assert.equal(orphanAnomalies[0].action.type, 'delete-orphan-metadata')
+
+  const report = { reportId: 'anomaly:orphan-metadata', executable: true, anomalies: orphanAnomalies }
+  const review = { reportId: report.reportId, actionIds: [orphanAnomalies[0].id] }
+  const preview = buildExecutionPreview({ taskType: 'anomaly', report, review, library })
+  assert.equal(preview.selectedCount, 1)
+  assert.equal(preview.orphanMetadataCount, 1)
+  assert.equal(preview.identityReplacementCount, 0)
+  const reloadedOrphan = await Metadata.findByPk('orphan-hash', { raw: true })
+  assert.equal(metadataFingerprint(reloadedOrphan), orphanAnomalies[0].action.expectedFingerprint)
+
+  const result = await executeApprovedActions({
+    taskType: 'anomaly', anomalyReport: report, anomalyReview: review,
+    executionId, executionDir, auditStorePath,
+    Manga, Metadata, databasePath: databases.databasePath, metadataPath: databases.metadataPath,
+    collectionList: [], rendererState: {}, library,
+    setProgress: async () => {}
+  })
+  assert.equal(result.repairedCount, 1)
+  assert.equal(await Metadata.findByPk('orphan-hash'), null)
+  assert.notEqual(await Metadata.findByPk('book-hash'), null)
+  assert.equal(await Manga.count(), 1)
 })
 
 test('manual source selection turns an unverified page mismatch into an approval action', () => {

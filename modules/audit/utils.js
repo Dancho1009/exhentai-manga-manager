@@ -76,6 +76,16 @@ const parseTags = value => {
   }
 }
 
+const metadataFingerprint = metadata => {
+  const values = {}
+  for (const key of ['hash', 'title', 'status', 'rating', 'title_jpn', 'filecount', 'posted', 'filesize', 'category', 'url']) {
+    values[key] = metadata?.[key] ?? null
+  }
+  values.mark = Boolean(metadata?.mark)
+  values.tags = parseTags(metadata?.tags)
+  return stableId('metadata-row', values)
+}
+
 module.exports = {
   IMAGE_EXTENSIONS,
   ARCHIVE_EXTENSIONS,
@@ -86,5 +96,6 @@ module.exports = {
   hashFile,
   extractGalleryIdentity,
   extractFilenameId,
-  parseTags
+  parseTags,
+  metadataFingerprint
 }

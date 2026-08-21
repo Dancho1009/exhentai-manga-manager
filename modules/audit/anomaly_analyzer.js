@@ -3,7 +3,8 @@ const {
   normalizePath,
   stableId,
   extractGalleryIdentity,
-  extractFilenameId
+  extractFilenameId,
+  metadataFingerprint
 } = require('./utils.js')
 
 const makeAnomaly = (type, severity, data = {}) => ({
@@ -13,6 +14,7 @@ const makeAnomaly = (type, severity, data = {}) => ({
   title: data.title || type,
   bookId: data.bookId || null,
   filepath: data.filepath || null,
+  metadataHash: data.metadataHash || null,
   reason: data.reason || '',
   evidence: data.evidence || {},
   recommendedAction: data.recommendedAction || 'review',
@@ -119,7 +121,18 @@ const analyzeEntityAnomalies = snapshot => {
   for (const metadata of snapshot.metadataRows) {
     if (!mangaHashes.has(metadata.hash)) {
       anomalies.push(makeAnomaly('orphan-metadata', 'low', {
-        metadataHash: metadata.hash, reason: 'metadata.sqlite 记录没有对应 Manga', evidence: { title: metadata.title, url: metadata.url }
+        metadataHash: metadata.hash,
+        title: metadata.title || metadata.hash,
+        reason: 'metadata.sqlite 记录没有对应 Manga',
+        evidence: { title: metadata.title, url: metadata.url, status: metadata.status },
+        recommendedAction: 'delete-orphan-metadata',
+        action: {
+          type: 'delete-orphan-metadata',
+          repairKind: 'delete-orphan-metadata',
+          metadataHash: metadata.hash,
+          expectedFingerprint: metadataFingerprint(metadata),
+          expectedTitle: metadata.title || metadata.hash
+        }
       }))
     }
   }
