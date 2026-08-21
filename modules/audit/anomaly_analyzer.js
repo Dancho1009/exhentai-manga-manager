@@ -3,9 +3,18 @@ const {
   normalizePath,
   stableId,
   extractGalleryIdentity,
-  extractFilenameId,
+  extractFilenameIdentity,
   metadataFingerprint
 } = require('./utils.js')
+
+const getGalleryNamespace = value => {
+  try {
+    const hostname = new URL(String(value || '')).hostname.toLowerCase()
+    if (hostname === 'nhentai.net' || hostname === 'www.nhentai.net') return 'nhentai'
+    if (hostname === 'e-hentai.org' || hostname === 'exhentai.org' || hostname === 'ehentai.org') return 'ehentai'
+  } catch {}
+  return null
+}
 
 const makeAnomaly = (type, severity, data = {}) => ({
   id: stableId(type, data.bookId, data.filepath, data.groupKey, data.metadataHash),
@@ -87,12 +96,20 @@ const analyzeEntityAnomalies = snapshot => {
         bookId: raw.id, filepath: raw.filepath, metadataHash: raw.hash, reason: 'metadata.sqlite 中没有对应 hash'
       }))
     }
-    const identity = extractGalleryIdentity(effective.url)
-    const filenameId = extractFilenameId(raw.filepath)
-    if (identity?.gid && filenameId && identity.gid !== filenameId) {
+    const urlNamespace = getGalleryNamespace(effective.url)
+    const identity = urlNamespace ? extractGalleryIdentity(effective.url) : null
+    const filenameIdentity = extractFilenameIdentity(raw.filepath)
+    const filenameId = filenameIdentity?.id
+    if (identity?.gid && filenameIdentity?.namespace === urlNamespace && filenameId && identity.gid !== filenameId) {
       anomalies.push(makeAnomaly('filename-url-id-conflict', 'high', {
         bookId: raw.id, filepath: raw.filepath, reason: '文件名前缀编号与元数据 URL gid 不一致',
-        evidence: { filenameId, urlGid: identity.gid, url: effective.url }, recommendedAction: 'source-identity-check'
+        evidence: {
+          filenameId,
+          urlGid: identity.gid,
+          url: effective.url,
+          currentUrl: effective.url
+        },
+        recommendedAction: 'source-identity-check'
       }))
     }
     if (effective.status === 'tagged' && !effective.url) {

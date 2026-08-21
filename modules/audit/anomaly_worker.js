@@ -124,6 +124,24 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         continue
       }
       healthById.set(String(wrapped.raw.id), health)
+      const filenameConflict = anomalies.find(item => item.type === 'filename-url-id-conflict' && String(item.bookId) === String(wrapped.raw.id))
+      if (filenameConflict && health.ehviewer?.status === 'parsed' && health.ehviewer.gid && health.ehviewer.token) {
+        const currentIdentity = extractEhentaiIdentity(wrapped.effective.url)
+        const ehviewerIdentity = {
+          gid: String(health.ehviewer.gid),
+          token: String(health.ehviewer.token).toLowerCase()
+        }
+        const sameIdentity = currentIdentity && currentIdentity.gid === ehviewerIdentity.gid && currentIdentity.token === ehviewerIdentity.token
+        if (sameIdentity) {
+          anomalies.splice(anomalies.indexOf(filenameConflict), 1)
+        } else {
+          filenameConflict.evidence = {
+            ...(filenameConflict.evidence || {}),
+            ehviewer: health.ehviewer,
+            candidateUrl: buildGalleryUrl('exhentai', health.ehviewer.gid, health.ehviewer.token)
+          }
+        }
+      }
       if (health.pageCount === 0) {
         anomalies.push(makeAnomaly('archive-no-images', 'high', {
           bookId: wrapped.raw.id,

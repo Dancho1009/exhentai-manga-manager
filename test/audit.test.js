@@ -625,6 +625,115 @@ test('manual source selection turns an unverified page mismatch into an approval
   assert.equal(preview.manualSourceCount, 1)
 })
 
+test('filename URL ID conflicts support selecting either metadata source', () => {
+  const report = {
+    reportId: 'anomaly:filename-source',
+    executable: true,
+    anomalies: [{
+      id: 'filename-conflict',
+      type: 'filename-url-id-conflict',
+      bookId: 'book-1',
+      filepath: 'C:/Library/3424511-book.zip',
+      evidence: {
+        filenameId: '3424511',
+        urlGid: '1111111',
+        currentUrl: 'https://exhentai.org/g/1111111/aaaaaaaaaa/',
+        ehviewer: { gid: '3424511', token: 'bbbbbbbbbb' },
+        candidateUrl: 'https://exhentai.org/g/3424511/bbbbbbbbbb/'
+      },
+      action: null
+    }]
+  }
+  for (const [source, expectedUrl] of [
+    ['current', report.anomalies[0].evidence.currentUrl],
+    ['ehviewer', report.anomalies[0].evidence.candidateUrl]
+  ]) {
+    const action = buildManualSourceAction({
+      anomaly: report.anomalies[0],
+      source,
+      actual: { filepath: report.anomalies[0].filepath, bundleSize: 123, mtimeMs: 456 }
+    })
+    assert.equal(action.repairKind, 'manual-source-selection')
+    assert.equal(action.source, source)
+    assert.equal(action.currentUrl, report.anomalies[0].evidence.currentUrl)
+    assert.equal(action.newUrl, expectedUrl)
+    const review = normalizeAnomalyReview(report, {
+      reportId: report.reportId,
+      actionIds: [report.anomalies[0].id],
+      manualActions: { [report.anomalies[0].id]: action }
+    })
+    assert.equal(getAnomalyAction(report.anomalies[0], review).newUrl, expectedUrl)
+  }
+})
+
+test('filename URL ID conflicts keep the current source available for legacy evidence', () => {
+  const anomaly = {
+    id: 'legacy-filename-conflict',
+    type: 'filename-url-id-conflict',
+    bookId: 'book-1',
+    filepath: 'C:/Library/3424511-book.zip',
+    evidence: {
+      filenameId: '3424511',
+      urlGid: '1111111',
+      url: 'https://exhentai.org/g/1111111/aaaaaaaaaa/',
+      ehviewer: { gid: '3424511', token: 'bbbbbbbbbb' }
+    }
+  }
+  const action = buildManualSourceAction({
+    anomaly,
+    source: 'current',
+    actual: { filepath: anomaly.filepath, bundleSize: 123, mtimeMs: 456 }
+  })
+  assert.equal(action.currentUrl, anomaly.evidence.url)
+  assert.equal(action.newUrl, anomaly.evidence.url)
+})
+
+test('filename URL checks compare only matching namespaces', () => {
+  const filepath = 'C:/Library/nhentai-3651396-nhentai-book.zip'
+  const book = {
+    id: 'nh-book',
+    filepath,
+    hash: 'nh-hash',
+    status: 'tagged',
+    url: 'https://exhentai.org/g/3897009/5cb950a26f/',
+    title: 'nHentai book',
+    category: 'Doujinshi',
+    filecount: 12,
+    tags: { artist: ['artist'] }
+  }
+  const anomalies = analyzeEntityAnomalies({
+    actualItems: [{ filepath, size: 123, mtimeMs: 456 }],
+    books: [{ raw: book, effective: book }],
+    metadataRows: [{ hash: book.hash }]
+  })
+  assert.equal(anomalies.some(item => item.type === 'filename-url-id-conflict'), false)
+
+  const sameNamespaceBook = {
+    ...book,
+    id: 'nh-book-same-namespace',
+    filepath: 'C:/Library/nhentai-611363-nhentai-book.zip',
+    url: 'https://nhentai.net/g/611363/'
+  }
+  const sameNamespaceAnomalies = analyzeEntityAnomalies({
+    actualItems: [{ filepath: sameNamespaceBook.filepath, size: 123, mtimeMs: 456 }],
+    books: [{ raw: sameNamespaceBook, effective: sameNamespaceBook }],
+    metadataRows: [{ hash: sameNamespaceBook.hash }]
+  })
+  assert.equal(sameNamespaceAnomalies.some(item => item.type === 'filename-url-id-conflict'), false)
+
+  const mismatchedSameNamespaceBook = {
+    ...sameNamespaceBook,
+    id: 'nh-book-mismatch',
+    filepath: 'C:/Library/nhentai-3651396-nhentai-book.zip'
+  }
+  const mismatchedSameNamespaceAnomalies = analyzeEntityAnomalies({
+    actualItems: [{ filepath: mismatchedSameNamespaceBook.filepath, size: 123, mtimeMs: 456 }],
+    books: [{ raw: mismatchedSameNamespaceBook, effective: mismatchedSameNamespaceBook }],
+    metadataRows: [{ hash: mismatchedSameNamespaceBook.hash }]
+  })
+  assert.equal(mismatchedSameNamespaceAnomalies.some(item => item.type === 'filename-url-id-conflict'), true)
+})
+
 test('execution requires an explicit task type when both review models contain approvals', async () => {
   await assert.rejects(executeApprovedActions({
     anomalyReview: { actionIds: ['repair'] },
@@ -709,7 +818,7 @@ test('anomaly worker checks individual books and never emits duplicate groups', 
   const library = path.join(root, 'Library')
   const auditStorePath = path.join(root, 'audit')
   await fs.promises.mkdir(library, { recursive: true })
-  const archive = path.join(library, '123456-sample.zip')
+  const archive = path.join(library, '999999-sample.zip')
   const untracked = path.join(library, '654321-untracked.zip')
   const buffer = makeArchiveBuffer()
   await Promise.all([fs.promises.writeFile(archive, buffer), fs.promises.writeFile(untracked, buffer)])
@@ -733,6 +842,7 @@ test('anomaly worker checks individual books and never emits duplicate groups', 
   })
   assert.equal(report.reportType, 'anomaly')
   assert.equal(report.executable, true)
+  assert.equal(report.anomalies.some(item => item.type === 'filename-url-id-conflict'), false)
   assert.ok(report.anomalies.some(item => item.type === 'scan-stale-size'))
   assert.ok(report.anomalies.some(item => item.type === 'scan-page-count-stale'))
   assert.ok(report.anomalies.some(item => item.type === 'library-file-untracked'))

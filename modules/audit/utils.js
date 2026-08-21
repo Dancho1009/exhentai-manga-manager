@@ -61,10 +61,13 @@ const extractGalleryIdentity = value => {
   return match ? { gid: match[1], token: match[2] || null } : null
 }
 
-const extractFilenameId = value => {
-  const match = path.basename(String(value || '')).match(/^(?:nhentai[-_\s]*)?(\d{4,})\b/i)
-  return match?.[1] || null
+const extractFilenameIdentity = value => {
+  const match = path.basename(String(value || '')).match(/^(?:(nhentai)[-_\s]*)?(\d{4,})\b/i)
+  if (!match) return null
+  return { id: match[2], namespace: match[1] ? 'nhentai' : 'ehentai' }
 }
+
+const extractFilenameId = value => extractFilenameIdentity(value)?.id || null
 
 const parseTags = value => {
   if (!value) return {}
@@ -95,6 +98,7 @@ module.exports = {
   stableId,
   hashFile,
   extractGalleryIdentity,
+  extractFilenameIdentity,
   extractFilenameId,
   parseTags,
   metadataFingerprint

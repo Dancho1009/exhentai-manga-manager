@@ -38,7 +38,7 @@ const normalizeManualActions = (report, review = {}) => {
       throw new Error(`INVALID_MANUAL_SOURCE_ACTION: ${id}`)
     }
     const expectedIdentity = rawAction.source === 'current'
-      ? extractGalleryIdentity(anomaly.evidence?.currentUrl)
+      ? extractGalleryIdentity(anomaly.evidence?.currentUrl || anomaly.evidence?.url)
       : extractGalleryIdentity(`https://exhentai.org/g/${anomaly.evidence?.ehviewer?.gid || ''}/${anomaly.evidence?.ehviewer?.token || ''}/`)
     const actionIdentity = extractGalleryIdentity(rawAction.newUrl)
     const actionCurrentIdentity = extractGalleryIdentity(rawAction.currentUrl)

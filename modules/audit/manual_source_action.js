@@ -2,7 +2,8 @@ const { buildGalleryUrl, extractGalleryIdentity } = require('../ehentai.js')
 
 const MANUAL_SOURCE_ANOMALY_TYPES = new Set([
   'unverified-page-mismatch',
-  'ehviewer-url-conflict-online'
+  'ehviewer-url-conflict-online',
+  'filename-url-id-conflict'
 ])
 
 const normalizeSource = value => value === 'ehviewer' ? 'ehviewer' : value === 'current' ? 'current' : null
@@ -20,7 +21,7 @@ const buildManualSourceAction = ({ anomaly, source, actual } = {}) => {
   }
   if (!normalizedSource) throw new Error('MANUAL_SOURCE_SELECTION_INVALID')
 
-  const currentUrl = String(anomaly.evidence?.currentUrl || '').trim() || null
+  const currentUrl = String(anomaly.evidence?.currentUrl || anomaly.evidence?.url || '').trim() || null
   const ehviewerUrl = getEhviewerUrl(anomaly)
   const newUrl = normalizedSource === 'current' ? currentUrl : ehviewerUrl
   if (!newUrl || !extractGalleryIdentity(newUrl)) throw new Error('MANUAL_SOURCE_URL_MISSING')
@@ -44,7 +45,7 @@ const buildManualSourceAction = ({ anomaly, source, actual } = {}) => {
 }
 
 const getManualSourceCandidateUrls = anomaly => ({
-  current: String(anomaly?.evidence?.currentUrl || '').trim() || null,
+  current: String(anomaly?.evidence?.currentUrl || anomaly?.evidence?.url || '').trim() || null,
   ehviewer: getEhviewerUrl(anomaly)
 })
 
