@@ -231,7 +231,7 @@ class AuditReportRepository {
     normalizeTaskType(taskType, REPORT_TASK_TYPES)
     if (!state?.latestCompletedJobId || !state.latestReportId) return null
     const fallback = taskType === 'anomaly'
-      ? { schemaVersion: REVIEW_SCHEMA_VERSION, taskType, reportId: state.latestReportId, actionIds: [] }
+      ? { schemaVersion: REVIEW_SCHEMA_VERSION, taskType, reportId: state.latestReportId, actionIds: [], manualActions: {} }
       : { schemaVersion: REVIEW_SCHEMA_VERSION, taskType, reportId: state.latestReportId, selections: {}, quarantineRoot: '' }
     const reviewPath = path.join(this.getJobDir(taskType, state.latestCompletedJobId), 'review.json')
     const review = await readJson(reviewPath, fallback)
@@ -247,6 +247,7 @@ class AuditReportRepository {
           taskType,
           reportId: state.latestReportId,
           actionIds: [...new Set((review?.actionIds || []).map(String))],
+          manualActions: review?.manualActions && typeof review.manualActions === 'object' ? review.manualActions : {},
           updatedAt: new Date().toISOString()
         }
       : {

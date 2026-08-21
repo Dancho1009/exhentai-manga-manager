@@ -10,6 +10,7 @@ const {
 const { sanitizeEhviewerTitle, prepareEhviewerRepair } = require('./ehviewer_repair.js')
 const { invalidateAuditCacheEntries } = require('./cache.js')
 const { mergeEffectiveBook } = require('../book_detail.js')
+const { getAnomalyAction } = require('./review_validator.js')
 
 const selectModelFields = (model, value) => Object.fromEntries(
   Object.keys(model.rawAttributes || {})
@@ -142,7 +143,9 @@ const executeApprovedAnomalies = async ({
 }) => {
   const review = normalizeAnomalyReview(anomalyReport, anomalyReview)
   const approvedIds = new Set(review.actionIds)
-  const approvedAnomalies = (anomalyReport.anomalies || []).filter(item => item.action && approvedIds.has(String(item.id)))
+  const approvedAnomalies = (anomalyReport.anomalies || [])
+    .map(item => ({ ...item, action: getAnomalyAction(item, review) }))
+    .filter(item => item.action && approvedIds.has(String(item.id)))
   if (approvedAnomalies.length === 0) throw new Error('NO_APPROVED_ACTIONS')
 
   const context = createExecutionContext({ executionDir, auditStorePath, executionId, isCancelled })

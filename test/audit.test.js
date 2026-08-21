@@ -15,7 +15,8 @@ const { EhentaiAvailabilityCache } = require('../modules/ehentai_availability_ca
 const { atomicWriteJson, normalizePath } = require('../modules/audit/utils.js')
 const { inspectBookContent, inspectEhviewerIdentity, inspectBookHealth } = require('../modules/audit/archive_inspector.js')
 const { executeApprovedActions } = require('../modules/audit/action_executor.js')
-const { normalizeAnomalyReview, normalizeDedupeReview, buildExecutionPreview } = require('../modules/audit/review_validator.js')
+const { normalizeAnomalyReview, normalizeDedupeReview, buildExecutionPreview, getAnomalyAction } = require('../modules/audit/review_validator.js')
+const { buildManualSourceAction } = require('../modules/audit/manual_source_action.js')
 const { prepareMangaModel, prepareMetadataModel } = require('../modules/database.js')
 
 const createDatabases = async (root, books) => {
@@ -529,6 +530,39 @@ test('review validation keeps anomaly and duplicate approval models independent'
   assert.equal(preview.ehviewerRebuildCount, 1)
   assert.equal(preview.localScanCount, 1)
   assert.equal(preview.identityReplacementCount, 0)
+})
+
+test('manual source selection turns an unverified page mismatch into an approval action', () => {
+  const report = {
+    reportId: 'anomaly:manual-source',
+    executable: true,
+    anomalies: [{
+      id: 'page-mismatch',
+      type: 'unverified-page-mismatch',
+      bookId: 'book-1',
+      filepath: 'C:/Library/book.zip',
+      evidence: {
+        currentUrl: 'https://exhentai.org/g/1111111/aaaaaaaaaa/',
+        ehviewer: { gid: '2222222', token: 'bbbbbbbbbb' }
+      },
+      action: null
+    }]
+  }
+  const action = buildManualSourceAction({
+    anomaly: report.anomalies[0],
+    source: 'ehviewer',
+    actual: { filepath: report.anomalies[0].filepath, bundleSize: 123, mtimeMs: 456 }
+  })
+  const review = normalizeAnomalyReview(report, {
+    reportId: report.reportId,
+    actionIds: ['page-mismatch'],
+    manualActions: { 'page-mismatch': action }
+  })
+  assert.equal(review.manualActions['page-mismatch'].source, 'ehviewer')
+  assert.equal(getAnomalyAction({ id: 'page-mismatch', action: { type: 'repair-url', newUrl: 'https://exhentai.org/g/1/aaaaaaaaaa/' } }, review).source, 'ehviewer')
+  const preview = buildExecutionPreview({ taskType: 'anomaly', report, review, library: 'C:/Library' })
+  assert.equal(preview.selectedCount, 1)
+  assert.equal(preview.manualSourceCount, 1)
 })
 
 test('execution requires an explicit task type when both review models contain approvals', async () => {

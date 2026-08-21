@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('auditApi', {
   getReview: taskType => ipcRenderer.invoke('audit:get-review', taskType),
   getLogs: limit => ipcRenderer.invoke('audit:get-logs', limit),
   getBookPreview: bookId => ipcRenderer.invoke('audit:get-book-preview', bookId),
+  buildManualSourceAction: request => ipcRenderer.invoke('audit:build-manual-source-action', request),
   openBookDetail: request => ipcRenderer.invoke('audit:open-book-detail', request),
   startAnomaly: options => ipcRenderer.invoke('audit:start-anomaly', options),
   startDedupe: options => ipcRenderer.invoke('audit:start-dedupe', options),

@@ -1,5 +1,6 @@
 const path = require('path')
 const { extractGalleryIdentity, normalizePath } = require('./utils.js')
+const { MANUAL_SOURCE_ANOMALY_TYPES } = require('./manual_source_action.js')
 
 const SUPPORTED_ANOMALY_ACTIONS = new Set(['repair-url', 'repair-ehviewer', 'repair-local-scan'])
 
@@ -19,25 +20,63 @@ const getRepairKind = anomaly => {
     : 'identity-replacement'
 }
 
+const getAnomalyAction = (anomaly, review = {}) => {
+  const manualAction = review?.manualActions?.[normalizeId(anomaly?.id)]
+  return manualAction?.type ? manualAction : anomaly?.action || null
+}
+
+const normalizeManualActions = (report, review = {}) => {
+  const anomalies = new Map((report?.anomalies || []).map(item => [normalizeId(item.id), item]))
+  const manualActions = {}
+  const rawActions = review.manualActions && typeof review.manualActions === 'object' ? review.manualActions : {}
+  for (const [rawId, rawAction] of Object.entries(rawActions)) {
+    const id = normalizeId(rawId)
+    const anomaly = anomalies.get(id)
+    if (!anomaly || !MANUAL_SOURCE_ANOMALY_TYPES.has(anomaly.type)) throw new Error(`MANUAL_SOURCE_ANOMALY_MISSING: ${id}`)
+    if (!rawAction || rawAction.type !== 'repair-url' || rawAction.repairKind !== 'manual-source-selection' ||
+      !['current', 'ehviewer'].includes(rawAction.source) || String(rawAction.anomalyId) !== id) {
+      throw new Error(`INVALID_MANUAL_SOURCE_ACTION: ${id}`)
+    }
+    const expectedIdentity = rawAction.source === 'current'
+      ? extractGalleryIdentity(anomaly.evidence?.currentUrl)
+      : extractGalleryIdentity(`https://exhentai.org/g/${anomaly.evidence?.ehviewer?.gid || ''}/${anomaly.evidence?.ehviewer?.token || ''}/`)
+    const actionIdentity = extractGalleryIdentity(rawAction.newUrl)
+    const actionCurrentIdentity = extractGalleryIdentity(rawAction.currentUrl)
+    if (!expectedIdentity || !actionIdentity || expectedIdentity.gid !== actionIdentity.gid || expectedIdentity.token !== actionIdentity.token ||
+      (rawAction.source === 'current' && (!actionCurrentIdentity || actionCurrentIdentity.gid !== expectedIdentity.gid || actionCurrentIdentity.token !== expectedIdentity.token))) {
+      throw new Error(`INVALID_MANUAL_SOURCE_TARGET: ${id}`)
+    }
+    manualActions[id] = {
+      ...rawAction,
+      anomalyId: id,
+      bookId: rawAction.bookId ? String(rawAction.bookId) : anomaly.bookId ? String(anomaly.bookId) : null,
+      filepath: rawAction.filepath || anomaly.filepath || null
+    }
+  }
+  return manualActions
+}
+
 const normalizeAnomalyReview = (report, review = {}) => {
   ensureMatchingReport(report, review, 'anomaly')
   const actionIds = [...new Set((review.actionIds || []).map(normalizeId).filter(Boolean))]
+  const manualActions = normalizeManualActions(report, review)
   if (actionIds.length > 0 && report.executable === false) throw new Error('ANOMALY_REPORT_NOT_EXECUTABLE')
 
   const actions = new Map((report.anomalies || [])
-    .filter(item => item?.action)
     .map(item => [normalizeId(item.id), item]))
   for (const actionId of actionIds) {
     const anomaly = actions.get(actionId)
-    if (!anomaly) throw new Error(`ANOMALY_ACTION_MISSING: ${actionId}`)
-    if (!SUPPORTED_ANOMALY_ACTIONS.has(anomaly.action.type)) {
-      throw new Error(`UNSUPPORTED_ANOMALY_ACTION: ${anomaly.action.type}`)
+    const action = getAnomalyAction(anomaly, { manualActions })
+    if (!anomaly || !action) throw new Error(`ANOMALY_ACTION_MISSING: ${actionId}`)
+    if (!SUPPORTED_ANOMALY_ACTIONS.has(action.type)) {
+      throw new Error(`UNSUPPORTED_ANOMALY_ACTION: ${action.type}`)
     }
   }
 
   return {
     reportId: report.reportId,
-    actionIds
+    actionIds,
+    manualActions
   }
 }
 
@@ -99,13 +138,16 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
   const normalizedReview = normalizeReview(taskType, report, review)
   if (taskType === 'anomaly') {
     const selected = new Set(normalizedReview.actionIds)
-    const anomalies = (report.anomalies || []).filter(item => item.action && selected.has(normalizeId(item.id)))
+    const anomalies = (report.anomalies || [])
+      .map(item => ({ ...item, action: getAnomalyAction(item, normalizedReview) }))
+      .filter(item => item.action && selected.has(normalizeId(item.id)))
     const sameIdentityCount = anomalies.filter(item => getRepairKind(item) === 'same-identity-domain-switch').length
     const versionUpgradeCount = anomalies.filter(item => getRepairKind(item) === 'gallery-version-upgrade').length
     const sourceRecoveryCount = anomalies.filter(item => getRepairKind(item) === 'source-recovery').length
+    const manualSourceCount = anomalies.filter(item => getRepairKind(item) === 'manual-source-selection').length
     const ehviewerRebuildCount = anomalies.filter(item => item.action?.type === 'repair-ehviewer').length
     const localScanCount = anomalies.filter(item => item.action?.type === 'repair-local-scan').length
-    const identityReplacementCount = anomalies.length - sameIdentityCount - versionUpgradeCount - sourceRecoveryCount - ehviewerRebuildCount - localScanCount
+    const identityReplacementCount = anomalies.length - sameIdentityCount - versionUpgradeCount - sourceRecoveryCount - manualSourceCount - ehviewerRebuildCount - localScanCount
     if (anomalies.length === 0) throw new Error('NO_APPROVED_ACTIONS')
     return {
       valid: true,
@@ -115,6 +157,7 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
       sameIdentityCount,
       versionUpgradeCount,
       sourceRecoveryCount,
+      manualSourceCount,
       ehviewerRebuildCount,
       localScanCount,
       identityReplacementCount
@@ -153,6 +196,7 @@ module.exports = {
   normalizeAnomalyReview,
   normalizeDedupeReview,
   normalizeReview,
+  getAnomalyAction,
   getRepairKind,
   assertQuarantineRoot,
   buildExecutionPreview

@@ -45,6 +45,8 @@ const { AuditWorkspaceManager } = require('./modules/audit/job_manager.js')
 const { executeApprovedActions } = require('./modules/audit/action_executor.js')
 const { buildExecutionPreview } = require('./modules/audit/review_validator.js')
 const { isConclusiveSiteUnavailable, getGalleryVersionRelation } = require('./modules/audit/online_decision.js')
+const { buildManualSourceAction } = require('./modules/audit/manual_source_action.js')
+const { getBookFileSnapshot } = require('./modules/audit/ehviewer_repair.js')
 const { inspectBookHealth } = require('./modules/audit/archive_inspector.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
 const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
@@ -1828,6 +1830,24 @@ ipcMain.handle('audit:get-book-preview', async (event, bookId) => {
   }
 })
 
+ipcMain.handle('audit:build-manual-source-action', async (event, request = {}) => {
+  await databaseReady
+  const report = await auditWorkspaceManager.getReport('anomaly')
+  if (!report || report.executable === false || String(request.reportId || '') !== report.reportId) {
+    throw new Error('ANOMALY_REVIEW_MISMATCH')
+  }
+  const anomaly = (report.anomalies || []).find(item => String(item.id) === String(request.anomalyId || ''))
+  if (!anomaly?.bookId || !anomaly.filepath) throw new Error('MANUAL_SOURCE_ANOMALY_MISSING')
+  const book = await Manga.findByPk(anomaly.bookId, { raw: true })
+  if (!book || book.filepath !== anomaly.filepath) throw new Error('MANUAL_SOURCE_BOOK_CHANGED')
+  const actual = await getBookFileSnapshot({ filepath: book.filepath, type: book.type })
+  return buildManualSourceAction({
+    anomaly,
+    source: request.source,
+    actual: { filepath: book.filepath, ...actual }
+  })
+})
+
 ipcMain.handle('audit:open-book-detail', async (event, request = {}) => {
   return await openBookDetailWindow(request)
 })
@@ -2003,14 +2023,14 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
           const targetSite = getEhentaiSiteFromUrl(action.newUrl)
           const currentSiteStatus = candidate.sites?.[currentSite]?.status
           const targetSiteStatus = candidate.sites?.[targetSite]?.status
-          if (currentSiteStatus === 'available') {
+          if (action.repairKind !== 'manual-source-selection' && currentSiteStatus === 'available') {
             return {
               valid: false,
               error: 'CURRENT_SITE_IS_AVAILABLE',
               detail: { currentSite, currentSiteStatus, targetSite, targetSiteStatus }
             }
           }
-          if (!isConclusiveSiteUnavailable(currentSiteStatus)) {
+          if (action.repairKind !== 'manual-source-selection' && !isConclusiveSiteUnavailable(currentSiteStatus)) {
             return {
               valid: false,
               error: 'CURRENT_SITE_AVAILABILITY_UNCERTAIN',
@@ -2054,7 +2074,7 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
             return { valid: false, error: 'GALLERY_VERSION_RELATION_CHANGED', detail: { versionStatus: versionRelation.status } }
           }
           verifiedCandidateGdata = candidateGdata
-        } else if (identityChanged) {
+        } else if (identityChanged && action.repairKind !== 'manual-source-selection') {
           const current = await checkGallerySites({
             ...currentIdentity,
             preferredSite: getEhentaiSiteFromUrl(action.currentUrl) || 'exhentai',
