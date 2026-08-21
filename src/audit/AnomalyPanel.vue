@@ -53,6 +53,16 @@
           <strong v-if="selectedFilteredCount">{{ $t('audit.selectedFilteredCount', { count: selectedFilteredCount }) }}</strong>
         </div>
       </div>
+      <div v-if="batchSourceAnomalies.length" class="batch-source-row">
+        <span class="batch-source-label">{{ $t('audit.batchSourceTitle') }}</span>
+        <el-select v-model="batchSource" class="batch-source-select" :disabled="reviewLocked || batchSourceLoading" :placeholder="$t('audit.batchSourcePlaceholder')">
+          <el-option v-if="batchSourceCounts.current" value="current" :label="$t('audit.batchSourceCurrent', { count: batchSourceCounts.current })" />
+          <el-option v-if="batchSourceCounts.ehviewer" value="ehviewer" :label="$t('audit.batchSourceEhviewer', { count: batchSourceCounts.ehviewer })" />
+        </el-select>
+        <el-button type="primary" plain :loading="batchSourceLoading" :disabled="reviewLocked || !batchSource || !batchSourceCounts[batchSource]" @click="applyBatchSource">
+          {{ $t('audit.batchSelectSource', { count: batchSourceCounts[batchSource] || 0 }) }}
+        </el-button>
+      </div>
       <div class="audit-table-region">
         <el-empty v-if="showActionableEmpty" class="filtered-empty" :description="actionableEmptyDescription">
           <el-button v-if="onlineDecisionSummary.total" type="primary" plain @click="showOnlineDecisionResults">{{ $t('audit.showOnlineDecisionResults') }}</el-button>
@@ -272,6 +282,8 @@ const bookPreview = ref(null)
 const previewLoading = ref(false)
 const detailOpening = ref(false)
 const manualActionLoading = ref(false)
+const batchSourceLoading = ref(false)
+const batchSource = ref('')
 const autoOpenNextAfterSelection = ref(false)
 let searchTimer
 let previewRequest = 0
@@ -303,7 +315,7 @@ const actionableEmptyDescription = computed(() => onlineDecisionSummary.value.to
   ? t('audit.noActionableSourceConflicts', onlineDecisionSummary.value)
   : t('audit.noActionableInFilter'))
 const filteredBookIds = computed(() => [...new Set(filteredAnomalies.value.map(item => item.bookId).filter(Boolean).map(String))])
-const currentEvidenceUrl = computed(() => selectedAnomaly.value?.evidence?.currentUrl || '')
+const currentEvidenceUrl = computed(() => selectedAnomaly.value?.evidence?.currentUrl || selectedAnomaly.value?.evidence?.url || '')
 const ehviewerEvidenceUrl = computed(() => {
   const value = selectedAnomaly.value?.evidence?.ehviewer
   return value?.gid && value?.token ? `https://exhentai.org/g/${value.gid}/${value.token}/` : ''
@@ -312,11 +324,29 @@ const currentAvailability = computed(() => selectedAnomaly.value?.evidence?.curr
 const ehviewerAvailability = computed(() => selectedAnomaly.value?.evidence?.ehviewerAvailability || null)
 const pageSourceEvidence = computed(() => selectedAnomaly.value?.evidence?.pageSources || null)
 const manualCandidateUrls = computed(() => ({
-  current: String(selectedAnomaly.value?.evidence?.currentUrl || '').trim() || null,
+  current: String(selectedAnomaly.value?.evidence?.currentUrl || selectedAnomaly.value?.evidence?.url || '').trim() || null,
   ehviewer: ehviewerEvidenceUrl.value || null
 }))
-const manualSourceSelectionSupported = computed(() => ['unverified-page-mismatch', 'ehviewer-url-conflict-online'].includes(selectedAnomaly.value?.type) &&
+const manualSourceSelectionSupported = computed(() => ['unverified-page-mismatch', 'ehviewer-url-conflict-online', 'filename-url-id-conflict'].includes(selectedAnomaly.value?.type) &&
   Boolean(manualCandidateUrls.value.current || manualCandidateUrls.value.ehviewer))
+// A filename conflict is report-only until a source is chosen. Keep it in this
+// scope even when the table is filtered to actionable rows so the batch action
+// can be the operation that creates the approval.
+const sourceScopedAnomalies = computed(() => effectiveAnomalies.value.filter(item =>
+  (!severityFilter.value || item.severity === severityFilter.value) &&
+  (!typeFilter.value || item.type === typeFilter.value) &&
+  (!search.value || (searchIndex.value.get(item.id) || '').includes(search.value))))
+const batchSourceAnomalies = computed(() => sourceScopedAnomalies.value.filter(item => item.type === 'filename-url-id-conflict' && item.bookId && item.filepath))
+const getCandidateUrl = (anomaly, source) => source === 'current'
+  ? String(anomaly?.evidence?.currentUrl || anomaly?.evidence?.url || '').trim() || null
+  : (() => {
+      const value = anomaly?.evidence?.ehviewer
+      return value?.gid && value?.token ? `https://exhentai.org/g/${value.gid}/${value.token}/` : null
+    })()
+const batchSourceCounts = computed(() => ({
+  current: batchSourceAnomalies.value.filter(item => getCandidateUrl(item, 'current')).length,
+  ehviewer: batchSourceAnomalies.value.filter(item => getCandidateUrl(item, 'ehviewer')).length
+}))
 const manualSourceForSelected = computed(() => selectedAnomaly.value?.action?.source || '')
 const anomalyNavigation = computed(() => getAnomalyNavigation(filteredAnomalies.value, selectedAnomaly.value?.id))
 const selectedAnomalyPosition = computed(() => anomalyNavigation.value.position)
@@ -413,6 +443,44 @@ const selectManualSource = async source => {
     manualActionLoading.value = false
   }
 }
+const applyBatchSource = async () => {
+  if (batchSourceLoading.value || !batchSource.value) return
+  const targets = batchSourceAnomalies.value.filter(item => getCandidateUrl(item, batchSource.value))
+  if (!targets.length) return
+  batchSourceLoading.value = true
+  const manualActions = { ...props.manualActions }
+  const selectedIds = new Set(props.actionIds)
+  let succeeded = 0
+  let failed = 0
+  try {
+    for (const anomaly of targets) {
+      try {
+        const action = await window.auditApi.buildManualSourceAction({
+          reportId: props.report?.reportId,
+          anomalyId: anomaly.id,
+          source: batchSource.value
+        })
+        manualActions[anomaly.id] = action
+        selectedIds.add(anomaly.id)
+        succeeded += 1
+      } catch (error) {
+        failed += 1
+        console.warn('Failed to build batch metadata source action', anomaly.id, error)
+      }
+    }
+    if (succeeded) {
+      emit('update:manual-actions', manualActions)
+      emit('update:actionIds', [...selectedIds])
+      if (selectedAnomaly.value && manualActions[selectedAnomaly.value.id]) {
+        selectedAnomaly.value = { ...selectedAnomaly.value, action: manualActions[selectedAnomaly.value.id] }
+      }
+      ElMessage.success(t('audit.batchSourceSelected', { count: succeeded }))
+    }
+    if (failed) ElMessage.warning(t('audit.batchSourceFailed', { count: failed }))
+  } finally {
+    batchSourceLoading.value = false
+  }
+}
 const openBookDetail = async () => {
   if (!selectedAnomaly.value?.bookId || detailOpening.value) return
   detailOpening.value = true
@@ -443,6 +511,7 @@ watch([() => filteredAnomalies.value.length, pageSize], ([total, size]) => { pag
 .filter-row { flex: 0 0 auto; display: grid; grid-template-columns: minmax(280px, 1fr) 180px 240px; margin-bottom: 8px; }
 .filter-meta-row { flex: 0 0 auto; min-height: 30px; justify-content: space-between; }
 .filter-counts { color: var(--el-text-color-secondary); font-size: 12px; }.filter-counts strong { color: var(--el-color-primary); }
+.batch-source-row { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-height: 38px; margin-bottom: 8px; padding: 6px 10px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-lighter); }.batch-source-label { color: var(--el-text-color-secondary); font-size: 12px; }.batch-source-select { width: 230px; }
 .audit-table-region { flex: 1 1 auto; min-height: 220px; }.filtered-empty { height: 100%; display: flex; align-items: center; justify-content: center; }.table-pagination { flex: 0 0 auto; justify-content: flex-end; padding-top: 8px; }
 .review-action-bar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 58px; margin-top: 8px; padding: 8px 12px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-lighter); }.review-action-summary { min-width: 0; }.review-action-summary strong, .review-action-summary span { display: block; }.review-action-summary span { margin-top: 3px; color: var(--el-text-color-secondary); font-size: 12px; }.review-action-buttons { display: flex; flex: 0 0 auto; gap: 8px; }
 .anomaly-checkbox { display: inline-flex; align-items: center; justify-content: center; }
