@@ -21,3 +21,30 @@ test('targeted .ehviewer verification rechecks existing actions and report-only 
     { type: 'ehviewer-url-conflict', recommendedAction: 'online-source-check', action: null }
   ]), { total: 3, actionable: 1, manualReview: 1, inconclusive: 1 })
 })
+
+test('anomaly detail navigation follows the filtered order and stops at both ends', async () => {
+  const { getAnomalyNavigation } = await import('../src/audit/anomalyNavigation.mjs')
+  const items = [{ id: 'first' }, { id: 'middle' }, { id: 'last' }]
+  assert.deepEqual(getAnomalyNavigation(items, 'first'), {
+    index: 0,
+    current: items[0],
+    previous: null,
+    next: items[1],
+    position: { current: 1, total: 3 }
+  })
+  assert.deepEqual(getAnomalyNavigation(items, 'middle'), {
+    index: 1,
+    current: items[1],
+    previous: items[0],
+    next: items[2],
+    position: { current: 2, total: 3 }
+  })
+  assert.deepEqual(getAnomalyNavigation(items, 'last'), {
+    index: 2,
+    current: items[2],
+    previous: items[1],
+    next: null,
+    position: { current: 3, total: 3 }
+  })
+  assert.equal(getAnomalyNavigation(items, 'missing').position, null)
+})

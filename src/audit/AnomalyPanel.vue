@@ -29,7 +29,7 @@
       <div><strong>{{ report.summary.mangaRows }}</strong><span>{{ $t('audit.databaseRows') }}</span></div>
       <div><strong>{{ report.summary.anomalies }}</strong><span>{{ $t('audit.anomalies') }}</span></div>
       <div><strong>{{ anomalyBookCount }}</strong><span>{{ $t('audit.anomalyBooks') }}</span></div>
-      <div><strong>{{ report.summary.actionableAnomalies || 0 }}</strong><span>{{ $t('audit.actionableAnomalies') }}</span></div>
+      <div><strong>{{ actionableAnomalyCount }}</strong><span>{{ $t('audit.actionableAnomalies') }}</span></div>
       <div v-if="report.options?.onlinePolicy !== 'none'"><strong>{{ report.summary.onlineIdentities || 0 }}</strong><span>{{ $t('audit.onlineIdentities') }}</span></div>
       <div v-if="report.options?.onlinePolicy !== 'none'"><strong>{{ report.summary.onlineAvailable || 0 }}</strong><span>{{ $t('audit.onlineAvailable') }}</span></div>
       <div v-if="report.options?.onlinePolicy !== 'none'"><strong>{{ report.summary.onlineCopyright || 0 }}</strong><span>{{ $t('audit.onlineCopyright') }}</span></div>
@@ -115,6 +115,19 @@
 
     <el-drawer v-model="drawer" :title="auditTypeLabel(selectedAnomaly?.type)" size="46%">
       <template v-if="selectedAnomaly">
+        <div class="anomaly-navigation" aria-live="polite">
+          <el-button-group>
+            <el-tooltip :content="$t('audit.previousAnomaly')">
+              <el-button :icon="ArrowLeft" :disabled="!previousAnomaly || previewLoading" @click="navigateAnomaly(-1)">{{ $t('audit.previousAnomaly') }}</el-button>
+            </el-tooltip>
+            <el-tooltip :content="$t('audit.nextAnomaly')">
+              <el-button :icon="ArrowRight" :disabled="!nextAnomaly || previewLoading" @click="navigateAnomaly(1)">{{ $t('audit.nextAnomaly') }}</el-button>
+            </el-tooltip>
+          </el-button-group>
+          <span v-if="selectedAnomalyPosition" class="anomaly-navigation-count">
+            {{ $t('audit.anomalyPosition', selectedAnomalyPosition) }}
+          </span>
+        </div>
         <div class="anomaly-detail-grid" :class="{ 'has-book-preview': selectedAnomaly.bookId }">
           <aside v-if="selectedAnomaly.bookId" class="anomaly-book-preview">
             <el-tooltip :content="$t('audit.openBookDetailWindow')" placement="bottom">
@@ -142,9 +155,44 @@
               </el-descriptions-item>
               <el-descriptions-item v-if="currentAvailability" :label="$t('audit.currentAvailability')"><availability-list :value="currentAvailability" /></el-descriptions-item>
               <el-descriptions-item v-if="ehviewerAvailability && ehviewerEvidenceUrl !== currentEvidenceUrl" :label="$t('audit.ehviewerAvailability')"><availability-list :value="ehviewerAvailability" /></el-descriptions-item>
+              <el-descriptions-item v-if="pageSourceEvidence" :label="$t('audit.sourcePageCounts')">
+                <div class="page-count-evidence">
+                  <div class="page-count-row page-count-header">
+                    <span>{{ $t('audit.source') }}</span><span>{{ $t('audit.pages') }}</span><span>{{ $t('audit.status') }}</span>
+                  </div>
+                  <div class="page-count-row">
+                    <span>{{ $t('audit.localPages') }}</span><strong>{{ selectedAnomaly.evidence?.localPages ?? '-' }}</strong><span>-</span>
+                  </div>
+                  <div class="page-count-row">
+                    <span>{{ $t('audit.currentUrl') }}</span><strong>{{ formatPageCount(pageSourceEvidence.currentUrl) }}</strong><el-tag size="small" effect="plain">{{ formatPageStatus(pageSourceEvidence.currentUrl) }}</el-tag>
+                  </div>
+                  <div class="page-count-row">
+                    <span>{{ $t('audit.ehviewerUrl') }}</span><strong>{{ formatPageCount(pageSourceEvidence.ehviewerUrl) }}</strong><el-tag size="small" effect="plain">{{ formatPageStatus(pageSourceEvidence.ehviewerUrl) }}</el-tag>
+                  </div>
+                </div>
+              </el-descriptions-item>
             </el-descriptions>
           </div>
         </div>
+        <section v-if="manualSourceSelectionSupported" class="manual-source-selection" aria-labelledby="manual-source-selection-title">
+          <div class="manual-source-heading">
+            <div>
+              <strong id="manual-source-selection-title">{{ $t('audit.manualSourceSelectionTitle') }}</strong>
+              <span>{{ $t('audit.manualSourceSelectionDescription') }}</span>
+            </div>
+            <el-tag :type="selectedAnomaly.action ? 'success' : 'warning'" effect="plain">
+              {{ selectedAnomaly.action ? $t('audit.approvableRepair') : $t('audit.reportOnly') }}
+            </el-tag>
+          </div>
+          <el-radio-group :model-value="manualSourceForSelected" :disabled="reviewLocked || manualActionLoading" @change="selectManualSource">
+            <el-radio-button v-if="manualCandidateUrls.current" value="current">{{ $t('audit.useCurrentSource') }}</el-radio-button>
+            <el-radio-button v-if="manualCandidateUrls.ehviewer" value="ehviewer">{{ $t('audit.useEhviewerSource') }}</el-radio-button>
+          </el-radio-group>
+          <el-checkbox v-model="autoOpenNextAfterSelection" class="auto-next-selection" :disabled="reviewLocked || manualActionLoading">
+            {{ $t('audit.autoOpenNextAfterSourceSelection') }}
+          </el-checkbox>
+          <el-alert v-if="selectedAnomaly.action" class="manual-source-alert" type="success" :closable="false" :title="$t('audit.manualSourceSelected')" show-icon />
+        </section>
         <section v-if="selectedAnomaly.type === 'ehviewer-invalid'" class="ehviewer-recovery-preview" aria-labelledby="ehviewer-recovery-title">
           <div class="ehviewer-recovery-heading">
             <div>
@@ -189,9 +237,10 @@
 import { computed, defineComponent, h, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElIcon, ElMessage, ElTag } from 'element-plus'
-import { Close, Connection, DocumentChecked, FolderOpened, Picture, Search, Select, TopRight, VideoPlay } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowRight, Close, Connection, DocumentChecked, FolderOpened, Picture, Search, Select, TopRight, VideoPlay } from '@element-plus/icons-vue'
 import { buildEhviewerRecoveryPreview } from './ehviewerRecoveryPreview.mjs'
 import { collectOnlineSourceBookIds, summarizeOnlineSourceDecisions } from './anomalyOnlineSelection.mjs'
+import { getAnomalyNavigation } from './anomalyNavigation.mjs'
 
 const props = defineProps({
   report: { type: Object, default: null },
@@ -199,10 +248,11 @@ const props = defineProps({
   busy: Boolean,
   reviewLocked: Boolean,
   actionIds: { type: Array, default: () => [] },
+  manualActions: { type: Object, default: () => ({}) },
   reviewSaving: Boolean,
   reviewDirty: Boolean
 })
-const emit = defineEmits(['start', 'verify-conflicts', 'update:actionIds', 'save-review', 'execute'])
+const emit = defineEmits(['start', 'verify-conflicts', 'update:actionIds', 'update:manual-actions', 'save-review', 'execute'])
 const { t, te } = useI18n()
 const onlinePolicy = ref('none')
 const forceLocal = ref(false)
@@ -221,15 +271,20 @@ const selectedAnomaly = ref(null)
 const bookPreview = ref(null)
 const previewLoading = ref(false)
 const detailOpening = ref(false)
+const manualActionLoading = ref(false)
+const autoOpenNextAfterSelection = ref(false)
 let searchTimer
 let previewRequest = 0
 
 const running = computed(() => ['running', 'cancelling'].includes(props.state.status))
 const lastRunText = computed(() => props.state.completedAt ? t('audit.lastCheckedAt', { time: new Date(props.state.completedAt).toLocaleString() }) : t('audit.neverChecked'))
 const anomalyBookCount = computed(() => props.report?.summary?.anomalyBooks ?? new Set((props.report?.anomalies || []).filter(item => item.bookId).map(item => String(item.bookId))).size)
-const anomalyTypes = computed(() => [...new Set((props.report?.anomalies || []).map(item => item.type))].sort())
-const searchIndex = computed(() => new Map((props.report?.anomalies || []).map(item => [item.id, normalizeSearchText(`${item.type} ${auditTypeLabel(item.type)} ${item.reason} ${item.filepath}`)])))
-const filteredAnomalies = computed(() => (props.report?.anomalies || []).filter(item =>
+const anomalyAction = item => props.manualActions?.[item?.id]?.type ? props.manualActions[item.id] : item?.action || null
+const effectiveAnomalies = computed(() => (props.report?.anomalies || []).map(item => ({ ...item, action: anomalyAction(item) })))
+const actionableAnomalyCount = computed(() => effectiveAnomalies.value.filter(item => item.action).length)
+const anomalyTypes = computed(() => [...new Set(effectiveAnomalies.value.map(item => item.type))].sort())
+const searchIndex = computed(() => new Map(effectiveAnomalies.value.map(item => [item.id, normalizeSearchText(`${item.type} ${auditTypeLabel(item.type)} ${item.reason} ${item.filepath}`)])))
+const filteredAnomalies = computed(() => effectiveAnomalies.value.filter(item =>
   (!severityFilter.value || item.severity === severityFilter.value) &&
   (!typeFilter.value || item.type === typeFilter.value) &&
   (!actionableOnly.value || Boolean(item.action)) &&
@@ -255,6 +310,18 @@ const ehviewerEvidenceUrl = computed(() => {
 })
 const currentAvailability = computed(() => selectedAnomaly.value?.evidence?.currentAvailability || null)
 const ehviewerAvailability = computed(() => selectedAnomaly.value?.evidence?.ehviewerAvailability || null)
+const pageSourceEvidence = computed(() => selectedAnomaly.value?.evidence?.pageSources || null)
+const manualCandidateUrls = computed(() => ({
+  current: String(selectedAnomaly.value?.evidence?.currentUrl || '').trim() || null,
+  ehviewer: ehviewerEvidenceUrl.value || null
+}))
+const manualSourceSelectionSupported = computed(() => ['unverified-page-mismatch', 'ehviewer-url-conflict-online'].includes(selectedAnomaly.value?.type) &&
+  Boolean(manualCandidateUrls.value.current || manualCandidateUrls.value.ehviewer))
+const manualSourceForSelected = computed(() => selectedAnomaly.value?.action?.source || '')
+const anomalyNavigation = computed(() => getAnomalyNavigation(filteredAnomalies.value, selectedAnomaly.value?.id))
+const selectedAnomalyPosition = computed(() => anomalyNavigation.value.position)
+const previousAnomaly = computed(() => anomalyNavigation.value.previous)
+const nextAnomaly = computed(() => anomalyNavigation.value.next)
 const bookTitle = computed(() => bookPreview.value?.title_jpn || bookPreview.value?.title || '')
 const ehviewerRecoveryPreview = computed(() => buildEhviewerRecoveryPreview({
   url: bookPreview.value?.url || currentEvidenceUrl.value,
@@ -290,6 +357,12 @@ const toggleAllFiltered = value => {
   const ids = new Set(filteredActionableIds.value)
   emit('update:actionIds', value ? [...new Set([...props.actionIds, ...ids])] : props.actionIds.filter(id => !ids.has(id)))
 }
+const formatPageCount = source => source?.pages === null || source?.pages === undefined ? '-' : `${source.pages}P`
+const formatPageStatus = source => {
+  if (!source?.status) return '-'
+  const key = `audit.availability_${source.status}`
+  return te(key) ? t(key) : source.status
+}
 const showOnlineDecisionResults = () => {
   actionableOnly.value = false
   if (anomalyTypes.value.includes('ehviewer-url-conflict-online')) typeFilter.value = 'ehviewer-url-conflict-online'
@@ -309,6 +382,31 @@ const openAnomaly = async row => {
     if (requestId === previewRequest) bookPreview.value = preview
   } finally {
     if (requestId === previewRequest) previewLoading.value = false
+  }
+}
+const navigateAnomaly = step => {
+  const target = step < 0 ? previousAnomaly.value : nextAnomaly.value
+  if (target) void openAnomaly(target)
+}
+const selectManualSource = async source => {
+  if (!selectedAnomaly.value || !manualSourceSelectionSupported.value || manualActionLoading.value) return
+  manualActionLoading.value = true
+  try {
+    const action = await window.auditApi.buildManualSourceAction({
+      reportId: props.report?.reportId,
+      anomalyId: selectedAnomaly.value.id,
+      source
+    })
+    const manualActions = { ...props.manualActions, [selectedAnomaly.value.id]: action }
+    emit('update:manual-actions', manualActions)
+    emit('update:actionIds', [...new Set([...props.actionIds, selectedAnomaly.value.id])])
+    selectedAnomaly.value = { ...selectedAnomaly.value, action }
+    ElMessage.success(t('audit.manualSourceSelected'))
+    if (autoOpenNextAfterSelection.value && nextAnomaly.value) await openAnomaly(nextAnomaly.value)
+  } catch (error) {
+    ElMessage.error(String(error?.message || error))
+  } finally {
+    manualActionLoading.value = false
   }
 }
 const openBookDetail = async () => {
@@ -349,6 +447,8 @@ watch([() => filteredAnomalies.value.length, pageSize], ([total, size]) => { pag
 .anomaly-cover { box-sizing: border-box; display: block; width: 150px; aspect-ratio: 500 / 707; overflow: hidden; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); border-radius: 4px; }.anomaly-cover-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--el-text-color-secondary); font-size: 12px; text-align: center; }.anomaly-cover-placeholder .el-icon { font-size: 28px; }.anomaly-book-preview p { display: -webkit-box; margin: 8px 0 0; overflow: hidden; color: var(--el-text-color-regular); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .ehviewer-recovery-preview { margin-top: 20px; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.ehviewer-recovery-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.ehviewer-recovery-heading strong, .ehviewer-recovery-heading span { display: block; }.ehviewer-recovery-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.ehviewer-recovery-meta { display: grid; grid-template-columns: minmax(0, 1fr) 120px; margin: 0 0 12px; border: 1px solid var(--el-border-color); }.ehviewer-recovery-meta > div { min-width: 0; padding: 10px 12px; }.ehviewer-recovery-meta > div + div { border-left: 1px solid var(--el-border-color); }.ehviewer-recovery-meta dt { color: var(--el-text-color-secondary); font-size: 12px; }.ehviewer-recovery-meta dd { min-width: 0; margin: 5px 0 0; overflow-wrap: anywhere; }.ehviewer-recovery-meta .el-link { max-width: 100%; vertical-align: top; }.ehviewer-recovery-content { min-height: 92px; margin: 0; padding: 14px; overflow: auto; color: var(--el-text-color-primary); font-family: Consolas, 'Courier New', monospace; line-height: 1.55; white-space: pre-wrap; word-break: break-all; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); }
 .ehviewer-recovery-alert { margin-top: 12px; }
+.manual-source-selection { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.manual-source-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.manual-source-heading strong, .manual-source-heading span { display: block; }.manual-source-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.auto-next-selection { display: flex; margin-top: 12px; }.manual-source-alert { margin-top: 12px; }
+.anomaly-navigation { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -4px 0 16px; }.anomaly-navigation-count { color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }.page-count-evidence { display: grid; gap: 4px; width: 100%; font-size: 12px; }.page-count-row { display: grid; grid-template-columns: minmax(0, 1fr) 72px minmax(88px, auto); align-items: center; gap: 10px; min-height: 28px; }.page-count-row > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.page-count-row strong { color: var(--el-text-color-primary); }.page-count-header { color: var(--el-text-color-secondary); border-bottom: 1px solid var(--el-border-color); }.page-count-header span:nth-child(2), .page-count-row strong { text-align: right; }
 .availability-list { display: flex; flex-direction: column; gap: 8px; }.availability-item { display: inline-flex; align-items: center; gap: 8px; margin-right: 12px; }.evidence-block { padding: 14px; overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); }
 @media (max-width: 900px) { .task-toolbar, .task-toolbar-main, .review-action-bar { align-items: flex-start; flex-wrap: wrap; }.filter-row { grid-template-columns: 1fr; }.anomaly-detail-grid.has-book-preview, .ehviewer-recovery-meta { grid-template-columns: minmax(0, 1fr); }.ehviewer-recovery-meta > div + div { border-top: 1px solid var(--el-border-color); border-left: 0; } }
 </style>

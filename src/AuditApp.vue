@@ -54,11 +54,13 @@
             :busy="busy"
             :review-locked="reviewLocked"
             :action-ids="anomalyReview.actionIds"
+            :manual-actions="anomalyReview.manualActions"
             :review-saving="reviewSaving.anomaly"
             :review-dirty="reviewDirty.anomaly"
             @start="startAnomaly"
             @verify-conflicts="verifyConflicts"
             @update:action-ids="updateAnomalyActions"
+            @update:manual-actions="updateAnomalyManualActions"
             @save-review="saveAnomalyReview"
             @execute="prepareExecution('anomaly')"
           />
@@ -230,7 +232,7 @@ const normalizeWorkspace = value => ({
 })
 
 const defaultReview = (taskType, report) => taskType === 'anomaly'
-  ? { reportId: report?.reportId || null, actionIds: [] }
+  ? { reportId: report?.reportId || null, actionIds: [], manualActions: {} }
   : { reportId: report?.reportId || null, selections: {}, quarantineRoot: defaultQuarantineRoot }
 
 const loadTaskData = async taskType => {
@@ -350,6 +352,11 @@ const scheduleReviewSave = taskType => {
 const updateAnomalyActions = actionIds => {
   reviewRevision.anomaly += 1
   anomalyReview.value = { ...anomalyReview.value, actionIds }
+  scheduleReviewSave('anomaly')
+}
+const updateAnomalyManualActions = manualActions => {
+  reviewRevision.anomaly += 1
+  anomalyReview.value = { ...anomalyReview.value, manualActions }
   scheduleReviewSave('anomaly')
 }
 const updateDedupeSelections = selections => {
