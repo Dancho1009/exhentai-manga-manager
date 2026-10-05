@@ -48,3 +48,12 @@ test('anomaly detail navigation follows the filtered order and stops at both end
   })
   assert.equal(getAnomalyNavigation(items, 'missing').position, null)
 })
+
+test('page recovery selection updates one row without losing previous rows', async () => {
+  const { mergePageRecoveryPageSelection, togglePageRecoverySelection } = await import('../src/audit/pageRecoverySelection.mjs')
+  assert.deepEqual(togglePageRecoverySelection([], 'book:1', true), ['book:1'])
+  assert.deepEqual(togglePageRecoverySelection(['book:1'], 'book:2', true), ['book:1', 'book:2'])
+  assert.deepEqual(togglePageRecoverySelection(['book:1', 'book:2'], 'book:1', false), ['book:2'])
+  assert.deepEqual(mergePageRecoveryPageSelection(['book:1', 'book:3'], ['book:1', 'book:2'], ['book:2']), ['book:3', 'book:2'])
+  assert.deepEqual(mergePageRecoveryPageSelection(['book:1', 'book:2'], ['book:1', 'book:2'], []), [])
+})

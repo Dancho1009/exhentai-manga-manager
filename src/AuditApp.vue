@@ -58,11 +58,13 @@
             :review-saving="reviewSaving.anomaly"
             :review-dirty="reviewDirty.anomaly"
             @start="startAnomaly"
+            @prepare-safe="prepareSafeActions"
             @verify-conflicts="verifyConflicts"
             @update:action-ids="updateAnomalyActions"
             @update:manual-actions="updateAnomalyManualActions"
             @save-review="saveAnomalyReview"
             @execute="prepareExecution('anomaly')"
+            @recovery-completed="reloadAll"
           />
         </el-tab-pane>
         <el-tab-pane :label="$t('audit.dedupTab')" name="dedupe">
@@ -296,6 +298,21 @@ const runAction = async action => {
 }
 
 const startAnomaly = options => runAction(() => window.auditApi.startAnomaly(options))
+const prepareSafeActions = async () => {
+  if (busy.value || !anomalyReport.value) return
+  actionPending.value = true
+  try {
+    const result = await window.auditApi.prepareSafeActions()
+    anomalyReview.value = result.review
+    reviewDirty.anomaly = false
+    executionPreview.value = result.preview
+    executionDialogVisible.value = true
+  } catch (error) {
+    showError(error)
+  } finally {
+    actionPending.value = false
+  }
+}
 const verifyConflicts = bookIds => runAction(() => window.auditApi.startAnomaly({
   onlinePolicy: 'conflicts',
   onlineBookIds: bookIds,
