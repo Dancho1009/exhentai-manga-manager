@@ -47,6 +47,8 @@ const { buildExecutionPreview } = require('./modules/audit/review_validator.js')
 const { isConclusiveSiteUnavailable, getGalleryVersionRelation } = require('./modules/audit/online_decision.js')
 const { buildManualSourceAction } = require('./modules/audit/manual_source_action.js')
 const { getBookFileSnapshot } = require('./modules/audit/ehviewer_repair.js')
+const { PageRecoveryManager } = require('./modules/audit/page_recovery.js')
+const { invalidateAuditCacheEntries } = require('./modules/audit/cache.js')
 const { inspectBookHealth } = require('./modules/audit/archive_inspector.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
 const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
@@ -104,6 +106,17 @@ let Metadata = prepareMetadataModel(metadataSqliteFile)
 const bookDetailService = createBookDetailService({ Manga, getMetadata: () => Metadata })
 const libraryTaskCoordinator = new LibraryTaskCoordinator()
 const auditWorkspaceManager = new AuditWorkspaceManager({ storePath: STORE_PATH, coordinator: libraryTaskCoordinator })
+const pageRecoveryManager = new PageRecoveryManager({
+  storePath: STORE_PATH,
+  Manga,
+  getSetting: () => setting,
+  sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe')
+})
+const serializePageRecoveryResult = value => JSON.parse(JSON.stringify(value ?? null))
+const isPageRecoveryResolved = result => {
+  if (Array.isArray(result?.session?.remainingMissingPages)) return result.session.remainingMissingPages.length === 0
+  return Number(result?.health?.imageSequence?.gapCount || 0) === 0
+}
 const sendAuditState = state => {
   if (auditWindow && !auditWindow.isDestroyed()) auditWindow.webContents.send('audit:state', state)
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('audit:lock-state', state.lock)
@@ -1850,6 +1863,163 @@ ipcMain.handle('audit:build-manual-source-action', async (event, request = {}) =
 
 ipcMain.handle('audit:open-book-detail', async (event, request = {}) => {
   return await openBookDetailWindow(request)
+})
+
+ipcMain.handle('audit:page-recovery-fetch', async (event, request = {}) => {
+  await databaseReady
+  const report = await auditWorkspaceManager.getReport('anomaly')
+  if (!report || String(request.reportId || '') !== String(report.reportId || '')) throw new Error('PAGE_RECOVERY_REVIEW_MISMATCH')
+  const result = await pageRecoveryManager.fetchSelectedPages({
+    report,
+    anomalyId: request.anomalyId,
+    source: request.source,
+    pageNumbers: request.pageNumbers,
+    includeBoundaryPages: request.includeBoundaryPages === true
+  })
+  return serializePageRecoveryResult(result)
+})
+
+ipcMain.handle('audit:page-recovery-get-state', async (event, recoveryId) => {
+  return serializePageRecoveryResult(await pageRecoveryManager.getSession(recoveryId))
+})
+
+ipcMain.handle('audit:page-recovery-get-latest', async (event, request = {}) => {
+  await databaseReady
+  return serializePageRecoveryResult(await pageRecoveryManager.getLatestSession(request))
+})
+
+ipcMain.handle('audit:page-recovery-list-latest', async (event, request = {}) => {
+  await databaseReady
+  return serializePageRecoveryResult(await pageRecoveryManager.listLatestSessionSummaries(request))
+})
+
+ipcMain.handle('audit:page-recovery-cancel', async (event, recoveryId) => {
+  return serializePageRecoveryResult(await pageRecoveryManager.cancel(recoveryId))
+})
+
+ipcMain.handle('audit:page-recovery-cleanup', async (event, recoveryId) => {
+  return serializePageRecoveryResult(await pageRecoveryManager.cleanup(recoveryId))
+})
+
+const persistPageRecoveryApplication = async applied => {
+  const session = applied.session
+  const snapshot = await getBookFileSnapshot({ filepath: session.filepath, type: session.bookType })
+  await Manga.update({
+    pageCount: applied.health.pageCount,
+    bundleSize: snapshot.bundleSize,
+    mtime: snapshot.mtime
+  }, { where: { id: session.bookId } })
+  await invalidateAuditCacheEntries(path.join(STORE_PATH, 'audit'), [session.filepath])
+  return { ...applied, snapshot }
+}
+
+ipcMain.handle('audit:page-recovery-apply', async (event, request = {}) => {
+  await databaseReady
+  const report = await auditWorkspaceManager.getReport('anomaly')
+  const canContinuePageRecovery = report?.staleReason === 'page-recovery'
+  if (!report || (report.stale && !canContinuePageRecovery) || String(request.reportId || '') !== String(report.reportId || '')) throw new Error('PAGE_RECOVERY_REVIEW_MISMATCH')
+  const result = await libraryTaskCoordinator.runMutation('page-recovery', async () => {
+    const applied = await pageRecoveryManager.apply({
+      report,
+      recoveryId: request.recoveryId,
+      candidateIds: request.candidateIds,
+      confirmPageMapping: request.confirmPageMapping === true
+    })
+    return await persistPageRecoveryApplication(applied)
+  })
+  const resolved = isPageRecoveryResolved(result)
+  if (resolved) await auditWorkspaceManager.markAnomaliesResolved(report.reportId, [String(result.session.anomalyId)])
+  await auditWorkspaceManager.markReportsStale('page-recovery')
+  bookDetailService.invalidateTagCatalog()
+  notifyBookChanged({ bookId: result.session.bookId })
+  notifyLibraryChanged()
+  return serializePageRecoveryResult({ ...result, resolved })
+})
+
+ipcMain.handle('audit:page-recovery-apply-batch', async (event, request = {}) => {
+  await databaseReady
+  const report = await auditWorkspaceManager.getReport('anomaly')
+  const canContinuePageRecovery = report?.staleReason === 'page-recovery'
+  if (!report || (report.stale && !canContinuePageRecovery) || String(request.reportId || '') !== String(report.reportId || '')) throw new Error('PAGE_RECOVERY_REVIEW_MISMATCH')
+  const anomalyIds = [...new Set((Array.isArray(request.anomalyIds) ? request.anomalyIds : [])
+    .map(value => String(value || '').trim())
+    .filter(Boolean))].slice(0, 2000)
+  if (!anomalyIds.length) throw new Error('PAGE_RECOVERY_BATCH_SELECTION_EMPTY')
+
+  const batch = await libraryTaskCoordinator.runMutation('page-recovery-batch', async () => {
+    const summaries = await pageRecoveryManager.listLatestSessionSummaries({
+      reportId: report.reportId,
+      anomalyIds
+    })
+    const summaryByAnomalyId = new Map((summaries || []).map(item => [String(item.anomalyId), item]))
+    const results = []
+    for (const anomalyId of anomalyIds) {
+      try {
+        const summary = summaryByAnomalyId.get(anomalyId)
+        const session = summary
+          ? await pageRecoveryManager.getLatestSession({ reportId: report.reportId, anomalyId, recoveryId: summary.recoveryId })
+          : null
+        if (!session) {
+          results.push({ anomalyId, status: 'skipped', reason: 'PAGE_RECOVERY_SESSION_MISSING' })
+          continue
+        }
+        if (session.status !== 'awaiting-confirmation') {
+          results.push({ anomalyId, recoveryId: session.recoveryId, status: 'skipped', reason: 'PAGE_RECOVERY_SESSION_NOT_READY' })
+          continue
+        }
+        if (session.batchWriteBackSupported !== true) {
+          results.push({ anomalyId, recoveryId: session.recoveryId, status: 'skipped', reason: session.batchWriteBackReason || 'PAGE_RECOVERY_BATCH_MAPPING_UNCERTAIN' })
+          continue
+        }
+        const candidateIds = (session.candidates || [])
+          .filter(candidate => candidate.status === 'downloaded')
+          .map(candidate => candidate.id)
+        if (!candidateIds.length) {
+          results.push({ anomalyId, recoveryId: session.recoveryId, status: 'skipped', reason: 'PAGE_RECOVERY_CANDIDATE_SELECTION_EMPTY' })
+          continue
+        }
+        const applied = await pageRecoveryManager.apply({
+          report,
+          recoveryId: session.recoveryId,
+          candidateIds,
+          confirmPageMapping: false
+        })
+        const persisted = await persistPageRecoveryApplication(applied)
+        const resolved = isPageRecoveryResolved(persisted)
+        results.push({
+          anomalyId,
+          recoveryId: persisted.session.recoveryId,
+          bookId: persisted.session.bookId,
+          status: resolved ? 'completed' : 'awaiting-confirmation',
+          resolved,
+          pageCount: persisted.health.pageCount,
+          remainingMissingPages: persisted.session.remainingMissingPages || []
+        })
+        await notifyBookChanged({ bookId: persisted.session.bookId })
+      } catch (error) {
+        results.push({ anomalyId, status: 'failed', reason: String(error?.message || error) })
+      }
+    }
+    return results
+  })
+
+  const completed = batch.filter(item => item.status === 'completed')
+  const awaiting = batch.filter(item => item.status === 'awaiting-confirmation')
+  const resolvedIds = completed.filter(item => item.resolved).map(item => String(item.anomalyId))
+  if (resolvedIds.length) await auditWorkspaceManager.markAnomaliesResolved(report.reportId, resolvedIds)
+  if (completed.length) {
+    await auditWorkspaceManager.markReportsStale('page-recovery')
+    bookDetailService.invalidateTagCatalog()
+    notifyLibraryChanged()
+  }
+  return serializePageRecoveryResult({
+    results: batch,
+    completedCount: completed.length,
+    appliedCount: completed.length + awaiting.length,
+    awaitingCount: awaiting.length,
+    skippedCount: batch.filter(item => item.status === 'skipped').length,
+    failedCount: batch.filter(item => item.status === 'failed').length
+  })
 })
 
 const normalizeAuditBookIds = values => Array.isArray(values)

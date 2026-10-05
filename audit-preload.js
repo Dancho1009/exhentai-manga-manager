@@ -5,6 +5,7 @@ const listen = (channel, listener) => {
   ipcRenderer.on(channel, wrapped)
   return () => ipcRenderer.removeListener(channel, wrapped)
 }
+const cloneIpcPayload = value => JSON.parse(JSON.stringify(value ?? null))
 
 contextBridge.exposeInMainWorld('auditApi', {
   loadSetting: () => ipcRenderer.invoke('load-setting'),
@@ -26,6 +27,16 @@ contextBridge.exposeInMainWorld('auditApi', {
   executeApproved: options => ipcRenderer.invoke('audit:execute-approved', options),
   showFile: filepath => ipcRenderer.invoke('audit:show-file', filepath),
   openUrl: url => ipcRenderer.invoke('audit:open-url', url),
+  pageRecovery: {
+    fetch: request => ipcRenderer.invoke('audit:page-recovery-fetch', cloneIpcPayload(request)),
+    getState: recoveryId => ipcRenderer.invoke('audit:page-recovery-get-state', recoveryId),
+    getLatest: request => ipcRenderer.invoke('audit:page-recovery-get-latest', cloneIpcPayload(request)),
+    listLatest: request => ipcRenderer.invoke('audit:page-recovery-list-latest', cloneIpcPayload(request)),
+    apply: request => ipcRenderer.invoke('audit:page-recovery-apply', cloneIpcPayload(request)),
+    applyBatch: request => ipcRenderer.invoke('audit:page-recovery-apply-batch', cloneIpcPayload(request)),
+    cancel: recoveryId => ipcRenderer.invoke('audit:page-recovery-cancel', recoveryId),
+    cleanup: recoveryId => ipcRenderer.invoke('audit:page-recovery-cleanup', recoveryId)
+  },
   selectQuarantine: defaultPath => ipcRenderer.invoke('audit:select-quarantine', defaultPath),
   onState: listener => listen('audit:state', listener),
   onLog: listener => listen('audit:log', listener)

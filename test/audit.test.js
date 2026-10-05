@@ -19,6 +19,7 @@ const { executeApprovedActions } = require('../modules/audit/action_executor.js'
 const { normalizeAnomalyReview, normalizeDedupeReview, buildExecutionPreview, getAnomalyAction } = require('../modules/audit/review_validator.js')
 const { buildManualSourceAction } = require('../modules/audit/manual_source_action.js')
 const { classifyAnomalyAction, getBatchSafeActionIds, getWorkflowSummary } = require('../modules/audit/action_policy.js')
+const { listPendingRecoverySummaries } = require('../modules/audit/page_recovery.js')
 const { prepareMangaModel, prepareMetadataModel } = require('../modules/database.js')
 
 test('simplified anomaly workflow classifies safe, manual, and report-only actions', () => {
@@ -196,6 +197,114 @@ test('anomaly worker reports internal image sequence gaps without changing page 
   assert.equal(anomaly.evidence.remotePages, undefined)
   assert.deepEqual(anomaly.evidence.imageSequence.gaps[0].missingNumbers, [3])
   assert.equal(report.summary.onlineIdentities, 0)
+})
+
+test('anomaly worker restores pending page recovery from the audit store path', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-pending-recovery-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  const archive = path.join(library, '123456-pending-recovery.zip')
+  await fs.promises.mkdir(library, { recursive: true })
+  await fs.promises.writeFile(archive, makeSequenceArchiveBuffer({
+    names: ['00000001.webp', '00000003.webp', '00000004.webp']
+  }))
+  const stat = await fs.promises.stat(archive)
+  const databases = await createDatabases(root, [{
+    id: 'pending-recovery-book', title: 'pending recovery', hash: 'pending-recovery-hash', filepath: archive,
+    pageCount: 3, bundleSize: stat.size, mtime: stat.mtime.toISOString(), coverHash: 'cover',
+    filecount: 3, url: 'https://exhentai.org/g/123456/abcdef1234/'
+  }])
+  const recoveryId = 'pending-recovery-session'
+  const recoveryDir = path.join(auditStorePath, 'page-recovery', 'jobs', recoveryId)
+  await fs.promises.mkdir(recoveryDir, { recursive: true })
+  await fs.promises.writeFile(path.join(recoveryDir, 'state.json'), JSON.stringify({
+    recoveryId,
+    bookId: 'pending-recovery-book',
+    filepath: archive,
+    status: 'awaiting-confirmation',
+    remainingMissingPages: [2]
+  }))
+  await fs.promises.writeFile(path.join(recoveryDir, 'summary.json'), JSON.stringify({
+    recoveryId,
+    bookId: 'pending-recovery-book',
+    filepath: archive,
+    status: 'awaiting-confirmation',
+    remainingMissingPages: [2]
+  }))
+  const report = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js', root, jobId: 'pending-recovery-job',
+    options: { library, auditStorePath, onlinePolicy: 'none', sevenZipPath: null, ...databases }
+  })
+  const anomaly = report.anomalies.find(item => item.bookId === 'pending-recovery-book' && item.type === 'archive-image-sequence-gap')
+  assert.ok(anomaly)
+  assert.deepEqual(anomaly.evidence.pendingPageRecovery.remainingMissingPages, [2])
+})
+
+test('anomaly worker ignores a pending page after the current archive is complete', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-stale-recovery-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  const archive = path.join(library, '123456-stale-recovery.zip')
+  await fs.promises.mkdir(library, { recursive: true })
+  await fs.promises.writeFile(archive, makeSequenceArchiveBuffer({
+    names: ['00000001.webp', '00000002.webp', '00000003.webp']
+  }))
+  const stat = await fs.promises.stat(archive)
+  const databases = await createDatabases(root, [{
+    id: 'stale-recovery-book', title: 'stale recovery', hash: 'stale-recovery-hash', filepath: archive,
+    pageCount: 3, bundleSize: stat.size, mtime: stat.mtime.toISOString(), coverHash: 'cover',
+    filecount: 3, url: 'https://exhentai.org/g/123456/abcdef1234/'
+  }])
+  const recoveryId = 'stale-recovery-session'
+  const recoveryDir = path.join(auditStorePath, 'page-recovery', 'jobs', recoveryId)
+  await fs.promises.mkdir(recoveryDir, { recursive: true })
+  await fs.promises.writeFile(path.join(recoveryDir, 'state.json'), JSON.stringify({
+    recoveryId,
+    bookId: 'stale-recovery-book',
+    filepath: archive,
+    status: 'awaiting-confirmation',
+    remainingMissingPages: [2]
+  }))
+  await fs.promises.writeFile(path.join(recoveryDir, 'summary.json'), JSON.stringify({
+    recoveryId,
+    bookId: 'stale-recovery-book',
+    filepath: archive,
+    status: 'awaiting-confirmation',
+    remainingMissingPages: [2]
+  }))
+
+  const report = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js', root, jobId: 'stale-recovery-job',
+    options: { library, auditStorePath, onlinePolicy: 'none', sevenZipPath: null, ...databases }
+  })
+  assert.equal(report.anomalies.some(item => item.bookId === 'stale-recovery-book' && item.type === 'archive-image-sequence-gap'), false)
+})
+
+test('latest completed page recovery supersedes an older pending session', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-latest-recovery-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const auditStorePath = path.join(root, 'audit')
+  const jobsPath = path.join(auditStorePath, 'page-recovery', 'jobs')
+  const base = {
+    bookId: 'latest-recovery-book',
+    filepath: path.join(root, 'latest-recovery.zip')
+  }
+  const writeSession = async (recoveryId, status, remainingMissingPages, timestamp) => {
+    const directory = path.join(jobsPath, recoveryId)
+    await fs.promises.mkdir(directory, { recursive: true })
+    const payload = JSON.stringify({ recoveryId, ...base, status, remainingMissingPages })
+    const statePath = path.join(directory, 'state.json')
+    await fs.promises.writeFile(statePath, payload)
+    await fs.promises.writeFile(path.join(directory, 'summary.json'), payload)
+    const date = new Date(timestamp)
+    await fs.promises.utimes(statePath, date, date)
+  }
+  await writeSession('older-pending', 'awaiting-confirmation', [98], '2026-10-05T01:00:00.000Z')
+  await writeSession('newer-completed', 'completed', [], '2026-10-05T02:00:00.000Z')
+
+  assert.deepEqual(await listPendingRecoverySummaries(root), [])
 })
 
 test('task coordinator blocks mutations while an audit owns the library', async () => {

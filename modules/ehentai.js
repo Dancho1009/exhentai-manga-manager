@@ -181,6 +181,43 @@ const requestText = async ({ url, setting, method = 'GET', body, headers = {}, f
   }
 }
 
+const requestBinary = async ({ url, setting, headers = {}, fetchImpl = fetch, retry = true }) => {
+  const gap = normalizePositiveInteger(setting?.requireGap, 0)
+  const queueKey = getRequestQueueKey(url)
+  const execute = async () => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 30000)
+    try {
+      const options = {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+        redirect: 'follow'
+      }
+      if (setting?.proxy) options.agent = new HttpsProxyAgent(setting.proxy)
+      return await fetchImpl(url, options)
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  try {
+    let response = await enqueueRequest(queueKey, execute, gap)
+    if (retry && SERVICE_HTTP_STATUS.has(response.status)) {
+      await sleep(retryDelay(response))
+      response = await enqueueRequest(queueKey, execute, gap)
+    }
+    return {
+      buffer: Buffer.from(await response.arrayBuffer()),
+      httpStatus: response.status,
+      contentType: response.headers?.get?.('content-type') || '',
+      finalUrl: response.url || url,
+      headers: response.headers
+    }
+  } catch (error) {
+    return { buffer: null, error, httpStatus: null, contentType: '', finalUrl: url, headers: null }
+  }
+}
+
 const checkGallerySite = async ({ site, gid, token, setting, force = false, cache, fetchImpl }) => {
   if (!force && cache) {
     const cached = await cache.get({ site, gid, token })
@@ -334,8 +371,13 @@ const getGalleryPage = async ({ url, setting = {}, fetchImpl }) => {
   const identity = extractGalleryIdentity(url)
   const site = getSiteFromUrl(url)
   if (!identity || !site) throw new Error('INVALID_EHENTAI_URL')
+  let requestedUrl = buildGalleryUrl(site, identity.gid, identity.token)
+  const inputUrl = new URL(url)
+  if (inputUrl.search) {
+    requestedUrl += inputUrl.search
+  }
   const response = await requestText({
-    url: buildGalleryUrl(site, identity.gid, identity.token),
+    url: requestedUrl,
     setting,
     headers: { Cookie: buildCookie(setting) },
     fetchImpl
@@ -344,7 +386,7 @@ const getGalleryPage = async ({ url, setting = {}, fetchImpl }) => {
   const classified = classifyGalleryHtml({
     html: response.body,
     httpStatus: response.httpStatus,
-    requestedUrl: url,
+    requestedUrl,
     finalUrl: response.finalUrl
   })
   return {
@@ -412,6 +454,8 @@ module.exports = {
   checkGallerySite,
   checkGallerySites,
   getGalleryPage,
+  requestText,
+  requestBinary,
   getGalleryMetadata,
   getGdata,
   getGdataBatch,

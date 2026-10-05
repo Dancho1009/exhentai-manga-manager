@@ -29,6 +29,7 @@ const { atomicWriteJson, normalizePath } = require('./utils.js')
 const { REPORT_SCHEMA_VERSION, getReportId } = require('./report_repository.js')
 const { createWorkerRuntime, mapWithConcurrency } = require('./worker_runtime.js')
 const { classifyAnomalies, getWorkflowSummary } = require('./action_policy.js')
+const { listPendingRecoverySummaries, getRecoveryMissingPages } = require('./page_recovery.js')
 
 const LOCAL_INSPECTION_CONCURRENCY = 4
 const runtime = createWorkerRuntime()
@@ -243,6 +244,62 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
           evidence: { localPages: health.pageCount, remotePages: wrapped.effective.filecount, ehviewer, currentUrl: wrapped.effective.url }
         }))
       }
+    }
+
+    // A previous write-back may have fixed internal gaps while leaving inferred
+    // leading/trailing pages pending. Keep that review state visible on the
+    // next audit instead of letting the resolved internal gap hide it.
+    // `auditStorePath` already points at `<store>/audit`; the recovery manager
+    // accepts the application store root and appends `audit/page-recovery`.
+    const pendingRecoverySummaries = await listPendingRecoverySummaries(path.dirname(options.auditStorePath))
+    const wrappedById = new Map(wrappedBooks.map(item => [String(item.raw.id), item]))
+    for (const pending of pendingRecoverySummaries) {
+      let remainingMissingPages = [...new Set((pending.remainingMissingPages || []).map(Number).filter(Number.isSafeInteger))].sort((a, b) => a - b)
+      if (!remainingMissingPages.length) continue
+      const wrapped = wrappedById.get(String(pending.bookId)) || wrappedBooks.find(item => normalizePath(item.raw.filepath) === normalizePath(pending.filepath))
+      const health = wrapped ? healthById.get(String(wrapped.raw.id)) : null
+      const actual = wrapped ? wrapped.actual : null
+      if (!wrapped || !health || !actual) continue
+      if (health.imageSequence?.status === 'checked') {
+        const currentMissingPages = new Set(getRecoveryMissingPages(health, pending.online?.pageCount))
+        remainingMissingPages = remainingMissingPages.filter(page => currentMissingPages.has(page))
+        if (!remainingMissingPages.length) continue
+      }
+      const currentUrl = wrapped.effective.url || null
+      const pendingEvidence = {
+        recoveryId: pending.recoveryId,
+        onlinePageCount: Number(pending.online?.pageCount) || null,
+        remainingMissingPages,
+        source: pending.source || null,
+        appliedAt: pending.appliedAt || null
+      }
+      const existing = anomalies.find(item => item.type === 'archive-image-sequence-gap' && String(item.bookId) === String(wrapped.raw.id))
+      if (existing) {
+        existing.reason = `${existing.reason}；写回后仍有 ${remainingMissingPages.length} 个待确认缺页`
+        existing.evidence = {
+          ...(existing.evidence || {}),
+          currentUrl: currentUrl || existing.evidence?.currentUrl || null,
+          pendingPageRecovery: pendingEvidence
+        }
+        continue
+      }
+      anomalies.push(makeAnomaly('archive-image-sequence-gap', 'high', {
+        bookId: wrapped.raw.id,
+        filepath: wrapped.raw.filepath,
+        reason: `写回后仍有 ${remainingMissingPages.length} 个待确认缺页`,
+        evidence: {
+          basis: 'page-recovery-remaining-pages',
+          pageCount: health.pageCount,
+          currentUrl,
+          ehviewer: health.ehviewer?.gid && health.ehviewer?.token ? health.ehviewer : null,
+          ehviewerUrl: health.ehviewer?.gid && health.ehviewer?.token
+            ? buildGalleryUrl('exhentai', health.ehviewer.gid, health.ehviewer.token)
+            : null,
+          imageSequence: health.imageSequence,
+          pendingPageRecovery: pendingEvidence
+        },
+        recommendedAction: 'review'
+      }))
     }
 
     const onlineChecks = []
