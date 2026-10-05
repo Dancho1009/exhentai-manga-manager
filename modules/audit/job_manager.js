@@ -10,7 +10,7 @@ const {
   createIdleState,
   normalizeTaskType
 } = require('./report_repository.js')
-const { normalizeReview } = require('./review_validator.js')
+const { normalizeReview, buildSafeAnomalyReview } = require('./review_validator.js')
 const { clearAuditCacheDatabase } = require('./cache.js')
 
 const ACTIVE_STATUSES = new Set(['running', 'cancelling'])
@@ -20,6 +20,7 @@ const sanitizeOptions = (taskType, options = {}) => {
   if (taskType === 'anomaly') {
     return {
       forceLocal: Boolean(options.forceLocal),
+      workflow: options.workflow === 'standard' ? 'standard' : 'legacy',
       onlinePolicy: ['conflicts', 'urls', 'ehviewer'].includes(options.onlinePolicy) ? options.onlinePolicy : 'none',
       onlineBookCount: Array.isArray(options.onlineBookIds) ? options.onlineBookIds.length : Number(options.onlineBookCount || 0),
       forceOnline: Boolean(options.forceOnline)
@@ -519,6 +520,14 @@ class AuditWorkspaceManager extends EventEmitter {
     const report = await this.getReport(taskType)
     const normalized = normalizeReview(taskType, report, review)
     return await this.repository.saveReview(taskType, this.states[taskType], normalized)
+  }
+
+  async prepareSafeAnomalyActions() {
+    const report = await this.getReport('anomaly')
+    if (!report) throw new Error('AUDIT_REPORT_MISSING')
+    const review = await this.getReview('anomaly')
+    const normalized = buildSafeAnomalyReview(report, review || { reportId: report.reportId })
+    return await this.repository.saveReview('anomaly', this.states.anomaly, normalized)
   }
 
   async markAnomaliesResolved(reportId, anomalyIds) {

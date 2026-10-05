@@ -1870,9 +1870,12 @@ const getAuditWorkerOptions = () => ({
 
 ipcMain.handle('audit:start-anomaly', async (event, request = {}) => {
   await databaseReady
-  const onlinePolicy = ['conflicts', 'urls', 'ehviewer'].includes(request.onlinePolicy) ? request.onlinePolicy : 'none'
+  const onlinePolicy = request.workflow === 'standard'
+    ? (['conflicts', 'urls', 'ehviewer'].includes(request.onlinePolicy) ? request.onlinePolicy : 'conflicts')
+    : (['conflicts', 'urls', 'ehviewer'].includes(request.onlinePolicy) ? request.onlinePolicy : 'none')
   return await auditWorkspaceManager.startAnomaly({
     ...getAuditWorkerOptions(),
+    workflow: request.workflow === 'standard' ? 'standard' : 'legacy',
     forceLocal: Boolean(request.forceLocal),
     onlinePolicy,
     onlineBookIds: normalizeAuditBookIds(request.onlineBookIds),
@@ -1900,6 +1903,14 @@ ipcMain.handle('audit:cancel-active', async () => await auditWorkspaceManager.ca
 ipcMain.handle('audit:clear-inspection-records', async () => await auditWorkspaceManager.clearInspectionRecords())
 ipcMain.handle('audit:save-review', async (event, { taskType, review } = {}) => {
   return await auditWorkspaceManager.saveReview(taskType, review || {})
+})
+
+ipcMain.handle('audit:prepare-safe-actions', async () => {
+  await databaseReady
+  const review = await auditWorkspaceManager.prepareSafeAnomalyActions()
+  const report = await auditWorkspaceManager.getReport('anomaly')
+  const preview = buildExecutionPreview({ taskType: 'anomaly', report, review, library: setting.library })
+  return { review, preview }
 })
 
 ipcMain.handle('audit:get-execution-preview', async (event, request = {}) => {

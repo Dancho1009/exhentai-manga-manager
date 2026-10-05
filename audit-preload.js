@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('auditApi', {
   cancelActive: () => ipcRenderer.invoke('audit:cancel-active'),
   clearInspectionRecords: () => ipcRenderer.invoke('audit:clear-inspection-records'),
   saveReview: (taskType, review) => ipcRenderer.invoke('audit:save-review', { taskType, review }),
+  prepareSafeActions: () => ipcRenderer.invoke('audit:prepare-safe-actions'),
   getExecutionPreview: request => ipcRenderer.invoke('audit:get-execution-preview', request),
   executeApproved: options => ipcRenderer.invoke('audit:execute-approved', options),
   showFile: filepath => ipcRenderer.invoke('audit:show-file', filepath),

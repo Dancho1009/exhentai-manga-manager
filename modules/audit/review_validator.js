@@ -1,6 +1,7 @@
 const path = require('path')
 const { extractGalleryIdentity, normalizePath } = require('./utils.js')
 const { MANUAL_SOURCE_ANOMALY_TYPES } = require('./manual_source_action.js')
+const { getBatchSafeActionIds } = require('./action_policy.js')
 
 const SUPPORTED_ANOMALY_ACTIONS = new Set(['repair-url', 'repair-ehviewer', 'repair-local-scan', 'delete-orphan-metadata'])
 
@@ -85,6 +86,14 @@ const normalizeAnomalyReview = (report, review = {}) => {
     actionIds,
     manualActions
   }
+}
+
+const buildSafeAnomalyReview = (report, review = {}) => {
+  ensureMatchingReport(report, review, 'anomaly')
+  return normalizeAnomalyReview(report, {
+    ...review,
+    actionIds: getBatchSafeActionIds(report)
+  })
 }
 
 const normalizeDedupeReview = (report, review = {}) => {
@@ -203,6 +212,7 @@ const buildExecutionPreview = ({ taskType, report, review, library }) => {
 module.exports = {
   SUPPORTED_ANOMALY_ACTIONS,
   normalizeAnomalyReview,
+  buildSafeAnomalyReview,
   normalizeDedupeReview,
   normalizeReview,
   getAnomalyAction,

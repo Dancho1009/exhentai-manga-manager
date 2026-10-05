@@ -18,7 +18,58 @@ const { inspectBookContent, inspectEhviewerIdentity, inspectBookHealth } = requi
 const { executeApprovedActions } = require('../modules/audit/action_executor.js')
 const { normalizeAnomalyReview, normalizeDedupeReview, buildExecutionPreview, getAnomalyAction } = require('../modules/audit/review_validator.js')
 const { buildManualSourceAction } = require('../modules/audit/manual_source_action.js')
+const { classifyAnomalyAction, getBatchSafeActionIds, getWorkflowSummary } = require('../modules/audit/action_policy.js')
 const { prepareMangaModel, prepareMetadataModel } = require('../modules/database.js')
+
+test('simplified anomaly workflow classifies safe, manual, and report-only actions', () => {
+  const safe = {
+    id: 'safe-1',
+    bookId: 'book-1',
+    type: 'gallery-domain-fallback',
+    action: { type: 'repair-url', repairKind: 'same-identity-domain-switch' }
+  }
+  const manual = {
+    id: 'manual-1',
+    bookId: 'book-1',
+    type: 'ehviewer-url-conflict-online',
+    reason: '两个来源都可访问'
+  }
+  const reportOnly = {
+    id: 'report-1',
+    bookId: 'book-2',
+    type: 'exact-source-page-mismatch',
+    reason: '页数不同'
+  }
+  const noAction = {
+    id: 'no-action-1',
+    bookId: 'book-3',
+    type: 'ehviewer-url-conflict-online',
+    recommendedAction: 'no-action',
+    reason: '在线状态不足以自动决策'
+  }
+  const manualReview = {
+    id: 'manual-review-1',
+    bookId: 'book-4',
+    type: 'ehviewer-url-conflict-online',
+    recommendedAction: 'manual-review',
+    reason: '两个来源都可访问'
+  }
+
+  assert.equal(classifyAnomalyAction(safe).actionPolicy, 'batch-safe')
+  assert.equal(classifyAnomalyAction(manual).actionPolicy, 'manual')
+  assert.equal(classifyAnomalyAction(reportOnly).actionPolicy, 'report-only')
+  assert.equal(classifyAnomalyAction(noAction).actionPolicy, 'report-only')
+  assert.equal(classifyAnomalyAction(manualReview).actionPolicy, 'manual')
+  assert.deepEqual(getBatchSafeActionIds({ anomalies: [safe, manual, reportOnly] }), ['safe-1'])
+  assert.deepEqual(getWorkflowSummary({ anomalies: [safe, manual, reportOnly] }), {
+    batchSafeAnomalies: 1,
+    batchSafeBooks: 1,
+    manualReviewAnomalies: 1,
+    manualReviewBooks: 1,
+    reportOnlyAnomalies: 1,
+    reportOnlyBooks: 1
+  })
+})
 
 const createDatabases = async (root, books) => {
   const databasePath = path.join(root, 'database.sqlite')
@@ -461,6 +512,7 @@ test('workspace state strips credentials and marks old reports read-only after l
   await manager.initialize()
   assert.deepEqual(manager.getState().channels.anomaly.options, {
     forceLocal: false,
+    workflow: 'legacy',
     onlinePolicy: 'ehviewer',
     onlineBookCount: 0,
     forceOnline: true
@@ -1146,6 +1198,7 @@ test('online audit offers to rebuild a stale unavailable .ehviewer from the curr
   assert.equal(sync.action?.repairKind, 'ehviewer-sync-to-current-metadata')
   assert.equal(sync.action?.currentUrl, 'https://exhentai.org/g/2000000/bbbbbbbbbb/')
   assert.deepEqual(sync.action?.identity, { gid: '2000000', token: 'bbbbbbbbbb' })
+  assert.equal(sync.evidence?.localPages, 1)
   assert.equal(sync.evidence?.pageSources?.currentUrl?.pages, 10)
   assert.equal(sync.evidence?.pageSources?.ehviewerUrl?.pages, 7)
   const pageMismatch = report.anomalies.find(item => item.bookId === 'sync-book' && item.type === 'unverified-page-mismatch')

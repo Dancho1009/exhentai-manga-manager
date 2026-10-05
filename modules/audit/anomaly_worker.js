@@ -28,6 +28,7 @@ const { getEhviewerRepairSupport, normalizeEhviewerIdentity, sanitizeEhviewerTit
 const { atomicWriteJson, normalizePath } = require('./utils.js')
 const { REPORT_SCHEMA_VERSION, getReportId } = require('./report_repository.js')
 const { createWorkerRuntime, mapWithConcurrency } = require('./worker_runtime.js')
+const { classifyAnomalies, getWorkflowSummary } = require('./action_policy.js')
 
 const LOCAL_INSPECTION_CONCURRENCY = 4
 const runtime = createWorkerRuntime()
@@ -234,7 +235,6 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
           'ehviewer-invalid',
           'ehviewer-url-conflict',
           'ehviewer-source-recoverable',
-          'exact-source-page-mismatch',
           'unverified-page-mismatch'
         ].includes(item.type))
         .map(item => String(item.bookId)))
@@ -330,6 +330,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         const currentPageGdata = currentIdentity ? versionMetadata.get(`${currentIdentity.gid}:${currentIdentity.token}`) : null
         const ehviewerPageGdata = ehviewerIdentity ? versionMetadata.get(`${ehviewerIdentity.gid}:${ehviewerIdentity.token}`) : null
         const currentUrl = wrapped.effective.url || null
+        const localPages = healthById.get(String(wrapped.raw.id))?.pageCount ?? null
         const pageSources = {
           currentUrl: toPageSourceEvidence({ url: currentUrl, gdata: currentPageGdata }),
           ehviewerUrl: toPageSourceEvidence({
@@ -342,7 +343,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         if (pageMismatchAnomaly) {
           pageMismatchAnomaly.evidence = { ...(pageMismatchAnomaly.evidence || {}), pageSources }
         }
-        const evidence = { currentUrl, ehviewer, currentAvailability, ehviewerAvailability, pageSources }
+        const evidence = { currentUrl, ehviewer, currentAvailability, ehviewerAvailability, localPages, pageSources }
         const currentAvailable = isIdentityWebAvailable(currentAvailability)
         const currentStatus = summarizeAvailability(currentAvailability)
         if (currentAvailability && currentStatus !== 'available') {
@@ -594,9 +595,12 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     }
 
     progress('finalizing-report', 0, 1, null)
-    sortAnomalies(anomalies)
+    const classifiedAnomalies = classifyAnomalies(anomalies)
+    sortAnomalies(classifiedAnomalies)
+    const workflowSummary = getWorkflowSummary({ anomalies: classifiedAnomalies })
     const report = {
       schemaVersion: REPORT_SCHEMA_VERSION,
+      workflowVersion: 2,
       reportType: 'anomaly',
       reportId: getReportId('anomaly', jobId),
       jobId,
@@ -605,6 +609,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       createdAt: snapshot.createdAt,
       source: { library: options.library, databasePath: options.databasePath, metadataPath: options.metadataPath },
       options: {
+        workflow: options.workflow === 'standard' ? 'standard' : 'legacy',
         forceLocal: Boolean(options.forceLocal),
         onlinePolicy,
         forceOnline: Boolean(options.forceOnline)
@@ -613,15 +618,16 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         libraryItems: snapshot.actualItems.length,
         mangaRows: snapshot.books.length,
         metadataRows: snapshot.metadataRows.length,
-        anomalies: anomalies.length,
-        anomalyBooks: new Set(anomalies.filter(item => item.bookId).map(item => String(item.bookId))).size,
-        actionableAnomalies: anomalies.filter(item => item.action).length,
+        anomalies: classifiedAnomalies.length,
+        anomalyBooks: new Set(classifiedAnomalies.filter(item => item.bookId).map(item => String(item.bookId))).size,
+        actionableAnomalies: classifiedAnomalies.filter(item => item.action).length,
+        ...workflowSummary,
         onlineIdentities: onlineChecks.length,
         onlineCopyright: onlineChecks.filter(item => Object.values(item.sites).some(site => site.status === 'copyright')).length,
         onlineAvailable: onlineChecks.filter(item => isIdentityWebAvailable(item)).length,
         versionChainMatches
       },
-      anomalies,
+      anomalies: classifiedAnomalies,
       onlineChecks
     }
     const reportPath = path.join(jobDir, 'report.json')
