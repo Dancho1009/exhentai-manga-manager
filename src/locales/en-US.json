@@ -441,6 +441,7 @@
     "type_orphan-metadata": "Orphan metadata record",
     "type_archive-inspection-failed": "Archive inspection failed",
     "type_archive-no-images": "Archive contains no supported images",
+    "type_archive-image-sequence-gap": "Local image sequence has missing numbers",
     "type_scan-page-count-stale": "Stored page count differs from archive content",
     "type_ehviewer-ambiguous": "Multiple .ehviewer files",
     "type_ehviewer-invalid": ".ehviewer cannot be parsed",

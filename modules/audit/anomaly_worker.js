@@ -151,6 +151,28 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
           evidence: { pageCount: health.pageCount }
         }))
       }
+      if (health.imageSequence?.gapCount > 0) {
+        const gapGroups = health.imageSequence.gaps || []
+        const gapSummary = gapGroups
+          .map(group => `${group.directory === '.' ? '根目录' : group.directory}: ${group.missingCount} 个编号`)
+          .join('；')
+        anomalies.push(makeAnomaly('archive-image-sequence-gap', 'high', {
+          bookId: wrapped.raw.id,
+          filepath: wrapped.raw.filepath,
+          reason: `图片序号存在缺口（${gapSummary}）`,
+          evidence: {
+            basis: 'local-image-entry-names',
+            pageCount: health.pageCount,
+            currentUrl: wrapped.raw.url || null,
+            ehviewer: health.ehviewer?.gid && health.ehviewer?.token ? health.ehviewer : null,
+            ehviewerUrl: health.ehviewer?.gid && health.ehviewer?.token
+              ? buildGalleryUrl('exhentai', health.ehviewer.gid, health.ehviewer.token)
+              : null,
+            imageSequence: health.imageSequence
+          },
+          recommendedAction: 'review'
+        }))
+      }
       if (Number(wrapped.raw.pageCount || 0) !== Number(health.pageCount || 0)) {
         const pageCountAnomaly = makeAnomaly('scan-page-count-stale', 'medium', {
           bookId: wrapped.raw.id,

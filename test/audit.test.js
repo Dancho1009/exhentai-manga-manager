@@ -14,7 +14,7 @@ const { AuditCache } = require('../modules/audit/cache.js')
 const { EhentaiAvailabilityCache } = require('../modules/ehentai_availability_cache.js')
 const { atomicWriteJson, normalizePath, metadataFingerprint } = require('../modules/audit/utils.js')
 const { analyzeEntityAnomalies } = require('../modules/audit/anomaly_analyzer.js')
-const { inspectBookContent, inspectEhviewerIdentity, inspectBookHealth } = require('../modules/audit/archive_inspector.js')
+const { analyzeImageSequence, inspectBookContent, inspectEhviewerIdentity, inspectBookHealth } = require('../modules/audit/archive_inspector.js')
 const { executeApprovedActions } = require('../modules/audit/action_executor.js')
 const { normalizeAnomalyReview, normalizeDedupeReview, buildExecutionPreview, getAnomalyAction } = require('../modules/audit/review_validator.js')
 const { buildManualSourceAction } = require('../modules/audit/manual_source_action.js')
@@ -148,12 +148,55 @@ const makeArchiveBuffer = ({ image = 'image-one', gid = '123456', token = 'abcde
   return zip.toBuffer()
 }
 
+const makeSequenceArchiveBuffer = ({ names, gid = '123456', token = 'abcdef1234' } = {}) => {
+  const zip = new AdmZip()
+  for (const name of names) zip.addFile(name, Buffer.from(name))
+  zip.addFile('.ehviewer', Buffer.from(`VERSION2\nname\n${gid}\n${token}\n`))
+  return zip.toBuffer()
+}
+
 const writeWorkerReport = async ({ workerFilename, root, jobId, options, onMessage = () => {} }) => {
   const jobDir = path.join(root, 'audit', 'jobs', workerFilename.startsWith('anomaly') ? 'anomaly' : 'dedupe', jobId)
   await fs.promises.mkdir(jobDir, { recursive: true })
   const completed = await runAuditWorker(workerFilename, { jobId, jobDir, options, onMessage })
   return JSON.parse(await fs.promises.readFile(completed.reportPath, 'utf8'))
 }
+
+test('anomaly worker reports internal image sequence gaps without changing page count', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-image-sequence-gap-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const archive = path.join(library, '123456-sequence-gap.zip')
+  await fs.promises.writeFile(archive, makeSequenceArchiveBuffer({
+    names: ['00000001.webp', '00000002.webp', '00000004.webp', '00000005.webp']
+  }))
+  const stat = await fs.promises.stat(archive)
+  const health = await inspectBookHealth({ filepath: archive, type: 'zip' })
+  assert.equal(health.pageCount, 4)
+  assert.deepEqual(health.imageSequence.gaps[0].missingNumbers, [3])
+  assert.equal(analyzeImageSequence(['cover.webp', 'page-a.webp', 'page-b.webp']).status, 'not-applicable')
+
+  const databases = await createDatabases(root, [{
+    id: 'sequence-gap-book', title: 'sequence gap', hash: 'sequence-gap-hash', filepath: archive,
+    pageCount: 4, bundleSize: stat.size, mtime: stat.mtime.toISOString(), coverHash: 'cover',
+    filecount: 999, url: 'https://exhentai.org/g/123456/abcdef1234/'
+  }])
+  const report = await writeWorkerReport({
+    workerFilename: 'anomaly_worker.js', root, jobId: 'sequence-gap-job',
+    options: { library, auditStorePath, onlinePolicy: 'conflicts', sevenZipPath: null, ...databases }
+  })
+  const anomaly = report.anomalies.find(item => item.type === 'archive-image-sequence-gap')
+  assert.ok(anomaly)
+  assert.equal(anomaly.action, null)
+  assert.equal(anomaly.actionPolicy, 'report-only')
+  assert.equal(anomaly.evidence.basis, 'local-image-entry-names')
+  assert.equal(anomaly.evidence.currentUrl, 'https://exhentai.org/g/123456/abcdef1234/')
+  assert.equal(anomaly.evidence.remotePages, undefined)
+  assert.deepEqual(anomaly.evidence.imageSequence.gaps[0].missingNumbers, [3])
+  assert.equal(report.summary.onlineIdentities, 0)
+})
 
 test('task coordinator blocks mutations while an audit owns the library', async () => {
   const coordinator = new LibraryTaskCoordinator()

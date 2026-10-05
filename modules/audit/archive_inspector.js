@@ -8,6 +8,83 @@ const { IMAGE_EXTENSIONS, stableId } = require('./utils.js')
 
 const naturalCompare = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
 const normalizeEntryPath = value => String(value || '').replace(/\\/g, '/').replace(/^\.\/+/, '')
+const MAX_SEQUENCE_SPAN = 1000000
+const MAX_REPORTED_MISSING_NUMBERS = 200
+
+const extractImageSequenceNumber = imagePath => {
+  const basename = path.posix.basename(normalizeEntryPath(imagePath))
+  const extension = path.posix.extname(basename)
+  const stem = extension ? basename.slice(0, -extension.length) : basename
+  const match = /(?:^|[,_\-.\s])(\d+)$/.exec(stem)
+  if (!match) return null
+  const number = Number(match[1])
+  return Number.isSafeInteger(number) ? number : null
+}
+
+const formatSequenceDirectory = imagePath => path.posix.dirname(normalizeEntryPath(imagePath))
+
+const analyzeImageSequence = imagePaths => {
+  const grouped = new Map()
+  for (const imagePath of imagePaths || []) {
+    const directory = formatSequenceDirectory(imagePath)
+    const group = grouped.get(directory) || { directory, imagePaths: [], numbered: [], unnumbered: 0 }
+    group.imagePaths.push(imagePath)
+    const number = extractImageSequenceNumber(imagePath)
+    if (number === null) group.unnumbered += 1
+    else group.numbered.push({ path: imagePath, number })
+    grouped.set(directory, group)
+  }
+
+  const checkedGroups = []
+  const gaps = []
+  for (const group of grouped.values()) {
+    // A sequence is only trusted when almost every image in one directory has
+    // a unique, parseable page number. Randomly named archives remain ignored.
+    if (group.numbered.length < 3 || group.unnumbered > 1) continue
+    const sorted = [...group.numbered].sort((left, right) => left.number - right.number)
+    const numbers = sorted.map(item => item.number)
+    const uniqueNumbers = new Set(numbers)
+    if (uniqueNumbers.size !== numbers.length) continue
+    const first = numbers[0]
+    const last = numbers[numbers.length - 1]
+    if (last - first + 1 > MAX_SEQUENCE_SPAN) continue
+
+    const missingRanges = []
+    let missingCount = 0
+    for (let index = 1; index < numbers.length; index += 1) {
+      const rangeStart = numbers[index - 1] + 1
+      const rangeEnd = numbers[index] - 1
+      if (rangeStart > rangeEnd) continue
+      const count = rangeEnd - rangeStart + 1
+      missingRanges.push({ start: rangeStart, end: rangeEnd, count })
+      missingCount += count
+    }
+    const missingNumbers = []
+    if (missingCount <= MAX_REPORTED_MISSING_NUMBERS) {
+      for (const range of missingRanges) {
+        for (let number = range.start; number <= range.end; number += 1) missingNumbers.push(number)
+      }
+    }
+    const result = {
+      directory: group.directory,
+      imageCount: group.imagePaths.length,
+      first,
+      last,
+      missingCount,
+      missingRanges,
+      missingNumbers
+    }
+    checkedGroups.push(result)
+    if (missingCount > 0) gaps.push(result)
+  }
+
+  return {
+    status: checkedGroups.length ? 'checked' : 'not-applicable',
+    checkedGroups,
+    gaps,
+    gapCount: gaps.reduce((total, group) => total + group.missingCount, 0)
+  }
+}
 
 const digestStream = (stream, capture = false, maxCaptureBytes = 16 * 1024 * 1024) => new Promise((resolve, reject) => {
   const hash = createHash('sha256')
@@ -316,6 +393,7 @@ const inspectZipHealth = async filepath => {
       resolve({
         pageCount: imagePaths.length,
         imagePaths: imagePaths.sort(naturalCompare),
+        imageSequence: analyzeImageSequence(imagePaths),
         ehviewer: resolveEhviewer(ehviewerEntries)
       })
     })
@@ -340,6 +418,7 @@ const inspect7zHealth = async (filepath, sevenZipPath) => {
   return {
     pageCount: imagePaths.length,
     imagePaths: imagePaths.sort(naturalCompare),
+    imageSequence: analyzeImageSequence(imagePaths),
     ehviewer: resolveEhviewer(ehviewerEntries)
   }
 }
@@ -353,6 +432,7 @@ const inspectFolderHealth = async folderpath => {
   return {
     pageCount: imagePaths.length,
     imagePaths,
+    imageSequence: analyzeImageSequence(imagePaths),
     ehviewer: await inspectFolderEhviewer(folderpath)
   }
 }
@@ -364,4 +444,4 @@ const inspectBookHealth = async (book, options = {}) => {
   return await inspect7zHealth(book.filepath, options.sevenZipPath)
 }
 
-module.exports = { inspectBookContent, inspectEhviewerIdentity, inspectBookHealth }
+module.exports = { analyzeImageSequence, extractImageSequenceNumber, inspectBookContent, inspectEhviewerIdentity, inspectBookHealth }

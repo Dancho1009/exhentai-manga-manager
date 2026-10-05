@@ -441,6 +441,7 @@
     "type_orphan-metadata": "孤立元數據記錄",
     "type_archive-inspection-failed": "壓縮檔檢查失敗",
     "type_archive-no-images": "壓縮檔沒有可識別圖片",
+    "type_archive-image-sequence-gap": "本機圖片序號存在缺漏",
     "type_scan-page-count-stale": "掃描頁數與實際內容不一致",
     "type_ehviewer-ambiguous": "存在多個 .ehviewer",
     "type_ehviewer-invalid": ".ehviewer 無法解析",

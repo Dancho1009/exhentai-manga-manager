@@ -5,7 +5,7 @@ const { normalizePath } = require('./utils.js')
 
 const CACHE_VERSION = 2
 const ARCHIVE_HASH_VERSION = 1
-const HEALTH_INSPECTION_VERSION = 1
+const HEALTH_INSPECTION_VERSION = 2
 const CONTENT_INSPECTION_VERSION = 1
 const EHVIEWER_INSPECTION_VERSION = 1
 const CACHE_TABLES = ['cache_entries', 'gallery_availability', 'gallery_gdata']
