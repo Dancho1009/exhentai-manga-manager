@@ -265,14 +265,16 @@ test('anomaly worker ignores a pending page after the current archive is complet
     bookId: 'stale-recovery-book',
     filepath: archive,
     status: 'awaiting-confirmation',
-    remainingMissingPages: [2]
+    online: { pageCount: 10 },
+    remainingMissingPages: [4, 5, 6, 7, 8, 9, 10]
   }))
   await fs.promises.writeFile(path.join(recoveryDir, 'summary.json'), JSON.stringify({
     recoveryId,
     bookId: 'stale-recovery-book',
     filepath: archive,
     status: 'awaiting-confirmation',
-    remainingMissingPages: [2]
+    online: { pageCount: 10 },
+    remainingMissingPages: [4, 5, 6, 7, 8, 9, 10]
   }))
 
   const report = await writeWorkerReport({

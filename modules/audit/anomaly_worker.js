@@ -247,8 +247,10 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     }
 
     // A previous write-back may have fixed internal gaps while leaving inferred
-    // leading/trailing pages pending. Keep that review state visible on the
-    // next audit instead of letting the resolved internal gap hide it.
+    // boundary pages pending. Keep that review state visible only while the
+    // current archive still has an actionable local issue. Once the local
+    // sequence is complete and the stored local page count matches it, an old
+    // online mapping must not resurrect a false missing-tail anomaly.
     // `auditStorePath` already points at `<store>/audit`; the recovery manager
     // accepts the application store root and appends `audit/page-recovery`.
     const pendingRecoverySummaries = await listPendingRecoverySummaries(path.dirname(options.auditStorePath))
@@ -261,7 +263,12 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       const actual = wrapped ? wrapped.actual : null
       if (!wrapped || !health || !actual) continue
       if (health.imageSequence?.status === 'checked') {
-        const currentMissingPages = new Set(getRecoveryMissingPages(health, pending.online?.pageCount))
+        const checkedGroups = health.imageSequence.checkedGroups || []
+        const hasLocalSequenceIssue = Number(health.imageSequence.gapCount) > 0 ||
+          checkedGroups.some(group => Number(group.first) > 1)
+        const storedPageCount = Number(wrapped.raw.pageCount)
+        if (!hasLocalSequenceIssue && Number.isSafeInteger(storedPageCount) && storedPageCount === Number(health.pageCount)) continue
+        const currentMissingPages = new Set(getRecoveryMissingPages(health, 0))
         remainingMissingPages = remainingMissingPages.filter(page => currentMissingPages.has(page))
         if (!remainingMissingPages.length) continue
       }
