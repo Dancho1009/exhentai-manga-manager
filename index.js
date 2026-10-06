@@ -15,7 +15,6 @@ const fetch = require('node-fetch')
 const { HttpsProxyAgent } = require('https-proxy-agent')
 const windowStateKeeper = require('electron-window-state')
 const express = require('express')
-const { globSync } = require('glob')
 
 const { prepareMangaModel, prepareMetadataModel } = require('./modules/database')
 const {
@@ -64,6 +63,7 @@ const {
   normalizeScanConcurrency: normalizeScanConcurrencyFromSetting
 } = require('./modules/init_folder_setting.js')
 const { findSameFile } = require('./fileLoader/folder.js')
+const { isPathWithinLibrary, removeLibraryPath } = require('./modules/file_deletion.js')
 
 const normalizeConcurrency = (value) => {
   const number = Number.parseInt(value, 10)
@@ -1463,32 +1463,17 @@ ipcMain.handle('get-default-manga-reader', async (event, arg) => {
 
 ipcMain.handle('delete-local-book', async (event, filepath) => {
   return await libraryTaskCoordinator.runMutation('delete-local-book', async () => {
-    if (!String(filepath || '').startsWith(setting.library)) return false
+    if (!isPathWithinLibrary(filepath, setting.library)) {
+      const error = 'LIBRARY_DELETE_PATH_OUTSIDE_LIBRARY'
+      sendMessageToWebContents(`Delete ${filepath} failed because ${error}`, event.sender)
+      return { success: false, error }
+    }
     const deletedBooks = await Manga.findAll({ where: { filepath }, raw: true })
     try {
-      const stats = await fs.promises.stat(filepath)
-      if (stats.isDirectory()) {
-        const imageFiles = globSync('*.@(jpg|jpeg|png|webp|avif|gif)', {
-          cwd: filepath,
-          nocase: true,
-          absolute: true
-        })
-
-        for (const imageFile of imageFiles) {
-          try {
-            await shell.trashItem(imageFile)
-          } catch {
-            await fs.promises.rm(imageFile, { force: true })
-          }
-        }
-
-        const remainingFiles = await fs.promises.readdir(filepath)
-        if (remainingFiles.length === 0) await shell.trashItem(filepath)
-      } else {
-        await shell.trashItem(filepath)
-      }
+      await removeLibraryPath(filepath, { trashItem: target => shell.trashItem(target) })
     } catch (e) {
       sendMessageToWebContents(`Delete ${filepath} failed because ${e}`, event.sender)
+      return { success: false, error: e.message || String(e) }
     }
     await Manga.destroy({ where: { filepath } })
     for (const book of deletedBooks) {

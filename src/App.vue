@@ -1435,10 +1435,12 @@ export default defineComponent({
           {}
         )
         await this.runHomeBatchAction(async () => {
+          const deletedFilepaths = []
           for (const book of books) {
-            await ipcRenderer.invoke('delete-local-book', book.filepath)
+            const result = await ipcRenderer.invoke('delete-local-book', book.filepath)
+            if (result?.success) deletedFilepaths.push(book.filepath)
           }
-          const filepaths = new Set(books.map(book => book.filepath))
+          const filepaths = new Set(deletedFilepaths)
           this.bookList = this.bookList.filter(book => !filepaths.has(book.filepath))
           this.displayBookList = this.displayBookList.filter(book => !filepaths.has(book.filepath))
           this.clearHomeBookSelection()

@@ -221,6 +221,7 @@
     "proxyWorking": "代理伺服器連接正常",
     "proxyNotWorking": "連接錯誤, 檢查代理伺服器是否工作, 設置是否正確",
     "confirmDelete": "將漫畫從應用中移除並刪除本地檔案, 確定？",
+    "deleteFileFailed": "刪除檔案失敗",
     "reGetMetadataWarning": "此操作將重新搜尋元數據，成功後覆蓋現有內容，失敗時保留原數據。會消耗大量配額，請確保單次處理數量<100且不要頻繁操作。確定？",
     "rescanSuccess": "重新掃描完成",
     "gettingMetadata": "獲取元數據中...",

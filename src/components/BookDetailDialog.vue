@@ -383,24 +383,32 @@ const rescanBook = async (book) => {
   printMessage('success', t('c.rescanSuccess'))
 }
 const deleteBook = async (book) => {
-  await ipcRenderer.invoke('delete-local-book', book.filepath)
-  .finally(() => {
-    dialogVisibleBookDetail.value = false
-    if (book.collectionHide) {
-      _.forEach(collectionList.value, (collection) => {
-        collection.list = _.filter(collection.list, hash_id => hash_id !== book.id && hash_id !== book.hash)
-      })
-      openCollectionBookList.value = _.filter(openCollectionBookList.value, bookOfCollection => {
-        return bookOfCollection.id !== book.id && bookOfCollection.id !== book.hash
-      })
-      emit('saveCollection')
-    } else {
-      const findBookInBookList = _.findIndex(bookList.value, b => b.filepath === book.filepath)
-      if (findBookInBookList >= 0) bookList.value.splice(findBookInBookList, 1)
-      displayBookList.value = _.filter(displayBookList.value, b => b.filepath !== book.filepath)
+  try {
+    const result = await ipcRenderer.invoke('delete-local-book', book.filepath)
+    if (!result?.success) {
+      printMessage('error', `${t('c.deleteFileFailed')}: ${result?.error || 'unknown error'}`)
+      return
     }
-    emit('handleRemoveBookDisplay', book)
-  })
+  } catch (error) {
+    printMessage('error', `${t('c.deleteFileFailed')}: ${error?.message || error}`)
+    return
+  }
+
+  dialogVisibleBookDetail.value = false
+  if (book.collectionHide) {
+    _.forEach(collectionList.value, (collection) => {
+      collection.list = _.filter(collection.list, hash_id => hash_id !== book.id && hash_id !== book.hash)
+    })
+    openCollectionBookList.value = _.filter(openCollectionBookList.value, bookOfCollection => {
+      return bookOfCollection.id !== book.id && bookOfCollection.id !== book.hash
+    })
+    emit('saveCollection')
+  } else {
+    const findBookInBookList = _.findIndex(bookList.value, b => b.filepath === book.filepath)
+    if (findBookInBookList >= 0) bookList.value.splice(findBookInBookList, 1)
+    displayBookList.value = _.filter(displayBookList.value, b => b.filepath !== book.filepath)
+  }
+  emit('handleRemoveBookDisplay', book)
 }
 const deleteLocalBook = (book) => {
   if (setting.value.skipDeleteConfirm) {

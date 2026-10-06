@@ -221,6 +221,7 @@
     "proxyWorking": "Proxy server is working",
     "proxyNotWorking": "Connection error, check if the proxy server is working and if the settings are correct",
     "confirmDelete": "Remove the manga from app and delete the local file, OK?",
+    "deleteFileFailed": "Failed to delete file",
     "reGetMetadataWarning": "This will search again and replace existing metadata only after success; failures preserve current data. It uses substantial quota. Keep each batch below 100 and do not repeat often. Continue?",
     "rescanSuccess": "Rescan successful",
     "gettingMetadata": "Getting metadata...",

@@ -221,6 +221,7 @@
     "proxyWorking": "代理服务器连接正常",
     "proxyNotWorking": "连接错误, 检查代理服务器是否工作, 设置是否正确",
     "confirmDelete": "将漫画从软件中移除并删除本地文件, 确定？",
+    "deleteFileFailed": "删除文件失败",
     "reGetMetadataWarning": "此操作将重新搜索元数据，成功后覆盖现有内容，失败时保留原数据。会消耗大量配额，请确保单次处理数量<100且不要频繁操作。确定？",
     "rescanSuccess": "重新扫描完成",
     "gettingMetadata": "获取元数据中...",

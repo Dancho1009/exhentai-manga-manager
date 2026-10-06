@@ -551,23 +551,22 @@ const groupDeleteLocalBook = () => {
     for (const id of selectBookList.value) {
       const book = _.find(displayBookList.value, { id })
       if (book) {
-        await ipcRenderer.invoke('delete-local-book', book.filepath)
-        .finally(async () => {
-          if (book.collectionHide) {
-            _.forEach(collectionList.value, (collection) => {
-              collection.list = _.filter(collection.list, hash_id => hash_id !== book.id && hash_id !== book.hash)
-            })
-            openCollectionBookList.value = _.filter(openCollectionBookList.value, bookOfCollection => {
-              return bookOfCollection.id !== book.id && bookOfCollection.id !== book.hash
-            })
-            await saveCollection()
-          } else {
-            const findBookInBookList = _.findIndex(bookList.value, b => b.filepath === book.filepath)
-            bookList.value.splice(findBookInBookList, 1)
-            displayBookList.value = _.filter(displayBookList.value, b => b.filepath !== book.filepath)
-            emit('handleRemoveBookDisplay')
-          }
-        })
+        const result = await ipcRenderer.invoke('delete-local-book', book.filepath)
+        if (!result?.success) continue
+        if (book.collectionHide) {
+          _.forEach(collectionList.value, (collection) => {
+            collection.list = _.filter(collection.list, hash_id => hash_id !== book.id && hash_id !== book.hash)
+          })
+          openCollectionBookList.value = _.filter(openCollectionBookList.value, bookOfCollection => {
+            return bookOfCollection.id !== book.id && bookOfCollection.id !== book.hash
+          })
+          await saveCollection()
+        } else {
+          const findBookInBookList = _.findIndex(bookList.value, b => b.filepath === book.filepath)
+          if (findBookInBookList >= 0) bookList.value.splice(findBookInBookList, 1)
+          displayBookList.value = _.filter(displayBookList.value, b => b.filepath !== book.filepath)
+          emit('handleRemoveBookDisplay')
+        }
       }
     }
   })
