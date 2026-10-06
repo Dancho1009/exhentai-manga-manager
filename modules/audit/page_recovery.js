@@ -15,6 +15,7 @@ const {
 } = require('../ehentai.js')
 const { inspectBookHealth, extractImageSequenceNumber } = require('./archive_inspector.js')
 const { getBookFileSnapshot } = require('./ehviewer_repair.js')
+const { extractNhentaiId, getNhentaiRecoveryManifest, fetchNhentaiImage } = require('../nhentai.js')
 
 const IMAGE_MIME_EXTENSIONS = new Map([
   ['image/jpeg', '.jpg'],
@@ -484,7 +485,7 @@ const listPendingRecoverySummaries = async storePath => {
 }
 
 class PageRecoveryManager {
-  constructor({ storePath, Manga, getSetting, sevenZipPath, getGalleryPage: galleryPageFetcher, requestText: textRequester, requestBinary: binaryRequester }) {
+  constructor({ storePath, Manga, getSetting, sevenZipPath, getGalleryPage: galleryPageFetcher, requestText: textRequester, requestBinary: binaryRequester, getNhentaiRecoveryManifest: nhentaiManifestFetcher, requestNhentaiImage: nhentaiImageRequester }) {
     this.storePath = storePath
     this.Manga = Manga
     this.getSetting = getSetting
@@ -492,6 +493,8 @@ class PageRecoveryManager {
     this.getGalleryPage = galleryPageFetcher || getGalleryPage
     this.requestText = textRequester || requestText
     this.requestBinary = binaryRequester || requestBinary
+    this.getNhentaiRecoveryManifest = nhentaiManifestFetcher || getNhentaiRecoveryManifest
+    this.requestNhentaiImage = nhentaiImageRequester || fetchNhentaiImage
     this.sessions = new Map()
   }
 
@@ -646,29 +649,39 @@ class PageRecoveryManager {
     }))
   }
 
-  resolveSource(anomaly, source, book = null) {
+  resolveSource(anomaly, source, book = null, { sourceUrl = null, nhentaiId = null } = {}) {
     const evidence = anomaly?.evidence || {}
-    if (source === 'current') return String(evidence.currentUrl || evidence.url || book?.url || '').trim()
+    const currentUrl = String(sourceUrl || evidence.currentUrl || evidence.url || book?.url || '').trim()
+    if (source === 'nhentai' || (source === 'current' && /nhentai\.net\/g\/\d+/i.test(currentUrl))) {
+      const galleryId = extractNhentaiId(nhentaiId || currentUrl || book?.filepath || book?.title)
+      if (!galleryId) throw new Error('PAGE_RECOVERY_SOURCE_MISSING')
+      return {
+        type: 'nhentai',
+        id: galleryId,
+        url: `https://nhentai.net/g/${galleryId}/`
+      }
+    }
+    if (source === 'current') return { type: 'ehentai', url: currentUrl }
     if (source === 'ehviewer') {
-      if (evidence.ehviewerUrl) return String(evidence.ehviewerUrl).trim()
+      if (evidence.ehviewerUrl) return { type: 'ehentai', url: String(evidence.ehviewerUrl).trim() }
       const identity = evidence.ehviewer
-      if (identity?.gid && identity?.token) return buildGalleryUrl('exhentai', identity.gid, identity.token)
+      if (identity?.gid && identity?.token) return { type: 'ehentai', url: buildGalleryUrl('exhentai', identity.gid, identity.token) }
     }
     throw new Error('PAGE_RECOVERY_SOURCE_MISSING')
   }
 
-  async getRecoveryBook({ report, anomalyId, source }) {
+  async getRecoveryBook({ report, anomalyId, source, sourceUrl, nhentaiId }) {
     if (!report?.reportId || (report.stale && !isContinuablePageRecoveryReport(report))) throw new Error('PAGE_RECOVERY_REPORT_INVALID')
     const anomaly = (report.anomalies || []).find(item => String(item.id) === String(anomalyId))
     if (!anomaly || anomaly.type !== 'archive-image-sequence-gap' || !anomaly.bookId) throw new Error('PAGE_RECOVERY_ANOMALY_INVALID')
     const book = await this.Manga.findByPk(anomaly.bookId, { raw: true })
     if (!book?.filepath) throw new Error('PAGE_RECOVERY_BOOK_MISSING')
     if (!['folder', 'zip'].includes(book.type)) throw new Error('PAGE_RECOVERY_FORMAT_UNSUPPORTED')
-    const sourceUrl = this.resolveSource(anomaly, source, book)
-    const identity = extractGalleryIdentity(sourceUrl)
-    if (!identity) throw new Error('PAGE_RECOVERY_SOURCE_INVALID')
+    const sourceInfo = this.resolveSource(anomaly, source, book, { sourceUrl, nhentaiId })
+    const identity = sourceInfo.type === 'ehentai' ? extractGalleryIdentity(sourceInfo.url) : null
+    if (sourceInfo.type === 'ehentai' && !identity) throw new Error('PAGE_RECOVERY_SOURCE_INVALID')
     const health = await inspectBookHealth(book, { sevenZipPath: this.sevenZipPath })
-    return { anomaly, book, sourceUrl, identity, health }
+    return { anomaly, book, source: sourceInfo, sourceUrl: sourceInfo.url, identity, health }
   }
 
   async loadGalleryManifest({ sourceUrl, setting, requestedPages = [] }) {
@@ -695,10 +708,10 @@ class PageRecoveryManager {
     return { onlinePageCount, pagesByNumber, loadPage, pagination }
   }
 
-  async fetchSelectedPages({ report, anomalyId, source = 'current', pageNumbers, includeBoundaryPages = false }) {
+  async fetchSelectedPages({ report, anomalyId, source = 'current', sourceUrl = null, nhentaiId = null, pageNumbers, includeBoundaryPages = false }) {
     const requestedPages = normalizePageNumbers(pageNumbers)
     if (requestedPages.length === 0) throw new Error('PAGE_RECOVERY_PAGE_SELECTION_EMPTY')
-    const { anomaly, book, sourceUrl, identity, health } = await this.getRecoveryBook({ report, anomalyId, source })
+    const { anomaly, book, source: sourceInfo, sourceUrl: resolvedSourceUrl, identity, health } = await this.getRecoveryBook({ report, anomalyId, source, sourceUrl, nhentaiId })
     const snapshot = await getBookFileSnapshot(book)
     const recoveryId = createRecoveryId()
     const jobDir = this.getJobDir(recoveryId)
@@ -712,7 +725,14 @@ class PageRecoveryManager {
       bookId: String(anomaly.bookId),
       filepath: book.filepath,
       bookType: book.type,
-      source: { url: sourceUrl, site: new URL(sourceUrl).hostname, ...identity },
+      source: {
+        type: sourceInfo.type,
+        url: resolvedSourceUrl,
+        site: new URL(resolvedSourceUrl).hostname,
+        ...(sourceInfo.id ? { galleryId: String(sourceInfo.id) } : {}),
+        ...(sourceInfo.mediaId ? { mediaId: String(sourceInfo.mediaId) } : {}),
+        ...(identity || {})
+      },
       snapshot,
       local: { pageCount: health.pageCount, sequence: health.imageSequence },
       online: {},
@@ -733,7 +753,33 @@ class PageRecoveryManager {
 
     try {
       const setting = this.getSetting() || {}
-      const { onlinePageCount, pagesByNumber, pagination, loadPage } = await this.loadGalleryManifest({ sourceUrl, setting, requestedPages })
+      let onlinePageCount
+      let pagesByNumber
+      let pagination
+      let loadPage
+      if (sourceInfo.type === 'nhentai') {
+        const manifest = await this.getNhentaiRecoveryManifest({
+          id: sourceInfo.id,
+          url: resolvedSourceUrl,
+          filepath: book.filepath,
+          title: book.title || book.title_jpn,
+          setting
+        })
+        onlinePageCount = manifest.onlinePageCount
+        pagesByNumber = new Map((manifest.pages || []).map(page => [page.pageNumber, page]))
+        pagination = { pageUrls: [] }
+        loadPage = async () => {}
+        Object.assign(session.source, {
+          galleryId: String(manifest.galleryId || sourceInfo.id),
+          mediaId: String(manifest.mediaId || '')
+        })
+      } else {
+        const manifest = await this.loadGalleryManifest({ sourceUrl: resolvedSourceUrl, setting, requestedPages })
+        onlinePageCount = manifest.onlinePageCount
+        pagesByNumber = manifest.pagesByNumber
+        pagination = manifest.pagination
+        loadPage = manifest.loadPage
+      }
       const recoveryHealth = buildRecoveryHealth(health, onlinePageCount)
       const pageOptions = getRecoveryPageOptions(recoveryHealth)
       const boundaryPages = includeBoundaryPages
@@ -780,19 +826,31 @@ class PageRecoveryManager {
 
       for (const pageNumber of selectedPages) {
         const page = pagesByNumber.get(pageNumber)
-        const detail = await this.requestText({
-          url: page.pageUrl,
-          setting,
-          headers: { Cookie: buildCookie(setting), Referer: sourceUrl }
-        })
-        if (detail.error) throw detail.error
-        const imageUrl = parseImagePageSource({ html: detail.body, pageUrl: page.pageUrl })
-        if (!imageUrl) throw new Error(`PAGE_RECOVERY_IMAGE_SOURCE_MISSING:${pageNumber}`)
-        const image = await this.requestBinary({
-          url: imageUrl,
-          setting,
-          headers: { Cookie: buildCookie(setting), Referer: page.pageUrl }
-        })
+        let imageUrl
+        let image
+        if (sourceInfo.type === 'nhentai') {
+          imageUrl = page.imageUrl
+          if (!imageUrl) throw new Error(`PAGE_RECOVERY_IMAGE_SOURCE_MISSING:${pageNumber}`)
+          image = await this.requestNhentaiImage({
+            imageUrl,
+            setting,
+            referer: resolvedSourceUrl
+          })
+        } else {
+          const detail = await this.requestText({
+            url: page.pageUrl,
+            setting,
+            headers: { Cookie: buildCookie(setting), Referer: resolvedSourceUrl }
+          })
+          if (detail.error) throw detail.error
+          imageUrl = parseImagePageSource({ html: detail.body, pageUrl: page.pageUrl })
+          if (!imageUrl) throw new Error(`PAGE_RECOVERY_IMAGE_SOURCE_MISSING:${pageNumber}`)
+          image = await this.requestBinary({
+            url: imageUrl,
+            setting,
+            headers: { Cookie: buildCookie(setting), Referer: page.pageUrl }
+          })
+        }
         if (image.error) throw image.error
         if (image.httpStatus < 200 || image.httpStatus >= 300) throw new Error(`PAGE_RECOVERY_IMAGE_HTTP_${image.httpStatus}`)
         const metadata = await sharp(image.buffer).metadata()

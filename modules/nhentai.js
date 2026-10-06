@@ -8,8 +8,14 @@ const NHENTAI_BASE_URL = 'https://nhentai.net'
 const EHTAG_DATABASE_URL = 'https://raw.githubusercontent.com/EhTagTranslation/DatabaseReleases/master/db.text.json.gz'
 const EHTAG_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const SEARCH_PAGE_SIZE = 25
-const SEARCH_RESULT_LIMIT = 5
+const DEFAULT_SEARCH_RESULT_LIMIT = 5
 const COMMENT_PAGE_SIZE = 50
+const NHENTAI_PAGE_EXTENSIONS = {
+  j: '.jpg',
+  p: '.png',
+  g: '.gif',
+  w: '.webp'
+}
 
 const MANAGER_TAG_GROUPS = [
   'artist',
@@ -153,13 +159,19 @@ const getGalleryJpnTitle = (gallery = {}) => {
     ''
 }
 
+const getGalleryPageCount = (gallery = {}) => {
+  const value = Number(gallery.num_pages || gallery.page_count || (Array.isArray(gallery.pages) ? gallery.pages.length : 0))
+  return Number.isSafeInteger(value) && value > 0 ? value : null
+}
+
 const createResultFromGallery = (gallery, confidence = 'exact') => {
   return {
     title: getGalleryTitle(gallery),
     url: `${NHENTAI_BASE_URL}/g/${gallery.id}/`,
     type: 'nhentai',
     id: String(gallery.id),
-    confidence
+    confidence,
+    pageCount: getGalleryPageCount(gallery)
   }
 }
 
@@ -197,6 +209,82 @@ const fetchComments = async (galleryId, setting, page = 1, perPage = COMMENT_PAG
     })}`,
     createFetchOptions(setting)
   )
+}
+
+const fetchCdn = async (setting) => {
+  assertNhentaiApiKey(setting)
+  return await fetchJson(`${NHENTAI_BASE_URL}/api/v2/cdn`, createFetchOptions(setting))
+}
+
+const getNhentaiPageExtension = page => {
+  const type = String(page?.t || page?.type || 'j').toLowerCase()
+  return NHENTAI_PAGE_EXTENSIONS[type] || '.jpg'
+}
+
+const buildNhentaiImageUrl = ({ cdn, mediaId, pageNumber, page }) => {
+  const server = Array.isArray(cdn?.image_servers) ? cdn.image_servers[0] : null
+  if (!server || !mediaId || !Number.isSafeInteger(pageNumber) || pageNumber < 1) {
+    throw new Error('NHENTAI_PAGE_MANIFEST_INCOMPLETE')
+  }
+  const pagePath = String(page?.path || '').trim().replace(/^\/+/, '')
+  if (pagePath) return `${String(server).replace(/\/$/, '')}/${pagePath}`
+  return `${String(server).replace(/\/$/, '')}/${encodeURIComponent(String(mediaId))}/${pageNumber}${getNhentaiPageExtension(page)}`
+}
+
+const getNhentaiRecoveryManifest = async ({ id, url, filepath, title, setting } = {}) => {
+  const galleryId = resolveNhentaiId({ id, url, filepath, title })
+  if (!galleryId) throw new Error('NHENTAI_GALLERY_ID_MISSING')
+
+  const gallery = await fetchGallery(galleryId, setting)
+  const cdn = await fetchCdn(setting)
+  // nHentai API v2 currently returns pages at the gallery root. Keep the
+  // older images.pages shape for compatibility with cached/demo responses.
+  const pages = Array.isArray(gallery?.pages)
+    ? gallery.pages
+    : Array.isArray(gallery?.images?.pages)
+      ? gallery.images.pages
+      : []
+  const onlinePageCount = getGalleryPageCount(gallery) || pages.length
+  const mediaId = String(gallery?.media_id || '').trim()
+  if (!mediaId || !onlinePageCount || pages.length < onlinePageCount) {
+    throw new Error('NHENTAI_PAGE_MANIFEST_INCOMPLETE')
+  }
+
+  const sourceUrl = `${NHENTAI_BASE_URL}/g/${galleryId}/`
+  const pageEntries = pages.slice(0, onlinePageCount).map((page, index) => {
+    const pageNumber = index + 1
+    return {
+      index: pageNumber,
+      pageNumber,
+      pageUrl: `${sourceUrl}#page=${pageNumber}`,
+      imageUrl: buildNhentaiImageUrl({ cdn, mediaId, pageNumber, page })
+    }
+  })
+
+  return {
+    galleryId: String(galleryId),
+    mediaId,
+    sourceUrl,
+    onlinePageCount,
+    pages: pageEntries,
+    pagesByNumber: Object.fromEntries(pageEntries.map(page => [page.pageNumber, page]))
+  }
+}
+
+const fetchNhentaiImage = async ({ imageUrl, setting, referer } = {}) => {
+  assertNhentaiApiKey(setting)
+  const response = await fetch(imageUrl, createFetchOptions(setting, {
+    headers: {
+      Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+      ...(referer ? { Referer: referer } : {})
+    }
+  }))
+  const buffer = await response.buffer()
+  return {
+    buffer,
+    httpStatus: response.status,
+    contentType: response.headers.get('content-type') || ''
+  }
 }
 
 const getEhtagCacheFile = (storePath) => {
@@ -397,7 +485,7 @@ const toManagerMetadata = (gallery, ehtagDb) => {
     status: 'tagged'
   }
 
-  const filecount = gallery.num_pages || gallery.page_count || (Array.isArray(gallery.pages) ? gallery.pages.length : undefined)
+  const filecount = getGalleryPageCount(gallery)
   if (filecount) metadata.filecount = +filecount
 
   const posted = toTimestamp(gallery.upload_date || gallery.uploaded_at || gallery.created_at || gallery.createdAt)
@@ -419,6 +507,11 @@ const titleMatchesQuery = (item, query) => {
   return titles.some(title => title.includes(normalizedQuery))
 }
 
+const normalizeNhentaiSearchResultLimit = (value) => {
+  const number = Number.parseInt(value, 10)
+  return Number.isFinite(number) ? Math.min(SEARCH_PAGE_SIZE, Math.max(1, number)) : DEFAULT_SEARCH_RESULT_LIMIT
+}
+
 const searchNhentai = async ({ title, filepath, setting } = {}) => {
   const exactId = resolveNhentaiId({ title, filepath })
   if (exactId) {
@@ -432,7 +525,7 @@ const searchNhentai = async ({ title, filepath, setting } = {}) => {
   const result = await fetchSearch(query, setting)
   return (result?.result || [])
     .filter(item => titleMatchesQuery(item, query))
-    .slice(0, SEARCH_RESULT_LIMIT)
+    .slice(0, normalizeNhentaiSearchResultLimit(setting?.nhentaiSearchResultLimit))
     .map(item => createResultFromGallery(item, 'title'))
 }
 
@@ -443,6 +536,16 @@ const getNhentaiMetadata = async ({ id, url, filepath, title, setting, storePath
   const gallery = await fetchGallery(galleryId, setting)
   const ehtagDb = await loadEhtagDb(storePath, setting)
   return toManagerMetadata(gallery, ehtagDb)
+}
+
+const getNhentaiGalleryPageCount = async ({ id, url, filepath, title, setting } = {}) => {
+  const galleryId = resolveNhentaiId({ id, url, filepath, title })
+  if (!galleryId) return null
+  const gallery = await fetchGallery(galleryId, setting)
+  return {
+    id: String(galleryId),
+    pageCount: getGalleryPageCount(gallery)
+  }
 }
 
 const getNhentaiComments = async ({ id, url, filepath, title, setting, page = 1, perPage = COMMENT_PAGE_SIZE } = {}) => {
@@ -456,8 +559,13 @@ const getNhentaiComments = async ({ id, url, filepath, title, setting, page = 1,
 module.exports = {
   searchNhentai,
   getNhentaiMetadata,
+  getNhentaiGalleryPageCount,
   getNhentaiComments,
+  getNhentaiRecoveryManifest,
+  fetchNhentaiImage,
+  buildNhentaiImageUrl,
   extractNhentaiId,
+  normalizeNhentaiSearchResultLimit,
   toManagerMetadata,
   loadEhtagDb
 }

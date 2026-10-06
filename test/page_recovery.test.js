@@ -6,7 +6,28 @@ const path = require('path')
 const sharp = require('sharp')
 const AdmZip = require('adm-zip')
 const { PageRecoveryManager, parseGalleryPageManifest, parseGalleryPagination, parseImagePageSource, assessBatchPageMapping, listPendingRecoverySummaries } = require('../modules/audit/page_recovery.js')
+const { buildNhentaiImageUrl, normalizeNhentaiSearchResultLimit } = require('../modules/nhentai.js')
 const { inspectBookHealth } = require('../modules/audit/archive_inspector.js')
+
+test('nHentai recovery uses the API page path and extension', () => {
+  assert.equal(
+    buildNhentaiImageUrl({
+      cdn: { image_servers: ['https://i1.nhentai.net'] },
+      mediaId: '3684220',
+      pageNumber: 14,
+      page: { number: 14, path: 'galleries/3684220/14.webp' }
+    }),
+    'https://i1.nhentai.net/galleries/3684220/14.webp'
+  )
+})
+
+test('nHentai search result limit is configurable within the API page size', () => {
+  assert.equal(normalizeNhentaiSearchResultLimit(undefined), 5)
+  assert.equal(normalizeNhentaiSearchResultLimit(1), 1)
+  assert.equal(normalizeNhentaiSearchResultLimit(12), 12)
+  assert.equal(normalizeNhentaiSearchResultLimit(100), 25)
+  assert.equal(normalizeNhentaiSearchResultLimit(0), 1)
+})
 
 test('gallery pagination exposes later page-list URLs without downloading images', () => {
   const galleryUrl = 'https://exhentai.org/g/1234567/abcdef1234/'
@@ -166,6 +187,81 @@ test('page recovery fetches only selected pages and writes a confirmed folder pa
     assert.equal(result.health.imageSequence.gapCount, 0)
     assert.equal(result.session.status, 'completed')
     assert.equal(await fs.promises.stat(path.join(library, 'page-0002.png')).then(() => true), true)
+  } finally {
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('page recovery can use an nHentai API manifest and CDN image source', async () => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'page-recovery-nhentai-'))
+  const library = path.join(root, 'book')
+  await fs.promises.mkdir(library, { recursive: true })
+  const imageBuffer = await sharp({ create: { width: 20, height: 30, channels: 3, background: '#996633' } }).png().toBuffer()
+  await fs.promises.writeFile(path.join(library, 'page-0001.webp'), imageBuffer)
+  await fs.promises.writeFile(path.join(library, 'page-0003.webp'), imageBuffer)
+  await fs.promises.writeFile(path.join(library, 'page-0004.webp'), imageBuffer)
+  const sourceUrl = 'https://nhentai.net/g/611025/'
+  const book = { id: 'book-nhentai', filepath: library, type: 'folder', url: sourceUrl, title: 'nHentai 611025' }
+  const health = await inspectBookHealth(book)
+  const report = {
+    reportId: 'report-nhentai',
+    stale: false,
+    anomalies: [{
+      id: 'anomaly-nhentai',
+      bookId: book.id,
+      filepath: library,
+      type: 'archive-image-sequence-gap',
+      evidence: { currentUrl: sourceUrl, imageSequence: health.imageSequence }
+    }]
+  }
+  let manifestRequests = 0
+  let imageRequests = 0
+  const manager = new PageRecoveryManager({
+    storePath: root,
+    Manga: { findByPk: async () => book },
+    getSetting: () => ({ nhentaiApiKey: 'test-key', requireGap: 0 }),
+    getNhentaiRecoveryManifest: async ({ id, url }) => {
+      manifestRequests += 1
+      assert.equal(id, '611025')
+      assert.equal(url, sourceUrl)
+      return {
+        galleryId: '611025',
+        mediaId: 'media-611025',
+        onlinePageCount: 4,
+        pages: [1, 2, 3, 4].map(pageNumber => ({
+          pageNumber,
+          pageUrl: `${sourceUrl}#page=${pageNumber}`,
+          imageUrl: `https://cdn.example/media-611025/${pageNumber}.jpg`
+        }))
+      }
+    },
+    requestNhentaiImage: async ({ imageUrl, referer }) => {
+      imageRequests += 1
+      assert.match(imageUrl, /\/2\.jpg$/)
+      assert.equal(referer, sourceUrl)
+      return { buffer: imageBuffer, httpStatus: 200, contentType: 'image/png' }
+    },
+    requestText: async () => { throw new Error('E_HENTAI_REQUEST_SHOULD_NOT_RUN') },
+    requestBinary: async () => { throw new Error('E_HENTAI_IMAGE_SHOULD_NOT_RUN') }
+  })
+
+  try {
+    const session = await manager.fetchSelectedPages({
+      report,
+      anomalyId: 'anomaly-nhentai',
+      source: 'current',
+      sourceUrl,
+      pageNumbers: [2]
+    })
+    assert.equal(manifestRequests, 1)
+    assert.equal(imageRequests, 1)
+    assert.equal(session.source.type, 'nhentai')
+    assert.equal(session.source.galleryId, '611025')
+    assert.equal(session.source.mediaId, 'media-611025')
+    assert.equal(session.online.pageCount, 4)
+    assert.equal(session.candidates[0].pageNumber, 2)
+    assert.equal(session.candidates[0].imageUrl, 'https://cdn.example/media-611025/2.jpg')
+    assert.equal(session.writeBackSupported, true)
   } finally {
     await fs.promises.rm(root, { recursive: true, force: true })
   }

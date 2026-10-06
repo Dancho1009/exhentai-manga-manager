@@ -44,6 +44,10 @@ const normalizeConcurrency = (value) => {
 
 const normalizeMatchConcurrency = normalizeConcurrency
 const normalizeScanConcurrency = normalizeConcurrency
+const normalizeNhentaiSearchResultLimit = (value) => {
+  const number = Number.parseInt(value, 10)
+  return Number.isFinite(number) ? Math.min(25, Math.max(1, number)) : 5
+}
 
 const prepareSetting = () => {
   let setting
@@ -66,6 +70,11 @@ const prepareSetting = () => {
     }
     if (setting.nhentaiApiKey === undefined) {
       setting.nhentaiApiKey = ''
+      changed = true
+    }
+    const nhentaiSearchResultLimit = normalizeNhentaiSearchResultLimit(setting.nhentaiSearchResultLimit)
+    if (setting.nhentaiSearchResultLimit !== nhentaiSearchResultLimit) {
+      setting.nhentaiSearchResultLimit = nhentaiSearchResultLimit
       changed = true
     }
     if (changed) {
@@ -103,6 +112,7 @@ const prepareSetting = () => {
       matchConcurrency: 1,
       scanConcurrency: 1,
       nhentaiApiKey: '',
+      nhentaiSearchResultLimit: 5,
     }
     fs.writeFileSync(path.join(STORE_PATH, 'setting.json'), JSON.stringify(setting, null, '  '), { encoding: 'utf-8' })
   }

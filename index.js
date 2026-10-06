@@ -26,7 +26,7 @@ const {
 } = require('./modules/book_detail.js')
 const { prepareTemplate } = require('./modules/prepare_menu.js')
 const { getRootPath } = require('./modules/utils.js')
-const { searchNhentai, getNhentaiMetadata, getNhentaiComments } = require('./modules/nhentai.js')
+const { searchNhentai, getNhentaiMetadata, getNhentaiGalleryPageCount, getNhentaiComments } = require('./modules/nhentai.js')
 const {
   checkGallerySites,
   getGalleryPage: getEhentaiGalleryPage,
@@ -51,6 +51,7 @@ const { PageRecoveryManager } = require('./modules/audit/page_recovery.js')
 const { invalidateAuditCacheEntries } = require('./modules/audit/cache.js')
 const { inspectBookHealth } = require('./modules/audit/archive_inspector.js')
 const { getBookFilelist, geneCover, getImageListByBook, deleteImageFromBook } = require('./fileLoader/index.js')
+const { returnTrimFileName } = require('./modules/search_title.js')
 const { getEhviewerDataFromArchive } = require('./fileLoader/archive.js')
 const { getEhviewerDataFromZip } = require('./fileLoader/zip.js')
 const { readEhviewerFile } = require('./fileLoader/ehviewer.js')
@@ -1188,6 +1189,14 @@ ipcMain.handle('nhentai-comments', async (event, { id, url, filepath, title, pag
   return await getNhentaiComments({ id, url, filepath, title, page, perPage, setting })
 })
 
+ipcMain.handle('audit:nhentai-recovery-search', async (event, { title, filepath }) => {
+  return await searchNhentai({ title, filepath, setting })
+})
+
+ipcMain.handle('audit:nhentai-recovery-page-count', async (event, request = {}) => {
+  return await getNhentaiGalleryPageCount({ ...request, setting })
+})
+
 ipcMain.handle('ehentai:get-availability', async (event, request = {}) => {
   const identity = request.gid && request.token
     ? { gid: request.gid, token: request.token }
@@ -1838,6 +1847,8 @@ ipcMain.handle('audit:get-book-preview', async (event, bookId) => {
     id: effective.id,
     title: effective.title || '',
     title_jpn: effective.title_jpn || '',
+    searchTitle: returnTrimFileName({ filepath: effective.filepath, type: effective.type }, setting),
+    filecount: Number.isFinite(Number(effective.filecount)) ? Number(effective.filecount) : null,
     coverPath: effective.coverPath || null,
     url: effective.url || ''
   }
@@ -1873,6 +1884,8 @@ ipcMain.handle('audit:page-recovery-fetch', async (event, request = {}) => {
     report,
     anomalyId: request.anomalyId,
     source: request.source,
+    sourceUrl: request.sourceUrl,
+    nhentaiId: request.nhentaiId,
     pageNumbers: request.pageNumbers,
     includeBoundaryPages: request.includeBoundaryPages === true
   })

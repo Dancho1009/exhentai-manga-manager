@@ -265,14 +265,37 @@
               <strong id="page-recovery-title">{{ $t('audit.pageRecoveryTitle') }}</strong>
               <span>{{ $t('audit.pageRecoveryDescription') }}</span>
             </div>
-            <el-tag type="warning" effect="plain">{{ pageRecoveryMissingPages.length }} {{ $t('audit.pages') }}</el-tag>
+            <div class="page-recovery-heading-meta">
+              <span class="page-recovery-page-count">{{ $t('audit.pages') }}: {{ pageRecoveryPageCountText }}</span>
+              <el-tag type="warning" effect="plain">{{ pageRecoveryMissingPages.length }} {{ $t('audit.pages') }}</el-tag>
+            </div>
           </div>
           <div class="page-recovery-controls">
             <span class="page-recovery-label">{{ $t('audit.pageRecoverySource') }}</span>
             <el-radio-group v-model="pageRecoverySource" :disabled="pageRecoveryLoading || pageRecoveryApplying">
               <el-radio-button v-if="pageRecoverySourceUrls.current" value="current">{{ $t('audit.currentUrl') }}</el-radio-button>
               <el-radio-button v-if="pageRecoverySourceUrls.ehviewer" value="ehviewer">{{ $t('audit.ehviewerUrl') }}</el-radio-button>
+              <el-radio-button v-if="pageRecoverySourceUrls.nhentai" value="nhentai">{{ $t('audit.nhentaiRecoverySource') }}</el-radio-button>
             </el-radio-group>
+          </div>
+          <div class="page-recovery-nhentai-source">
+            <el-button
+              plain
+              :icon="Search"
+              :disabled="pageRecoveryLoading || pageRecoveryApplying"
+              @click="openNhentaiRecoverySearch"
+            >
+              {{ $t('audit.searchNhentaiRecoverySource') }}
+            </el-button>
+            <el-link v-if="pageRecoverySourceUrls.nhentai" type="primary" :underline="false" @click="openExternalUrl(pageRecoverySourceUrls.nhentai)">
+              {{ pageRecoverySourceUrls.nhentai }}
+            </el-link>
+            <span v-if="pageRecoveryNhentaiPageCount" class="page-recovery-source-page-count">
+              {{ $t('audit.pages') }}: {{ pageRecoveryNhentaiPageCount }}
+            </span>
+            <span v-else-if="pageRecoveryNhentaiPageCountLoading" class="page-recovery-source-page-count">
+              {{ $t('audit.pages') }}: ...
+            </span>
           </div>
           <div class="page-recovery-pages">
             <span class="page-recovery-label">{{ $t('audit.pageRecoveryMissingPages') }}</span>
@@ -284,7 +307,7 @@
               </el-checkbox>
             </el-checkbox-group>
           </div>
-          <el-alert v-if="pageRecoverySession?.error" type="error" :closable="false" :title="pageRecoverySession.error" show-icon />
+          <el-alert v-if="pageRecoverySession?.error" type="error" :closable="false" :title="pageRecoveryErrorMessage(pageRecoverySession.error)" show-icon />
           <el-alert v-if="pageRecoverySession?.unconfirmedBoundaryPages?.length || pageRecoverySession?.unconfirmedLeadingPages?.length" type="warning" :closable="false" :title="$t('audit.pageRecoveryLeadingSkipped', { pages: (pageRecoverySession.unconfirmedBoundaryPages || pageRecoverySession.unconfirmedLeadingPages).join(', ') })" show-icon />
           <el-alert v-if="pageRecoverySession && !pageRecoverySession.writeBackSupported" type="warning" :closable="false" :title="$t('audit.pageRecoveryMappingUncertain')" show-icon />
           <el-alert v-else-if="pageRecoverySession?.mappingConfidence === 'anchored'" type="info" :closable="false" :title="$t('audit.pageRecoveryMappingAnchored')" show-icon />
@@ -338,6 +361,64 @@
         <pre class="evidence-block">{{ JSON.stringify(selectedAnomaly.evidence || {}, null, 2) }}</pre>
       </template>
     </el-drawer>
+    <el-dialog
+      v-model="pageRecoveryNhentaiSearchVisible"
+      width="60vw"
+      :title="$t('audit.nhentaiRecoverySearchTitle')"
+      destroy-on-close
+      append-to-body
+      class="audit-nhentai-search-dialog"
+    >
+      <el-form :inline="true" class="audit-nhentai-search-form">
+        <el-form-item>
+          <el-input
+            v-model="pageRecoveryNhentaiQuery"
+            class="audit-nhentai-search-input"
+            :disabled="pageRecoveryNhentaiSearchLoading"
+            :placeholder="$t('audit.nhentaiRecoveryQueryPlaceholder')"
+            @keyup.enter="searchNhentaiRecovery"
+          >
+            <template #append>
+              <el-select v-model="pageRecoveryNhentaiSearchType" class="audit-nhentai-search-type" disabled>
+                <el-option label="nhentai(id/keyword)" value="nhentai" />
+              </el-select>
+            </template>
+          </el-input>
+        </el-form-item>
+        <el-form-item>
+          <el-button
+            type="primary"
+            plain
+            :icon="Search"
+            :loading="pageRecoveryNhentaiSearchLoading"
+            @click="searchNhentaiRecovery"
+          />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" plain :icon="Link" @click="openNhentaiSearchUrl" />
+        </el-form-item>
+      </el-form>
+      <div v-loading="pageRecoveryNhentaiSearchLoading" class="audit-nhentai-search-results">
+        <div v-if="pageRecoveryNhentaiCandidates.length">
+          <p class="audit-nhentai-search-hint">{{ $t('audit.nhentaiRecoveryCandidates') }}</p>
+          <button
+            v-for="candidate in pageRecoveryNhentaiCandidates"
+            :key="candidate.id"
+            type="button"
+            class="audit-nhentai-search-result"
+            :class="{ 'is-selected': String(candidate.id) === String(pageRecoveryNhentaiSelectedId) }"
+            @click="selectNhentaiRecoveryCandidate(candidate)"
+          >
+            <span>{{ candidate.title || candidate.url }}</span>
+            <small>
+              #{{ candidate.id }}
+              · {{ $t('audit.pages') }}: {{ candidate.pageCountLoading ? '...' : (candidate.pageCount || '-') }}
+            </small>
+          </button>
+        </div>
+        <el-empty v-else :description="$t('m.noResults')" :image-size="100" />
+      </div>
+    </el-dialog>
   </section>
 </template>
 
@@ -345,7 +426,7 @@
 import { computed, defineComponent, h, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElIcon, ElMessage, ElMessageBox, ElTag } from 'element-plus'
-import { ArrowLeft, ArrowRight, Download, FolderOpened, Picture, Search, Select, TopRight, Upload, VideoPlay } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowRight, Download, FolderOpened, Link, Picture, Search, Select, TopRight, Upload, VideoPlay } from '@element-plus/icons-vue'
 import { buildEhviewerRecoveryPreview } from './ehviewerRecoveryPreview.mjs'
 import { getAnomalyNavigation } from './anomalyNavigation.mjs'
 import { mergePageRecoveryPageSelection, togglePageRecoverySelection } from './pageRecoverySelection.mjs'
@@ -382,6 +463,13 @@ const pageRecoverySession = ref(null)
 const pageRecoveryLoading = ref(false)
 const pageRecoveryApplying = ref(false)
 const pageRecoverySource = ref('current')
+const pageRecoveryNhentaiQuery = ref('')
+const pageRecoveryNhentaiCandidates = ref([])
+const pageRecoveryNhentaiSelectedId = ref('')
+const pageRecoveryNhentaiSearchLoading = ref(false)
+const pageRecoveryNhentaiSearchVisible = ref(false)
+const pageRecoveryNhentaiSearchType = ref('nhentai')
+const pageRecoveryNhentaiPageCountLoading = ref(false)
 const pageRecoverySelectedPages = ref([])
 const pageRecoverySelectedCandidates = ref([])
 const pageRecoverySelectedGroupIds = ref([])
@@ -524,9 +612,31 @@ const pageRecoveryAnomaly = computed(() => selectedAnomaly.value?.type === 'arch
 const getPageRecoverySourceUrls = (anomaly, fallbackUrl = null) => {
   const evidence = anomaly?.evidence || {}
   const ehviewer = evidence.ehviewerUrl || (evidence.ehviewer?.gid && evidence.ehviewer?.token ? `https://exhentai.org/g/${evidence.ehviewer.gid}/${evidence.ehviewer.token}/` : '')
-  return { current: String(evidence.currentUrl || evidence.url || fallbackUrl || '').trim() || null, ehviewer: String(ehviewer || '').trim() || null }
+  return { current: String(evidence.currentUrl || evidence.url || fallbackUrl || '').trim() || null, ehviewer: String(ehviewer || '').trim() || null, nhentai: String(evidence.nhentaiUrl || '').trim() || null }
 }
-const pageRecoverySourceUrls = computed(() => getPageRecoverySourceUrls(pageRecoveryAnomaly.value, bookPreview.value?.url))
+const pageRecoverySelectedNhentaiCandidate = computed(() => pageRecoveryNhentaiCandidates.value.find(item => String(item.id) === String(pageRecoveryNhentaiSelectedId.value)) || null)
+const pageRecoveryNhentaiPageCount = computed(() => {
+  const values = [
+    pageRecoverySelectedNhentaiCandidate.value?.pageCount,
+    pageRecoverySession.value?.source?.type === 'nhentai' ? pageRecoverySession.value?.online?.pageCount : null
+  ]
+  const value = values
+    .map(item => Number(item))
+    .find(item => Number.isSafeInteger(item) && item > 0)
+  return value === undefined ? null : value
+})
+const pageRecoveryNhentaiUrl = computed(() => {
+  if (pageRecoverySelectedNhentaiCandidate.value?.url) return pageRecoverySelectedNhentaiCandidate.value.url
+  const configured = getPageRecoverySourceUrls(pageRecoveryAnomaly.value, bookPreview.value?.url).nhentai
+  if (configured) return configured
+  const candidates = [pageRecoveryAnomaly.value?.evidence?.currentUrl, pageRecoveryAnomaly.value?.evidence?.url, bookPreview.value?.url]
+  return candidates.find(value => /nhentai\.net\/g\/\d+/i.test(String(value || ''))) || null
+})
+const pageRecoveryNhentaiSearchUrl = computed(() => `https://nhentai.net/search/?q=${encodeURIComponent(pageRecoveryNhentaiQuery.value.trim() || bookTitle.value || '')}`)
+const pageRecoverySourceUrls = computed(() => ({
+  ...getPageRecoverySourceUrls(pageRecoveryAnomaly.value, bookPreview.value?.url),
+  nhentai: pageRecoveryNhentaiUrl.value
+}))
 const pageRecoveryErrorMessage = error => {
   const message = String(error?.message || error || '')
   const unavailable = message.match(/^PAGE_RECOVERY_PAGE_UNAVAILABLE:([^:]+):(\d+)$/)
@@ -541,6 +651,8 @@ const pageRecoveryErrorMessage = error => {
   if (message === 'PAGE_RECOVERY_BATCH_TRAILING_UNCONFIRMED') return t('audit.pageRecoveryBatchTrailingNeedsReview')
   if (message === 'PAGE_RECOVERY_BATCH_MAPPING_UNCERTAIN') return t('audit.pageRecoveryMappingUncertain')
   if (message === 'PAGE_RECOVERY_REPORT_INVALID' || message === 'PAGE_RECOVERY_REVIEW_MISMATCH') return t('audit.pageRecoveryReportStale')
+  if (message === 'NHENTAI_API_KEY_MISSING') return t('c.nhentaiMissingApiKey')
+  if (message === 'NHENTAI_GALLERY_ID_MISSING' || message === 'NHENTAI_PAGE_MANIFEST_INCOMPLETE') return t('audit.nhentaiRecoveryManifestIncomplete')
   return message
 }
 const pageRecoveryPreviewEntries = candidate => [
@@ -582,6 +694,22 @@ const pageRecoveryLeadingPages = computed(() => [
 ])
 const pageRecoveryTrailingPages = computed(() => pageRecoverySession.value?.trailingPages || [])
 const pageRecoverySupported = computed(() => Boolean(pageRecoveryAnomaly.value?.bookId) && pageRecoveryMissingPages.value.length > 0)
+const pageRecoveryLocalPageCount = computed(() => {
+  const value = pageRecoverySession.value?.local?.pageCount ?? pageRecoveryAnomaly.value?.evidence?.pageCount
+  return Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null
+})
+const pageRecoverySourcePageCount = computed(() => {
+  const values = [
+    bookPreview.value?.filecount,
+    pageRecoveryAnomaly.value?.evidence?.remotePages,
+    pageRecoveryAnomaly.value?.evidence?.pageSources?.currentUrl?.pages
+  ]
+  const value = values
+    .map(item => Number(item))
+    .find(item => Number.isSafeInteger(item) && item > 0)
+  return value === undefined ? null : value
+})
+const pageRecoveryPageCountText = computed(() => `${pageRecoveryLocalPageCount.value ?? '-'} | ${pageRecoverySourcePageCount.value ?? '-'}`)
 const manualCandidateUrls = computed(() => ({
   current: String(selectedAnomaly.value?.evidence?.currentUrl || selectedAnomaly.value?.evidence?.url || '').trim() || null,
   ehviewer: ehviewerEvidenceUrl.value || null
@@ -806,12 +934,100 @@ const batchApplyPageRecovery = async () => {
     pageRecoveryBatchApplyLoading.value = false
   }
 }
+const searchNhentaiRecovery = async () => {
+  if (pageRecoveryNhentaiSearchLoading.value) return
+  const requestId = ++nhentaiSearchRequest
+  pageRecoveryNhentaiSearchLoading.value = true
+  try {
+    const query = pageRecoveryNhentaiQuery.value.trim() || bookTitle.value || selectedAnomaly.value?.reason || ''
+    const results = await window.auditApi.pageRecovery.searchNhentai({
+      title: query,
+      filepath: selectedAnomaly.value?.filepath || ''
+    })
+    if (requestId !== nhentaiSearchRequest) return
+    const candidates = (Array.isArray(results) ? results : []).map(candidate => ({
+      ...candidate,
+      pageCountLoading: !hasNhentaiPageCount(candidate.pageCount)
+    }))
+    pageRecoveryNhentaiCandidates.value = candidates
+    pageRecoveryNhentaiSelectedId.value = ''
+    pageRecoverySource.value = 'current'
+    if (!candidates.length) {
+      ElMessage.warning(t('audit.nhentaiRecoveryNoResults'))
+      return
+    }
+    void loadNhentaiSearchPageCounts(candidates, requestId)
+  } catch (error) {
+    ElMessage.error(pageRecoveryErrorMessage(error))
+  } finally {
+    pageRecoveryNhentaiSearchLoading.value = false
+  }
+}
+const openNhentaiRecoverySearch = () => {
+  if (pageRecoveryLoading.value || pageRecoveryApplying.value) return
+  if (!pageRecoveryNhentaiQuery.value.trim()) pageRecoveryNhentaiQuery.value = bookTitle.value || selectedAnomaly.value?.reason || ''
+  pageRecoveryNhentaiCandidates.value = []
+  pageRecoveryNhentaiSelectedId.value = ''
+  pageRecoveryNhentaiSearchVisible.value = true
+  void searchNhentaiRecovery()
+}
+const openNhentaiSearchUrl = () => openExternalUrl(pageRecoveryNhentaiSearchUrl.value)
+const selectNhentaiRecoveryCandidate = async candidate => {
+  if (!candidate?.id) return
+  pageRecoveryNhentaiSelectedId.value = String(candidate.id)
+  pageRecoverySource.value = 'nhentai'
+  pageRecoveryNhentaiSearchVisible.value = false
+  if (Number.isSafeInteger(Number(candidate.pageCount)) && Number(candidate.pageCount) > 0) return
+  pageRecoveryNhentaiPageCountLoading.value = true
+  try {
+    const result = await window.auditApi.pageRecovery.getNhentaiPageCount({ id: candidate.id })
+    const index = pageRecoveryNhentaiCandidates.value.findIndex(item => String(item.id) === String(candidate.id))
+    if (index >= 0) {
+      pageRecoveryNhentaiCandidates.value[index] = {
+        ...pageRecoveryNhentaiCandidates.value[index],
+        pageCount: result?.pageCount || null,
+        pageCountLoading: false
+      }
+    }
+  } catch (error) {
+    ElMessage.error(pageRecoveryErrorMessage(error))
+  } finally {
+    pageRecoveryNhentaiPageCountLoading.value = false
+  }
+}
+let nhentaiSearchRequest = 0
+const hasNhentaiPageCount = value => Number.isSafeInteger(Number(value)) && Number(value) > 0
+const loadNhentaiSearchPageCounts = async (candidates, requestId) => {
+  for (const candidate of candidates) {
+    if (requestId !== nhentaiSearchRequest) return
+    if (hasNhentaiPageCount(candidate.pageCount)) continue
+    let pageCount = null
+    try {
+      const result = await window.auditApi.pageRecovery.getNhentaiPageCount({ id: candidate.id })
+      pageCount = result?.pageCount || null
+    } catch (error) {
+      console.debug('Load nHentai search result page count failed', error)
+    }
+    if (requestId !== nhentaiSearchRequest) return
+    const index = pageRecoveryNhentaiCandidates.value.findIndex(item => String(item.id) === String(candidate.id))
+    if (index < 0) continue
+    const next = [...pageRecoveryNhentaiCandidates.value]
+    next[index] = { ...next[index], pageCount, pageCountLoading: false }
+    pageRecoveryNhentaiCandidates.value = next
+  }
+}
 const openAnomaly = async (row, siblings = null) => {
   const requestId = ++previewRequest
   selectedAnomaly.value = { ...row, siblings: siblings?.length ? siblings : getGroupAnomalies(row) }
   bookPreview.value = null
   pageRecoverySession.value = null
   pageRecoverySelectedCandidates.value = []
+  pageRecoveryNhentaiQuery.value = ''
+  pageRecoveryNhentaiCandidates.value = []
+  pageRecoveryNhentaiSelectedId.value = ''
+  pageRecoveryNhentaiSearchVisible.value = false
+  nhentaiSearchRequest += 1
+  pageRecoveryNhentaiPageCountLoading.value = false
   const recoveryRow = row.type === 'archive-image-sequence-gap' ? row : (siblings || []).find(item => item.type === 'archive-image-sequence-gap')
   pageRecoverySelectedPages.value = [...pageRecoveryMissingPages.value]
   pageRecoverySource.value = 'current'
@@ -826,7 +1042,10 @@ const openAnomaly = async (row, siblings = null) => {
   previewLoading.value = true
   try {
     const preview = await window.auditApi.getBookPreview(row.bookId)
-    if (requestId === previewRequest) bookPreview.value = preview
+    if (requestId === previewRequest) {
+      bookPreview.value = preview
+      pageRecoveryNhentaiQuery.value = preview?.searchTitle || preview?.title_jpn || preview?.title || ''
+    }
   } finally {
     if (requestId === previewRequest) previewLoading.value = false
   }
@@ -840,7 +1059,18 @@ const openAnomaly = async (row, siblings = null) => {
     pageRecoverySelectedCandidates.value = []
     pageRecoverySelectedPages.value = [...(cachedSession.availablePages || pageRecoveryMissingPages.value)]
     const cachedSource = String(cachedSession.source?.url || '')
-    if (cachedSource && cachedSource === pageRecoverySourceUrls.value.ehviewer) pageRecoverySource.value = 'ehviewer'
+    if (cachedSession.source?.type === 'nhentai' || /nhentai\.net\/g\/\d+/i.test(cachedSource)) {
+      pageRecoverySource.value = 'nhentai'
+      if (cachedSession.source?.galleryId) {
+        pageRecoveryNhentaiCandidates.value = [{
+          id: String(cachedSession.source.galleryId),
+          url: cachedSource,
+          title: '',
+          pageCount: cachedSession.online?.pageCount || null
+        }]
+        pageRecoveryNhentaiSelectedId.value = String(cachedSession.source.galleryId)
+      }
+    } else if (cachedSource && cachedSource === pageRecoverySourceUrls.value.ehviewer) pageRecoverySource.value = 'ehviewer'
     else if (cachedSource && cachedSource === pageRecoverySourceUrls.value.current) pageRecoverySource.value = 'current'
   } catch (error) {
     console.debug('Restore page recovery session failed', error)
@@ -848,12 +1078,18 @@ const openAnomaly = async (row, siblings = null) => {
 }
 const fetchPageRecovery = async () => {
   if (!selectedAnomaly.value || !pageRecoverySelectedPages.value.length || pageRecoveryLoading.value) return
+  if (pageRecoverySource.value === 'nhentai' && !pageRecoverySourceUrls.value.nhentai) {
+    ElMessage.warning(t('audit.nhentaiRecoverySelectCandidate'))
+    return
+  }
   pageRecoveryLoading.value = true
   try {
     const session = await window.auditApi.pageRecovery.fetch({
       reportId: props.report?.reportId,
       anomalyId: pageRecoveryAnomaly.value.id,
       source: pageRecoverySource.value,
+      sourceUrl: pageRecoverySource.value === 'nhentai' ? pageRecoverySourceUrls.value.nhentai : null,
+      nhentaiId: pageRecoverySource.value === 'nhentai' ? pageRecoveryNhentaiSelectedId.value : null,
       pageNumbers: [...pageRecoverySelectedPages.value]
     })
     pageRecoverySession.value = session
@@ -999,11 +1235,15 @@ watch([page, pageSize, filteredBookGroups], () => { void syncPageRecoveryTableSe
 .anomaly-cover { box-sizing: border-box; display: block; width: 150px; aspect-ratio: 500 / 707; overflow: hidden; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); border-radius: 4px; }.anomaly-cover-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--el-text-color-secondary); font-size: 12px; text-align: center; }.anomaly-cover-placeholder .el-icon { font-size: 28px; }.anomaly-book-preview p { display: -webkit-box; margin: 8px 0 0; overflow: hidden; color: var(--el-text-color-regular); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .ehviewer-recovery-preview { margin-top: 20px; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.ehviewer-recovery-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.ehviewer-recovery-heading strong, .ehviewer-recovery-heading span { display: block; }.ehviewer-recovery-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.ehviewer-recovery-meta { display: grid; grid-template-columns: minmax(0, 1fr) 120px; margin: 0 0 12px; border: 1px solid var(--el-border-color); }.ehviewer-recovery-meta > div { min-width: 0; padding: 10px 12px; }.ehviewer-recovery-meta > div + div { border-left: 1px solid var(--el-border-color); }.ehviewer-recovery-meta dt { color: var(--el-text-color-secondary); font-size: 12px; }.ehviewer-recovery-meta dd { min-width: 0; margin: 5px 0 0; overflow-wrap: anywhere; }.ehviewer-recovery-meta .el-link { max-width: 100%; vertical-align: top; }.ehviewer-recovery-content { min-height: 92px; margin: 0; padding: 14px; overflow: auto; color: var(--el-text-color-primary); font-family: Consolas, 'Courier New', monospace; line-height: 1.55; white-space: pre-wrap; word-break: break-all; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); }
 .ehviewer-recovery-alert { margin-top: 12px; }
- .page-recovery-panel { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.page-recovery-heading, .page-recovery-candidate-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }.page-recovery-heading strong, .page-recovery-heading span { display: block; }.page-recovery-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.page-recovery-controls, .page-recovery-pages { display: flex; align-items: flex-start; gap: 12px; margin: 14px 0; }.page-recovery-label { flex: 0 0 72px; padding-top: 6px; color: var(--el-text-color-secondary); font-size: 12px; }.page-recovery-pages .el-checkbox-group { display: flex; flex-wrap: wrap; gap: 4px 12px; }.page-recovery-inferred { margin-left: 4px; color: var(--el-color-warning); font-size: 11px; }.page-recovery-candidates { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--el-border-color); }.page-recovery-candidate-heading { align-items: center; margin-bottom: 10px; }.page-recovery-candidate { padding: 10px 0 14px; border-bottom: 1px solid var(--el-border-color-lighter); }.page-recovery-candidate-select { display: flex; margin-bottom: 10px; }.page-recovery-candidate-select .el-checkbox__label { min-width: 0; overflow-wrap: anywhere; }.page-recovery-comparison { min-width: 0; }.page-recovery-comparison-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }.page-recovery-comparison-heading span { color: var(--el-text-color-secondary); font-size: 12px; }.page-recovery-comparison-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }.page-recovery-context { min-width: 0; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-lighter); }.page-recovery-context.is-target { border-color: var(--el-color-success); box-shadow: inset 0 0 0 1px var(--el-color-success-light-5); }.page-recovery-context-image, .page-recovery-context-placeholder { display: block; width: 100%; aspect-ratio: 240 / 340; min-height: 120px; border: 1px solid var(--el-border-color); background: var(--el-fill-color-light); }.page-recovery-context-placeholder { box-sizing: border-box; display: flex; align-items: center; justify-content: center; padding: 12px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; text-align: center; }.page-recovery-context strong, .page-recovery-context span { display: block; min-width: 0; overflow-wrap: anywhere; }.page-recovery-context strong { margin-top: 8px; font-size: 12px; }.page-recovery-context span { margin-top: 4px; color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.4; }.page-recovery-actions { display: flex; gap: 8px; margin-top: 14px; }
+ .page-recovery-panel { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.page-recovery-heading, .page-recovery-candidate-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }.page-recovery-heading strong, .page-recovery-heading span { display: block; }.page-recovery-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.page-recovery-heading-meta { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }.page-recovery-page-count { margin-top: 0 !important; color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }.page-recovery-controls, .page-recovery-pages { display: flex; align-items: flex-start; gap: 12px; margin: 14px 0; }.page-recovery-label { flex: 0 0 72px; padding-top: 6px; color: var(--el-text-color-secondary); font-size: 12px; }.page-recovery-pages .el-checkbox-group { display: flex; flex-wrap: wrap; gap: 4px 12px; }.page-recovery-inferred { margin-left: 4px; color: var(--el-color-warning); font-size: 11px; }.page-recovery-nhentai-source { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -4px 0 14px 84px; }.page-recovery-nhentai-source .el-link { max-width: 100%; overflow-wrap: anywhere; }.page-recovery-source-page-count { color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }.page-recovery-candidates { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--el-border-color); }.page-recovery-candidate-heading { align-items: center; margin-bottom: 10px; }.page-recovery-candidate { padding: 10px 0 14px; border-bottom: 1px solid var(--el-border-color-lighter); }.page-recovery-candidate-select { display: flex; margin-bottom: 10px; }.page-recovery-candidate-select .el-checkbox__label { min-width: 0; overflow-wrap: anywhere; }.page-recovery-comparison { min-width: 0; }.page-recovery-comparison-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }.page-recovery-comparison-heading span { color: var(--el-text-color-secondary); font-size: 12px; }.page-recovery-comparison-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }.page-recovery-context { min-width: 0; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-lighter); }.page-recovery-context.is-target { border-color: var(--el-color-success); box-shadow: inset 0 0 0 1px var(--el-color-success-light-5); }.page-recovery-context-image, .page-recovery-context-placeholder { display: block; width: 100%; aspect-ratio: 240 / 340; min-height: 120px; border: 1px solid var(--el-border-color); background: var(--el-fill-color-light); }.page-recovery-context-placeholder { box-sizing: border-box; display: flex; align-items: center; justify-content: center; padding: 12px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; text-align: center; }.page-recovery-context strong, .page-recovery-context span { display: block; min-width: 0; overflow-wrap: anywhere; }.page-recovery-context strong { margin-top: 8px; font-size: 12px; }.page-recovery-context span { margin-top: 4px; color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.4; }.page-recovery-actions { display: flex; gap: 8px; margin-top: 14px; }
  .manual-source-selection { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.manual-source-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.manual-source-heading strong, .manual-source-heading span { display: block; }.manual-source-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.auto-next-selection { display: flex; margin-top: 12px; }.manual-source-alert { margin-top: 12px; }
  .page-recovery-context.is-fetched-neighbor { border-color: var(--el-color-primary); box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5); }
 .book-anomaly-summary { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.book-anomaly-summary > strong { display: block; margin-bottom: 10px; }.book-anomaly-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; color: var(--el-text-color-regular); font-size: 12px; line-height: 1.5; }.book-anomaly-item + .book-anomaly-item { border-top: 1px solid var(--el-border-color-lighter); }.book-anomaly-item span { min-width: 0; overflow-wrap: anywhere; }
 .anomaly-navigation { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -4px 0 16px; }.anomaly-navigation-count { color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }.page-count-evidence { display: grid; gap: 4px; width: 100%; font-size: 12px; }.page-count-row { display: grid; grid-template-columns: minmax(0, 1fr) 72px minmax(88px, auto); align-items: center; gap: 10px; min-height: 28px; }.page-count-row > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.page-count-row strong { color: var(--el-text-color-primary); }.page-count-header { color: var(--el-text-color-secondary); border-bottom: 1px solid var(--el-border-color); }.page-count-header span:nth-child(2), .page-count-row strong { text-align: right; }
 .availability-list { display: flex; flex-direction: column; gap: 8px; }.availability-item { display: inline-flex; align-items: center; gap: 8px; margin-right: 12px; }.evidence-block { padding: 14px; overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); }
  @media (max-width: 900px) { .task-toolbar, .task-toolbar-main, .review-action-bar { align-items: flex-start; flex-wrap: wrap; }.filter-row { grid-template-columns: 1fr; }.anomaly-detail-grid.has-book-preview, .ehviewer-recovery-meta { grid-template-columns: minmax(0, 1fr); }.ehviewer-recovery-meta > div + div { border-top: 1px solid var(--el-border-color); border-left: 0; }.page-recovery-comparison-strip { grid-template-columns: 1fr; }.page-recovery-comparison-heading { align-items: flex-start; flex-direction: column; gap: 4px; } }
+ .page-recovery-nhentai-query { flex: 1 1 320px; max-width: 520px; }.page-recovery-nhentai-results { display: flex; flex-direction: column; gap: 6px; margin: -4px 0 14px 84px; }.page-recovery-nhentai-results > strong { color: var(--el-text-color-secondary); font-size: 12px; }.page-recovery-nhentai-candidate { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 8px 10px; color: var(--el-text-color-primary); text-align: left; background: var(--el-fill-color-lighter); border: 1px solid var(--el-border-color); border-radius: 4px; cursor: pointer; }.page-recovery-nhentai-candidate span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.page-recovery-nhentai-candidate small { flex: 0 0 auto; color: var(--el-text-color-secondary); }.page-recovery-nhentai-candidate:hover, .page-recovery-nhentai-candidate.is-selected { border-color: var(--el-color-primary); color: var(--el-color-primary); }.page-recovery-nhentai-candidate:disabled { cursor: wait; opacity: .7; }
+ @media (max-width: 900px) { .page-recovery-nhentai-source, .page-recovery-nhentai-results { margin-left: 0; }.page-recovery-nhentai-query { max-width: none; } }
+ .audit-nhentai-search-dialog .el-form { display: flex; align-items: center; flex-wrap: nowrap; gap: 4px; }.audit-nhentai-search-dialog .el-form-item { margin-right: 0; }.audit-nhentai-search-input { width: min(52vw, 620px); }.audit-nhentai-search-type { width: 170px; }.audit-nhentai-search-results { min-height: 120px; }.audit-nhentai-search-hint { margin: 8px 0 12px; color: var(--el-text-color-secondary); font-size: 12px; }.audit-nhentai-search-result { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; margin: 0; padding: 8px 0; color: var(--el-text-color-primary); text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--el-border-color-lighter); cursor: pointer; }.audit-nhentai-search-result span { min-width: 0; overflow-wrap: anywhere; }.audit-nhentai-search-result small { flex: 0 0 auto; color: var(--el-text-color-secondary); }.audit-nhentai-search-result:hover, .audit-nhentai-search-result.is-selected { color: var(--el-color-primary); }.audit-nhentai-search-result:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
+ @media (max-width: 900px) { .audit-nhentai-search-dialog .el-form { align-items: stretch; flex-wrap: wrap; }.audit-nhentai-search-input { width: 100%; }.audit-nhentai-search-type { width: 140px; } }
 </style>

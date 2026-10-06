@@ -102,6 +102,20 @@
               </el-input>
             </div>
           </el-col>
+          <el-col :span="24">
+            <div class="setting-line">
+              <el-input
+                v-model.number="setting.nhentaiSearchResultLimit"
+                type="number"
+                min="1"
+                max="25"
+                @change="saveSetting"
+                :placeholder="$t('m.nhentaiSearchResultLimitInfo')"
+              >
+                <template #prepend><span class="setting-label">{{$t('m.nhentaiSearchResultLimit')}}</span></template>
+              </el-input>
+            </div>
+          </el-col>
         </el-row>
       </el-tab-pane>
       <el-tab-pane :label="$t('m.internalViewer')" name="internalViewer">
@@ -564,6 +578,7 @@ onMounted(() => {
       if (res.defaultInsertEmptyPage === undefined) setting.value.defaultInsertEmptyPage = true
       if (res.viewerType === undefined) setting.value.viewerType = 'original'
       if (res.nhentaiApiKey === undefined) setting.value.nhentaiApiKey = ''
+      setting.value.nhentaiSearchResultLimit = normalizeNhentaiSearchResultLimit(res.nhentaiSearchResultLimit)
       setting.value.matchConcurrency = normalizeMatchConcurrency(res.matchConcurrency)
       setting.value.scanConcurrency = normalizeScanConcurrency(res.scanConcurrency)
       saveSetting()
@@ -745,6 +760,7 @@ const handleLanguageSet = async (languageCode) => {
 const saveSetting = _.debounce(() => {
   setting.value.matchConcurrency = normalizeMatchConcurrency(setting.value.matchConcurrency)
   setting.value.scanConcurrency = normalizeScanConcurrency(setting.value.scanConcurrency)
+  setting.value.nhentaiSearchResultLimit = normalizeNhentaiSearchResultLimit(setting.value.nhentaiSearchResultLimit)
   ipcRenderer.invoke('save-setting', _.cloneDeep(setting.value))
 }, 500)
 
@@ -755,6 +771,10 @@ const normalizeConcurrency = (value) => {
 
 const normalizeMatchConcurrency = normalizeConcurrency
 const normalizeScanConcurrency = normalizeConcurrency
+const normalizeNhentaiSearchResultLimit = (value) => {
+  const number = Number.parseInt(value, 10)
+  return Number.isFinite(number) ? Math.min(25, Math.max(1, number)) : 5
+}
 
 const handleMatchConcurrencyChange = () => {
   setting.value.matchConcurrency = normalizeMatchConcurrency(setting.value.matchConcurrency)
