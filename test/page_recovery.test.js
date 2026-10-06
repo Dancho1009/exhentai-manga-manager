@@ -369,6 +369,84 @@ test('page recovery can use an nHentai API manifest and CDN image source', async
   }
 })
 
+test('page recovery can use a JMComic manifest and decoded image source', async () => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'page-recovery-jmcomic-'))
+  const library = path.join(root, 'book')
+  await fs.promises.mkdir(library, { recursive: true })
+  const imageBuffer = await sharp({ create: { width: 20, height: 30, channels: 3, background: '#663399' } }).png().toBuffer()
+  await fs.promises.writeFile(path.join(library, 'page-0001.webp'), imageBuffer)
+  await fs.promises.writeFile(path.join(library, 'page-0003.webp'), imageBuffer)
+  await fs.promises.writeFile(path.join(library, 'page-0004.webp'), imageBuffer)
+  const sourceUrl = 'https://18comic.vip/album/615436/'
+  const book = { id: 'book-jmcomic', filepath: library, type: 'folder', url: sourceUrl, title: 'JM615436' }
+  const health = await inspectBookHealth(book)
+  const report = {
+    reportId: 'report-jmcomic',
+    stale: false,
+    anomalies: [{
+      id: 'anomaly-jmcomic',
+      bookId: book.id,
+      filepath: library,
+      type: 'archive-image-sequence-gap',
+      evidence: { currentUrl: sourceUrl, imageSequence: health.imageSequence }
+    }]
+  }
+  let manifestRequests = 0
+  let imageRequests = 0
+  const manager = new PageRecoveryManager({
+    storePath: root,
+    Manga: { findByPk: async () => book },
+    getSetting: () => ({ requireGap: 0 }),
+    getJmComicRecoveryManifest: async ({ id, url }) => {
+      manifestRequests += 1
+      assert.equal(id, '615436')
+      assert.equal(url, sourceUrl)
+      return {
+        galleryId: '615436',
+        sourceUrl,
+        onlinePageCount: 4,
+        pages: [1, 2, 3, 4].map(pageNumber => ({
+          pageNumber,
+          pageUrl: `${sourceUrl}#page=${pageNumber}`,
+          imageUrl: `https://cdn.example/615436/${pageNumber}.webp`,
+          photoId: '615436',
+          scrambleId: '999999',
+          pageFileName: `${String(pageNumber).padStart(5, '0')}.webp`
+        }))
+      }
+    },
+    requestJmComicImage: async ({ imageUrl, referer, photoId, scrambleId }) => {
+      imageRequests += 1
+      assert.match(imageUrl, /\/2\.webp$/)
+      assert.equal(referer, sourceUrl)
+      assert.equal(photoId, '615436')
+      assert.equal(scrambleId, '999999')
+      return { buffer: imageBuffer, httpStatus: 200, contentType: 'image/png' }
+    },
+    requestText: async () => { throw new Error('E_HENTAI_REQUEST_SHOULD_NOT_RUN') },
+    requestBinary: async () => { throw new Error('E_HENTAI_IMAGE_SHOULD_NOT_RUN') }
+  })
+
+  try {
+    const session = await manager.fetchSelectedPages({
+      report,
+      anomalyId: 'anomaly-jmcomic',
+      source: 'current',
+      sourceUrl,
+      pageNumbers: [2]
+    })
+    assert.equal(manifestRequests, 1)
+    assert.equal(imageRequests, 1)
+    assert.equal(session.source.type, 'jmcomic')
+    assert.equal(session.source.galleryId, '615436')
+    assert.equal(session.online.pageCount, 4)
+    assert.equal(session.candidates[0].pageNumber, 2)
+    assert.equal(session.writeBackSupported, true)
+  } finally {
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('page recovery persists failed fetch status for restart', async () => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'page-recovery-failed-'))
   const library = path.join(root, 'book')
