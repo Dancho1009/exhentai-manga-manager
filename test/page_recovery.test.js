@@ -3,10 +3,12 @@ const assert = require('node:assert/strict')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
+const crypto = require('crypto')
 const sharp = require('sharp')
 const AdmZip = require('adm-zip')
 const { PageRecoveryManager, parseGalleryPageManifest, parseGalleryPagination, parseImagePageSource, assessBatchPageMapping, listPendingRecoverySummaries } = require('../modules/audit/page_recovery.js')
 const { buildNhentaiImageUrl, normalizeNhentaiSearchResultLimit } = require('../modules/nhentai.js')
+const { extractJmComicId, searchJmComic, setJmComicBrowserFetchers, parseSearchResults, parseJmApiSearchResults, parseJmApiAlbumInfo, parseJmApiChapter, decryptJmApiData, parseAlbumInfo, parsePhotoManifest, getJmImageSegmentCount, decodeJmImage } = require('../modules/jmcomic.js')
 const { inspectBookHealth } = require('../modules/audit/archive_inspector.js')
 
 test('nHentai recovery uses the API page path and extension', () => {
@@ -27,6 +29,106 @@ test('nHentai search result limit is configurable within the API page size', () 
   assert.equal(normalizeNhentaiSearchResultLimit(12), 12)
   assert.equal(normalizeNhentaiSearchResultLimit(100), 25)
   assert.equal(normalizeNhentaiSearchResultLimit(0), 1)
+})
+
+test('JMComic source parsing keeps album, chapter and page identities', async () => {
+  assert.equal(extractJmComicId('https://18comic.vip/album/615436/'), '615436')
+  assert.equal(extractJmComicId('JM615436'), '615436')
+  const search = parseSearchResults(
+    '<a href="/album/615436/" title="[作者] 测试本"><span>测试本</span></a><a href="/album/615436/" title="duplicate">duplicate</a><a href="/album/615437/" title="第二本">第二本</a>',
+    'https://18comic.vip/search/photos'
+  )
+  assert.deepEqual(search.map(item => item.id), ['615436', '615437'])
+  assert.equal(search[0].url, 'https://18comic.vip/album/615436/')
+
+  const album = parseAlbumInfo({
+    id: '615436',
+    url: 'https://18comic.vip/album/615436/',
+    html: '<h2 id="book-name">[作者] 测试本</h2><span class="pagecount">頁數: 2</span><a data-album="700001">第1话</a><a data-album="700002">第2话</a>'
+  })
+  assert.equal(album.title, '[作者] 测试本')
+  assert.equal(album.pageCount, 2)
+  assert.deepEqual(album.episodes, ['700001', '700002'])
+
+  const photo = parsePhotoManifest({
+    photoId: '700001',
+    photoUrl: 'https://18comic.vip/photo/700001/',
+    html: 'var scramble_id = 220980; var page_arr = ["00001.webp", "00002.webp"]; <img src="https://cdn-msp.18comic.org/media/albums/blank.jpg">'
+  })
+  assert.equal(photo.scrambleId, '220980')
+  assert.deepEqual(photo.pages.map(item => item.imageUrl), [
+    'https://cdn-msp.18comic.org/media/photos/700001/00001.webp',
+    'https://cdn-msp.18comic.org/media/photos/700001/00002.webp'
+  ])
+})
+
+test('JMComic search falls back to the browser session when Node networking is blocked', async () => {
+  setJmComicBrowserFetchers({
+    fetchText: async ({ url }) => ({
+      body: '<a href="/album/615436/" title="[作者] 测试本"><span>测试本</span></a>',
+      finalUrl: url,
+      status: 200
+    })
+  })
+  try {
+    const results = await searchJmComic({
+      title: '测试本',
+      setting: {
+        jmcomicDomain: 'http://127.0.0.1:1',
+        jmcomicApiDomains: ['http://127.0.0.1:1']
+      }
+    })
+    assert.deepEqual(results.map(item => item.id), ['615436'])
+  } finally {
+    setJmComicBrowserFetchers()
+  }
+})
+
+test('JMComic mobile API data and page manifests are decoded into recovery sources', () => {
+  const timestamp = 1700000000
+  const value = { id: 615436, name: '测试本', total_photos: 2 }
+  const key = Buffer.from(crypto.createHash('md5').update(`${timestamp}185Hcomic3PAPP7R`).digest('hex'), 'utf8')
+  const cipher = crypto.createCipheriv('aes-256-ecb', key, null)
+  cipher.setAutoPadding(true)
+  const encrypted = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(value))), cipher.final()]).toString('base64')
+  assert.deepEqual(JSON.parse(decryptJmApiData(encrypted, timestamp)), value)
+
+  assert.deepEqual(parseJmApiSearchResults({
+    data: { content: [{ id: '615436', name: '测试本', total_photos: 2 }, { id: '615436', name: '重复' }] },
+    htmlDomain: 'https://18comic.vip'
+  }), [{
+    title: '测试本',
+    url: 'https://18comic.vip/album/615436/',
+    type: 'jmcomic',
+    id: '615436',
+    confidence: 'title',
+    pageCount: 2
+  }])
+
+  const album = parseJmApiAlbumInfo({
+    data: { id: 615436, name: '测试本', total_photos: 2, series: [] },
+    url: 'https://18comic.vip/album/615436/',
+    id: '615436',
+    apiDomain: 'https://www.cdnhjk.net'
+  })
+  assert.deepEqual(album.episodes, ['615436'])
+  const chapter = parseJmApiChapter({
+    data: { id: 615436, images: ['00001.webp', '00002.webp'] },
+    sourceUrl: album.url,
+    apiDomain: album.apiDomain
+  })
+  assert.equal(chapter.pages[1].imageUrl, 'https://cdn-msp.jmapiproxy1.cc/media/photos/615436/00002.webp')
+  assert.equal(chapter.pages[1].imageUrls.length, 6)
+  assert.equal(chapter.pages[1].imageReferer, 'https://www.cdnhjk.net/')
+})
+
+test('JMComic image decoder follows the published segmentation rules', async () => {
+  const imageBuffer = await sharp({ create: { width: 4, height: 10, channels: 3, background: '#336699' } }).png().toBuffer()
+  assert.equal(getJmImageSegmentCount({ scrambleId: 999999, photoId: 1, pageFileName: '00001.webp' }), 0)
+  const decoded = await decodeJmImage({ buffer: imageBuffer, scrambleId: 999999, photoId: 1, pageFileName: '00001.webp' })
+  assert.ok(Buffer.isBuffer(decoded.buffer))
+  assert.equal(decoded.decoded, false)
+  assert.equal(decoded.contentType, null)
 })
 
 test('gallery pagination exposes later page-list URLs without downloading images', () => {
