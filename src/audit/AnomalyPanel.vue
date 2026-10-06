@@ -276,6 +276,7 @@
               <el-radio-button v-if="pageRecoverySourceUrls.current" value="current">{{ $t('audit.currentUrl') }}</el-radio-button>
               <el-radio-button v-if="pageRecoverySourceUrls.ehviewer" value="ehviewer">{{ $t('audit.ehviewerUrl') }}</el-radio-button>
               <el-radio-button v-if="pageRecoverySourceUrls.nhentai" value="nhentai">{{ $t('audit.nhentaiRecoverySource') }}</el-radio-button>
+              <el-radio-button v-if="pageRecoverySourceUrls.jmcomic" value="jmcomic">{{ $t('audit.jmcomicRecoverySource') }}</el-radio-button>
             </el-radio-group>
           </div>
           <div class="page-recovery-nhentai-source">
@@ -294,6 +295,25 @@
               {{ $t('audit.pages') }}: {{ pageRecoveryNhentaiPageCount }}
             </span>
             <span v-else-if="pageRecoveryNhentaiPageCountLoading" class="page-recovery-source-page-count">
+              {{ $t('audit.pages') }}: ...
+            </span>
+          </div>
+          <div class="page-recovery-nhentai-source">
+            <el-button
+              plain
+              :icon="Search"
+              :disabled="pageRecoveryLoading || pageRecoveryApplying"
+              @click="openJmComicRecoverySearch"
+            >
+              {{ $t('audit.searchJmComicRecoverySource') }}
+            </el-button>
+            <el-link v-if="pageRecoverySourceUrls.jmcomic" type="primary" :underline="false" @click="openExternalUrl(pageRecoverySourceUrls.jmcomic)">
+              {{ pageRecoverySourceUrls.jmcomic }}
+            </el-link>
+            <span v-if="pageRecoveryJmComicPageCount" class="page-recovery-source-page-count">
+              {{ $t('audit.pages') }}: {{ pageRecoveryJmComicPageCount }}
+            </span>
+            <span v-else-if="pageRecoveryJmComicPageCountLoading" class="page-recovery-source-page-count">
               {{ $t('audit.pages') }}: ...
             </span>
           </div>
@@ -419,6 +439,55 @@
         <el-empty v-else :description="$t('m.noResults')" :image-size="100" />
       </div>
     </el-dialog>
+    <el-dialog
+      v-model="pageRecoveryJmComicSearchVisible"
+      width="60vw"
+      :title="$t('audit.jmcomicRecoverySearchTitle')"
+      destroy-on-close
+      append-to-body
+      class="audit-nhentai-search-dialog"
+    >
+      <el-form :inline="true" class="audit-nhentai-search-form">
+        <el-form-item>
+          <el-input
+            v-model="pageRecoveryJmComicQuery"
+            class="audit-nhentai-search-input"
+            :disabled="pageRecoveryJmComicSearchLoading"
+            :placeholder="$t('audit.jmcomicRecoveryQueryPlaceholder')"
+            @keyup.enter="searchJmComicRecovery"
+          >
+            <template #append>
+              <el-select v-model="pageRecoveryJmComicSearchType" class="audit-nhentai-search-type" disabled>
+                <el-option label="禁漫天堂(id/keyword)" value="jmcomic" />
+              </el-select>
+            </template>
+          </el-input>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" plain :icon="Search" :loading="pageRecoveryJmComicSearchLoading" @click="searchJmComicRecovery" />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" plain :icon="Link" @click="openJmComicSearchUrl" />
+        </el-form-item>
+      </el-form>
+      <div v-loading="pageRecoveryJmComicSearchLoading" class="audit-nhentai-search-results">
+        <div v-if="pageRecoveryJmComicCandidates.length">
+          <p class="audit-nhentai-search-hint">{{ $t('audit.jmcomicRecoveryCandidates') }}</p>
+          <button
+            v-for="candidate in pageRecoveryJmComicCandidates"
+            :key="candidate.id"
+            type="button"
+            class="audit-nhentai-search-result"
+            :class="{ 'is-selected': String(candidate.id) === String(pageRecoveryJmComicSelectedId) }"
+            @click="selectJmComicRecoveryCandidate(candidate)"
+          >
+            <span>{{ candidate.title || candidate.url }}</span>
+            <small>#{{ candidate.id }} · {{ $t('audit.pages') }}: {{ candidate.pageCountLoading ? '...' : (candidate.pageCount || '-') }}</small>
+          </button>
+        </div>
+        <el-empty v-else :description="$t('m.noResults')" :image-size="100" />
+      </div>
+    </el-dialog>
   </section>
 </template>
 
@@ -470,6 +539,13 @@ const pageRecoveryNhentaiSearchLoading = ref(false)
 const pageRecoveryNhentaiSearchVisible = ref(false)
 const pageRecoveryNhentaiSearchType = ref('nhentai')
 const pageRecoveryNhentaiPageCountLoading = ref(false)
+const pageRecoveryJmComicQuery = ref('')
+const pageRecoveryJmComicCandidates = ref([])
+const pageRecoveryJmComicSelectedId = ref('')
+const pageRecoveryJmComicSearchLoading = ref(false)
+const pageRecoveryJmComicSearchVisible = ref(false)
+const pageRecoveryJmComicSearchType = ref('jmcomic')
+const pageRecoveryJmComicPageCountLoading = ref(false)
 const pageRecoverySelectedPages = ref([])
 const pageRecoverySelectedCandidates = ref([])
 const pageRecoverySelectedGroupIds = ref([])
@@ -633,9 +709,25 @@ const pageRecoveryNhentaiUrl = computed(() => {
   return candidates.find(value => /nhentai\.net\/g\/\d+/i.test(String(value || ''))) || null
 })
 const pageRecoveryNhentaiSearchUrl = computed(() => `https://nhentai.net/search/?q=${encodeURIComponent(pageRecoveryNhentaiQuery.value.trim() || bookTitle.value || '')}`)
+const pageRecoverySelectedJmComicCandidate = computed(() => pageRecoveryJmComicCandidates.value.find(item => String(item.id) === String(pageRecoveryJmComicSelectedId.value)) || null)
+const pageRecoveryJmComicPageCount = computed(() => {
+  const values = [
+    pageRecoverySelectedJmComicCandidate.value?.pageCount,
+    pageRecoverySession.value?.source?.type === 'jmcomic' ? pageRecoverySession.value?.online?.pageCount : null
+  ]
+  const value = values.map(item => Number(item)).find(item => Number.isSafeInteger(item) && item > 0)
+  return value === undefined ? null : value
+})
+const pageRecoveryJmComicUrl = computed(() => {
+  if (pageRecoverySelectedJmComicCandidate.value?.url) return pageRecoverySelectedJmComicCandidate.value.url
+  const evidence = pageRecoveryAnomaly.value?.evidence || {}
+  const candidates = [evidence.jmcomicUrl, evidence.currentUrl, evidence.url, bookPreview.value?.url]
+  return candidates.find(value => /\/(?:album|photo)\/\d+/i.test(String(value || '')) && /(?:18comic|jmcomic|jm365|jm[-.]?comic)/i.test(String(value || ''))) || null
+})
 const pageRecoverySourceUrls = computed(() => ({
   ...getPageRecoverySourceUrls(pageRecoveryAnomaly.value, bookPreview.value?.url),
-  nhentai: pageRecoveryNhentaiUrl.value
+  nhentai: pageRecoveryNhentaiUrl.value,
+  jmcomic: pageRecoveryJmComicUrl.value
 }))
 const pageRecoveryErrorMessage = error => {
   const message = String(error?.message || error || '')
@@ -653,6 +745,8 @@ const pageRecoveryErrorMessage = error => {
   if (message === 'PAGE_RECOVERY_REPORT_INVALID' || message === 'PAGE_RECOVERY_REVIEW_MISMATCH') return t('audit.pageRecoveryReportStale')
   if (message === 'NHENTAI_API_KEY_MISSING') return t('c.nhentaiMissingApiKey')
   if (message === 'NHENTAI_GALLERY_ID_MISSING' || message === 'NHENTAI_PAGE_MANIFEST_INCOMPLETE') return t('audit.nhentaiRecoveryManifestIncomplete')
+  if (message === 'JMCOMIC_ALBUM_ID_MISSING' || message === 'JMCOMIC_PAGE_MANIFEST_INCOMPLETE') return t('audit.jmcomicRecoveryManifestIncomplete')
+  if (message === 'JMCOMIC_BROWSER_CHALLENGE') return t('audit.jmcomicRecoveryBrowserChallenge')
   return message
 }
 const pageRecoveryPreviewEntries = candidate => [
@@ -700,6 +794,8 @@ const pageRecoveryLocalPageCount = computed(() => {
 })
 const pageRecoverySourcePageCount = computed(() => {
   const values = [
+    pageRecoverySource.value === 'nhentai' ? pageRecoveryNhentaiPageCount.value : null,
+    pageRecoverySource.value === 'jmcomic' ? pageRecoveryJmComicPageCount.value : null,
     bookPreview.value?.filecount,
     pageRecoveryAnomaly.value?.evidence?.remotePages,
     pageRecoveryAnomaly.value?.evidence?.pageSources?.currentUrl?.pages
@@ -1016,6 +1112,89 @@ const loadNhentaiSearchPageCounts = async (candidates, requestId) => {
     pageRecoveryNhentaiCandidates.value = next
   }
 }
+const searchJmComicRecovery = async () => {
+  if (pageRecoveryJmComicSearchLoading.value) return
+  const requestId = ++jmComicSearchRequest
+  pageRecoveryJmComicSearchLoading.value = true
+  try {
+    const query = pageRecoveryJmComicQuery.value.trim() || bookTitle.value || selectedAnomaly.value?.reason || ''
+    const results = await window.auditApi.pageRecovery.searchJmComic({
+      title: query,
+      filepath: selectedAnomaly.value?.filepath || ''
+    })
+    if (requestId !== jmComicSearchRequest) return
+    const candidates = (Array.isArray(results) ? results : []).map(candidate => ({
+      ...candidate,
+      pageCountLoading: !hasJmComicPageCount(candidate.pageCount)
+    }))
+    pageRecoveryJmComicCandidates.value = candidates
+    pageRecoveryJmComicSelectedId.value = ''
+    if (!candidates.length) {
+      ElMessage.warning(t('audit.jmcomicRecoveryNoResults'))
+      return
+    }
+    void loadJmComicSearchPageCounts(candidates, requestId)
+  } catch (error) {
+    ElMessage.error(pageRecoveryErrorMessage(error))
+  } finally {
+    pageRecoveryJmComicSearchLoading.value = false
+  }
+}
+const openJmComicRecoverySearch = () => {
+  if (pageRecoveryLoading.value || pageRecoveryApplying.value) return
+  if (!pageRecoveryJmComicQuery.value.trim()) pageRecoveryJmComicQuery.value = bookTitle.value || selectedAnomaly.value?.reason || ''
+  pageRecoveryJmComicCandidates.value = []
+  pageRecoveryJmComicSelectedId.value = ''
+  pageRecoveryJmComicSearchVisible.value = true
+  void searchJmComicRecovery()
+}
+const openJmComicSearchUrl = () => openExternalUrl(`https://18comic.vip/search/photos?search_query=${encodeURIComponent(pageRecoveryJmComicQuery.value.trim() || bookTitle.value || '')}`)
+const selectJmComicRecoveryCandidate = async candidate => {
+  if (!candidate?.id) return
+  pageRecoveryJmComicSelectedId.value = String(candidate.id)
+  pageRecoverySource.value = 'jmcomic'
+  pageRecoveryJmComicSearchVisible.value = false
+  if (hasJmComicPageCount(candidate.pageCount)) return
+  pageRecoveryJmComicPageCountLoading.value = true
+  try {
+    const result = await window.auditApi.pageRecovery.getJmComicPageCount({ id: candidate.id, url: candidate.url })
+    const index = pageRecoveryJmComicCandidates.value.findIndex(item => String(item.id) === String(candidate.id))
+    if (index >= 0) {
+      const next = [...pageRecoveryJmComicCandidates.value]
+      next[index] = { ...next[index], title: result?.title || next[index].title, url: result?.url || next[index].url, pageCount: result?.pageCount || null, pageCountLoading: false }
+      pageRecoveryJmComicCandidates.value = next
+    }
+  } catch (error) {
+    ElMessage.error(pageRecoveryErrorMessage(error))
+  } finally {
+    pageRecoveryJmComicPageCountLoading.value = false
+  }
+}
+let jmComicSearchRequest = 0
+const hasJmComicPageCount = value => Number.isSafeInteger(Number(value)) && Number(value) > 0
+const loadJmComicSearchPageCounts = async (candidates, requestId) => {
+  for (const candidate of candidates) {
+    if (requestId !== jmComicSearchRequest) return
+    if (hasJmComicPageCount(candidate.pageCount)) continue
+    let pageCount = null
+    let title = candidate.title
+    let url = candidate.url
+    try {
+      const result = await window.auditApi.pageRecovery.getJmComicPageCount({ id: candidate.id, url: candidate.url })
+      pageCount = result?.pageCount || null
+      title = result?.title || title
+      url = result?.url || url
+    } catch (error) {
+      console.debug('Load JMComic search result page count failed', error)
+    }
+    if (requestId !== jmComicSearchRequest) return
+    const index = pageRecoveryJmComicCandidates.value.findIndex(item => String(item.id) === String(candidate.id))
+    if (index < 0) continue
+    const next = [...pageRecoveryJmComicCandidates.value]
+    next[index] = { ...next[index], title, url, pageCount, pageCountLoading: false }
+    pageRecoveryJmComicCandidates.value = next
+  }
+}
 const openAnomaly = async (row, siblings = null) => {
   const requestId = ++previewRequest
   selectedAnomaly.value = { ...row, siblings: siblings?.length ? siblings : getGroupAnomalies(row) }
@@ -1028,6 +1207,12 @@ const openAnomaly = async (row, siblings = null) => {
   pageRecoveryNhentaiSearchVisible.value = false
   nhentaiSearchRequest += 1
   pageRecoveryNhentaiPageCountLoading.value = false
+  pageRecoveryJmComicQuery.value = ''
+  pageRecoveryJmComicCandidates.value = []
+  pageRecoveryJmComicSelectedId.value = ''
+  pageRecoveryJmComicSearchVisible.value = false
+  jmComicSearchRequest += 1
+  pageRecoveryJmComicPageCountLoading.value = false
   const recoveryRow = row.type === 'archive-image-sequence-gap' ? row : (siblings || []).find(item => item.type === 'archive-image-sequence-gap')
   pageRecoverySelectedPages.value = [...pageRecoveryMissingPages.value]
   pageRecoverySource.value = 'current'
@@ -1045,6 +1230,7 @@ const openAnomaly = async (row, siblings = null) => {
     if (requestId === previewRequest) {
       bookPreview.value = preview
       pageRecoveryNhentaiQuery.value = preview?.searchTitle || preview?.title_jpn || preview?.title || ''
+      pageRecoveryJmComicQuery.value = pageRecoveryNhentaiQuery.value
     }
   } finally {
     if (requestId === previewRequest) previewLoading.value = false
@@ -1070,6 +1256,17 @@ const openAnomaly = async (row, siblings = null) => {
         }]
         pageRecoveryNhentaiSelectedId.value = String(cachedSession.source.galleryId)
       }
+    } else if (cachedSession.source?.type === 'jmcomic' || /\/(?:album|photo)\/\d+/i.test(cachedSource) && /(?:18comic|jmcomic|jm365|jm[-.]?comic)/i.test(cachedSource)) {
+      pageRecoverySource.value = 'jmcomic'
+      if (cachedSession.source?.galleryId) {
+        pageRecoveryJmComicCandidates.value = [{
+          id: String(cachedSession.source.galleryId),
+          url: cachedSource,
+          title: '',
+          pageCount: cachedSession.online?.pageCount || null
+        }]
+        pageRecoveryJmComicSelectedId.value = String(cachedSession.source.galleryId)
+      }
     } else if (cachedSource && cachedSource === pageRecoverySourceUrls.value.ehviewer) pageRecoverySource.value = 'ehviewer'
     else if (cachedSource && cachedSource === pageRecoverySourceUrls.value.current) pageRecoverySource.value = 'current'
   } catch (error) {
@@ -1082,14 +1279,19 @@ const fetchPageRecovery = async () => {
     ElMessage.warning(t('audit.nhentaiRecoverySelectCandidate'))
     return
   }
+  if (pageRecoverySource.value === 'jmcomic' && !pageRecoverySourceUrls.value.jmcomic) {
+    ElMessage.warning(t('audit.jmcomicRecoverySelectCandidate'))
+    return
+  }
   pageRecoveryLoading.value = true
   try {
     const session = await window.auditApi.pageRecovery.fetch({
       reportId: props.report?.reportId,
       anomalyId: pageRecoveryAnomaly.value.id,
       source: pageRecoverySource.value,
-      sourceUrl: pageRecoverySource.value === 'nhentai' ? pageRecoverySourceUrls.value.nhentai : null,
       nhentaiId: pageRecoverySource.value === 'nhentai' ? pageRecoveryNhentaiSelectedId.value : null,
+      sourceUrl: pageRecoverySource.value === 'jmcomic' ? pageRecoverySourceUrls.value.jmcomic : (pageRecoverySource.value === 'nhentai' ? pageRecoverySourceUrls.value.nhentai : null),
+      jmcomicId: pageRecoverySource.value === 'jmcomic' ? pageRecoveryJmComicSelectedId.value : null,
       pageNumbers: [...pageRecoverySelectedPages.value]
     })
     pageRecoverySession.value = session

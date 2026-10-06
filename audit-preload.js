@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('auditApi', {
     fetch: request => ipcRenderer.invoke('audit:page-recovery-fetch', cloneIpcPayload(request)),
     searchNhentai: request => ipcRenderer.invoke('audit:nhentai-recovery-search', cloneIpcPayload(request)),
     getNhentaiPageCount: request => ipcRenderer.invoke('audit:nhentai-recovery-page-count', cloneIpcPayload(request)),
+    searchJmComic: request => ipcRenderer.invoke('audit:jmcomic-recovery-search', cloneIpcPayload(request)),
+    getJmComicPageCount: request => ipcRenderer.invoke('audit:jmcomic-recovery-page-count', cloneIpcPayload(request)),
     getState: recoveryId => ipcRenderer.invoke('audit:page-recovery-get-state', recoveryId),
     getLatest: request => ipcRenderer.invoke('audit:page-recovery-get-latest', cloneIpcPayload(request)),
     listLatest: request => ipcRenderer.invoke('audit:page-recovery-list-latest', cloneIpcPayload(request)),

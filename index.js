@@ -26,6 +26,7 @@ const {
 const { prepareTemplate } = require('./modules/prepare_menu.js')
 const { getRootPath } = require('./modules/utils.js')
 const { searchNhentai, getNhentaiMetadata, getNhentaiGalleryPageCount, getNhentaiComments } = require('./modules/nhentai.js')
+const { searchJmComic, getJmComicInfo, setJmComicBrowserFetchers } = require('./modules/jmcomic.js')
 const {
   checkGallerySites,
   getGalleryPage: getEhentaiGalleryPage,
@@ -177,6 +178,7 @@ const sendMessageToWebContents = (message, targetWebContents = null) => {
 
 let mainWindow
 let auditWindow
+let jmComicBrowserWindow
 let bookDetailWindowRegistry
 let tray
 let screenWidth
@@ -262,6 +264,7 @@ const createTray = () => {
       click: async () => {
         appIsQuitting = true
         await auditWorkspaceManager.interruptForExit()
+        closeJmComicBrowserWindow()
         if (auditWindow && !auditWindow.isDestroyed()) auditWindow.destroy()
         bookDetailWindowRegistry.destroyAll()
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy()
@@ -542,10 +545,16 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', event => {
-  if (appIsQuitting || !auditWorkspaceManager.getState().activeTask) return
+  if (appIsQuitting || !auditWorkspaceManager.getState().activeTask) {
+    closeJmComicBrowserWindow()
+    return
+  }
   event.preventDefault()
   appIsQuitting = true
-  auditWorkspaceManager.interruptForExit().finally(() => app.quit())
+  auditWorkspaceManager.interruptForExit().finally(() => {
+    closeJmComicBrowserWindow()
+    app.quit()
+  })
 })
 
 process.on('exit', () => {
@@ -658,6 +667,96 @@ const prepareImportSqliteIndexes = async (sqlitePath) => {
 }
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+const JM_COMIC_BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+const JM_COMIC_BROWSER_TIMEOUT = 45000
+
+const getJmComicBrowserWindow = () => {
+  if (jmComicBrowserWindow && !jmComicBrowserWindow.isDestroyed()) return jmComicBrowserWindow
+  jmComicBrowserWindow = new BrowserWindow({
+    show: false,
+    width: 1280,
+    height: 900,
+    title: '禁漫天堂验证',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      backgroundThrottling: false
+    }
+  })
+  jmComicBrowserWindow.setMenuBarVisibility(false)
+  jmComicBrowserWindow.webContents.setUserAgent(JM_COMIC_BROWSER_USER_AGENT)
+  jmComicBrowserWindow.on('closed', () => {
+    jmComicBrowserWindow = null
+  })
+  return jmComicBrowserWindow
+}
+
+const closeJmComicBrowserWindow = () => {
+  if (jmComicBrowserWindow && !jmComicBrowserWindow.isDestroyed()) jmComicBrowserWindow.destroy()
+  jmComicBrowserWindow = null
+}
+
+const readJmComicBrowserPage = async ({ url, referer = null } = {}) => {
+  const win = getJmComicBrowserWindow()
+  if (!win || win.isDestroyed()) throw new Error('JMCOMIC_BROWSER_UNAVAILABLE')
+  const extraHeaders = referer ? `Referer: ${referer}\r\n` : undefined
+  try {
+    await win.loadURL(url, extraHeaders ? { extraHeaders } : undefined)
+  } catch (error) {
+    if (win.isDestroyed()) throw new Error('JMCOMIC_BROWSER_UNAVAILABLE')
+    console.log(`JMComic browser navigation failed for ${url}: ${error}`)
+  }
+
+  const deadline = Date.now() + JM_COMIC_BROWSER_TIMEOUT
+  let shownForVerification = false
+  while (Date.now() < deadline) {
+    if (win.isDestroyed()) throw new Error('JMCOMIC_BROWSER_UNAVAILABLE')
+    const state = await win.webContents.executeJavaScript(`(() => {
+      const html = document.documentElement?.outerHTML || ''
+      const text = document.body?.innerText || ''
+      const challenge = /Just a moment|Verify you are human|Performing security verification|Checking your browser/i.test(text) || /challenges\\.cloudflare\\.com|challenge-platform/i.test(html)
+      return { html, text, challenge, url: location.href }
+    })()`, true)
+    if (!state.challenge && state.html) {
+      win.hide()
+      return { body: state.html, finalUrl: state.url || url, status: 200 }
+    }
+    if (!shownForVerification && Date.now() + 40000 < deadline) {
+      shownForVerification = true
+      win.show()
+      win.focus()
+    }
+    await wait(500)
+  }
+  if (win && !win.isDestroyed()) win.hide()
+  throw new Error('JMCOMIC_BROWSER_CHALLENGE')
+}
+
+const fetchJmComicBrowserBinary = async ({ imageUrl, referer = null } = {}) => {
+  const headers = {
+    Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9',
+    'User-Agent': JM_COMIC_BROWSER_USER_AGENT,
+    ...(referer ? { Referer: referer } : {})
+  }
+  const response = await session.defaultSession.fetch(imageUrl, {
+    headers,
+    redirect: 'follow'
+  })
+  const buffer = Buffer.from(await response.arrayBuffer())
+  return {
+    buffer,
+    status: response.status,
+    contentType: response.headers.get('content-type') || ''
+  }
+}
+
+setJmComicBrowserFetchers({
+  fetchText: readJmComicBrowserPage,
+  fetchBinary: fetchJmComicBrowserBinary
+})
 
 const rmWithRetry = async (targetPath, options, retryCount = 20) => {
   const retryableErrors = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY'])
@@ -1195,6 +1294,14 @@ ipcMain.handle('audit:nhentai-recovery-search', async (event, { title, filepath 
 
 ipcMain.handle('audit:nhentai-recovery-page-count', async (event, request = {}) => {
   return await getNhentaiGalleryPageCount({ ...request, setting })
+})
+
+ipcMain.handle('audit:jmcomic-recovery-search', async (event, { title, filepath }) => {
+  return await searchJmComic({ title, filepath, setting })
+})
+
+ipcMain.handle('audit:jmcomic-recovery-page-count', async (event, request = {}) => {
+  return await getJmComicInfo({ ...request, setting })
 })
 
 ipcMain.handle('ehentai:get-availability', async (event, request = {}) => {
@@ -1871,6 +1978,7 @@ ipcMain.handle('audit:page-recovery-fetch', async (event, request = {}) => {
     source: request.source,
     sourceUrl: request.sourceUrl,
     nhentaiId: request.nhentaiId,
+    jmcomicId: request.jmcomicId,
     pageNumbers: request.pageNumbers,
     includeBoundaryPages: request.includeBoundaryPages === true
   })
