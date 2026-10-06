@@ -10,6 +10,7 @@ const { inspectEhviewerIdentity } = require('../modules/audit/archive_inspector.
 const {
   buildEhviewerVersion2Buffer,
   getEhviewerRepairSupport,
+  normalizeEhviewerIdentity,
   prepareEhviewerRepair
 } = require('../modules/audit/ehviewer_repair.js')
 
@@ -28,6 +29,15 @@ test('VERSION2 recovery builder rejects invalid identities and produces parser-c
   assert.equal(buffer.toString('utf8'), 'VERSION2\nTitle with line break\n3865827\n75be22627a\n')
   assert.deepEqual(require('../fileLoader/ehviewer.js').readEhviewerBuffer(buffer), { gid: '3865827', token: '75be22627a' })
   assert.throws(() => buildEhviewerVersion2Buffer({ title: 'Title', gid: 'x', token: 'bad' }), /EHVIEWER_RECOVERY_METADATA_INVALID/)
+})
+
+test('empty ehviewer identities are ignored during audit normalization', () => {
+  assert.equal(normalizeEhviewerIdentity(null), null)
+  assert.equal(normalizeEhviewerIdentity(undefined), null)
+  assert.deepEqual(normalizeEhviewerIdentity({ gid: '3865827', token: '75BE22627A' }), {
+    gid: '3865827',
+    token: '75be22627a'
+  })
 })
 
 test('ZIP repair preserves every non-ehviewer entry and retains a verified original backup', async t => {

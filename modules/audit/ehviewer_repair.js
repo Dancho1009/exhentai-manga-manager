@@ -15,7 +15,8 @@ const sanitizeEhviewerTitle = value => String(value || '')
   .replace(/\s+/g, ' ')
   .trim()
 
-const normalizeEhviewerIdentity = ({ gid, token } = {}) => {
+const normalizeEhviewerIdentity = (identity = {}) => {
+  const { gid, token } = identity || {}
   const normalizedGid = String(gid || '').trim()
   const normalizedToken = String(token || '').trim().toLowerCase()
   if (!/^\d+$/.test(normalizedGid) || !/^[0-9a-f]{10}$/.test(normalizedToken)) return null
