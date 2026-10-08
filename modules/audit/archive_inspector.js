@@ -3,6 +3,7 @@ const path = require('path')
 const { spawn } = require('child_process')
 const { createHash } = require('crypto')
 const yauzl = require('yauzl')
+const { openBufferedZip } = require('./buffered_zip_reader.js')
 const { readEhviewerBuffer } = require('../../fileLoader/ehviewer.js')
 const { IMAGE_EXTENSIONS, stableId } = require('./utils.js')
 
@@ -281,8 +282,8 @@ const inspectBookContent = async (book, options = {}) => {
   }
 }
 
-const inspectZipEhviewer = async filepath => {
-  const zipfile = await openZip(filepath)
+const inspectZipEhviewer = async (filepath, options) => {
+  const zipfile = await openBufferedZip(filepath, options)
   const entries = []
   return await new Promise((resolve, reject) => {
     let settled = false
@@ -352,12 +353,12 @@ const inspectFolderEhviewer = async folderpath => {
 const inspectEhviewerIdentity = async (book, options = {}) => {
   const extension = path.extname(book.filepath).toLowerCase()
   if (book.type === 'folder') return await inspectFolderEhviewer(book.filepath)
-  if (extension === '.zip' || extension === '.cbz') return await inspectZipEhviewer(book.filepath)
+  if (extension === '.zip' || extension === '.cbz') return await inspectZipEhviewer(book.filepath, options)
   return await inspect7zEhviewer(book.filepath, options.sevenZipPath)
 }
 
-const inspectZipHealth = async filepath => {
-  const zipfile = await openZip(filepath)
+const inspectZipHealth = async (filepath, options) => {
+  const zipfile = await openBufferedZip(filepath, options)
   const imagePaths = []
   const ehviewerEntries = []
   return await new Promise((resolve, reject) => {
@@ -440,7 +441,7 @@ const inspectFolderHealth = async folderpath => {
 const inspectBookHealth = async (book, options = {}) => {
   const extension = path.extname(book.filepath).toLowerCase()
   if (book.type === 'folder') return await inspectFolderHealth(book.filepath)
-  if (extension === '.zip' || extension === '.cbz') return await inspectZipHealth(book.filepath)
+  if (extension === '.zip' || extension === '.cbz') return await inspectZipHealth(book.filepath, options)
   return await inspect7zHealth(book.filepath, options.sevenZipPath)
 }
 
