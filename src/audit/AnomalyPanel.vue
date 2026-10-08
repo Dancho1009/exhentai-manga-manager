@@ -1362,6 +1362,8 @@ const applyPageRecovery = async () => {
       confirmPageMapping: true
     })
     pageRecoverySession.value = result.session
+    pageRecoverySelectedPages.value = []
+    pageRecoverySelectedCandidates.value = []
     ElMessage[result.resolved ? 'success' : 'warning'](t(result.resolved ? 'audit.pageRecoverySuccess' : 'audit.pageRecoveryPartialSuccess'))
     const recoveryAnomalyId = pageRecoveryAnomaly.value?.id
     if (result.resolved && String(selectedAnomaly.value?.id || '') === String(recoveryAnomalyId || '')) {
