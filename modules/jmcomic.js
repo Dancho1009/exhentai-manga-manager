@@ -529,7 +529,8 @@ const getJmImageSegmentCount = ({ scrambleId, photoId, pageFileName } = {}) => {
   if (aid < scramble) return 0
   if (aid < JM_SCRAMBLE_268850) return 10
   const x = aid < JM_SCRAMBLE_421926 ? 10 : 8
-  const hash = crypto.createHash('md5').update(`${aid}${pageFileName}`).digest('hex')
+  const filename = path.posix.parse(pageFileName).name
+  const hash = crypto.createHash('md5').update(`${aid}${filename}`).digest('hex')
   return (hash.charCodeAt(hash.length - 1) % x) * 2 + 2
 }
 

@@ -131,6 +131,45 @@ test('JMComic image decoder follows the published segmentation rules', async () 
   assert.equal(decoded.contentType, null)
 })
 
+test('JMComic segmentation hashes the filename without its extension', () => {
+  for (const extension of ['', '.webp', '.jpg', '.png']) {
+    assert.equal(getJmImageSegmentCount({ scrambleId: 220980, photoId: 1188850, pageFileName: `00014${extension}` }), 6)
+    assert.equal(getJmImageSegmentCount({ scrambleId: 220980, photoId: 1188850, pageFileName: `00024${extension}` }), 16)
+  }
+  assert.equal(getJmImageSegmentCount({ scrambleId: 220980, photoId: 250000, pageFileName: '00014.webp' }), 10)
+})
+
+test('JMComic decoder restores scrambled bands including uneven image heights', async () => {
+  const width = 32
+  const channels = 3
+  const segmentCount = 6
+  const bandHeight = 24
+  for (const remainder of [0, 5]) {
+    const height = segmentCount * bandHeight + remainder
+    const rowSize = width * channels
+    const original = Buffer.alloc(rowSize * height)
+    for (let row = 0; row < height; row += 1) {
+      original.fill(30 + Math.floor(row * 180 / height), row * rowSize, (row + 1) * rowSize)
+    }
+    const bands = Array.from({ length: segmentCount }, (_, index) => {
+      const start = index === 0 ? 0 : index * bandHeight + remainder
+      const end = (index + 1) * bandHeight + remainder
+      return original.subarray(start * rowSize, end * rowSize)
+    })
+    const scrambled = await sharp(Buffer.concat([...bands].reverse()), { raw: { width, height, channels } }).png().toBuffer()
+    const decoded = await decodeJmImage({
+      buffer: scrambled,
+      scrambleId: 220980,
+      photoId: 1188850,
+      pageFileName: '00014.webp'
+    })
+    const expected = await sharp(original, { raw: { width, height, channels } }).jpeg().toBuffer()
+    assert.equal(decoded.decoded, true)
+    assert.equal(decoded.contentType, 'image/jpeg')
+    assert.deepEqual(decoded.buffer, expected, `Incorrect band order for height ${height}`)
+  }
+})
+
 test('gallery pagination exposes later page-list URLs without downloading images', () => {
   const galleryUrl = 'https://exhentai.org/g/1234567/abcdef1234/'
   const pagination = parseGalleryPagination({
