@@ -140,6 +140,8 @@
               @on-book-context-menu="onBookContextMenu"
               @toggle-book-selection="toggleHomeBookSelection"
               @open-collection="openCollection(book)"
+              @open-local-book="$refs.BookDetailDialogRef.openLocalBook(book)"
+              @view-manga="$refs.InternalViewerRef.viewManga(book)"
               @preview-cover="showBookCoverPreview"
               @close-cover-preview="closeBookCoverPreview"
             />
@@ -217,6 +219,8 @@
             @on-book-context-menu="onBookContextMenu"
             @preview-cover="showBookCoverPreview"
             @close-cover-preview="closeBookCoverPreview"
+            @open-local-book="$refs.BookDetailDialogRef.openLocalBook(book)"
+            @view-manga="$refs.InternalViewerRef.viewManga(book)"
           />
           <BookCard
             v-else

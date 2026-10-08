@@ -1,5 +1,5 @@
 <template>
-  <div class="book-list-row" :class="{ 'book-list-row-selectable': selectable && !book.isCollection, 'book-list-row-selected': selected }">
+  <div class="book-list-row" :class="{ 'book-list-row-with-actions': !book.isCollection, 'book-list-row-selectable': selectable && !book.isCollection, 'book-list-row-selected': selected }">
     <el-checkbox
       v-if="selectable && !book.isCollection"
       class="book-list-select"
@@ -25,17 +25,32 @@
     <div class="book-list-name-area">
       <el-tag v-if="book.isCollection" size="small" type="warning" class="book-list-collection-tag">{{ $t('m.collection') }}</el-tag>
       <button class="book-list-name" type="button" tabindex="-1" :title="getDisplayTitle(book)" @click="handleTitleClick" @contextmenu="handleContextMenu">{{ getDisplayTitle(book) }}</button>
+      <div v-if="!book.isCollection" class="book-list-meta">
+        <el-tag class="book-list-status" size="small" effect="plain" :type="book.status === 'non-tag' ? 'info' : book.status === 'tagged' ? 'success' : 'warning'">{{ book.status }}</el-tag>
+        <el-tag class="book-list-pages" size="small" :type="book.pageDiff ? 'danger' : 'info'" :title="book.pageDiff ? `${book.pageCount}|${book.filecount}P` : `${book.pageCount}P`">
+          <template v-if="book.pageDiff">{{ book.pageCount }}|{{ book.filecount }}P</template>
+          <template v-else>{{ book.pageCount }}P</template>
+        </el-tag>
+      </div>
     </div>
+    <el-button-group v-if="!book.isCollection" class="book-list-read-actions" @keydown.enter.stop @keydown.space.stop>
+      <el-tooltip :content="$t('m.externalViewer')" :trigger-keys="[]" placement="top">
+        <el-button class="book-list-read-external" type="success" size="small" plain :icon="Monitor" :aria-label="$t('m.externalViewer')" @click.stop="handleRead('openLocalBook')"><span class="book-list-read-label">{{ $t('m.externalViewer') }}</span></el-button>
+      </el-tooltip>
+      <el-tooltip :content="$t('m.internalViewer')" :trigger-keys="[]" placement="top">
+        <el-button class="book-list-read-internal" type="success" size="small" plain :icon="Reading" :aria-label="$t('m.internalViewer')" @click.stop="handleRead('viewManga')"><span class="book-list-read-label">{{ $t('m.internalViewer') }}</span></el-button>
+      </el-tooltip>
+    </el-button-group>
   </div>
 </template>
 
 <script setup>
 import { ref, watch } from 'vue'
-import { Picture } from '@element-plus/icons-vue'
+import { Monitor, Picture, Reading } from '@element-plus/icons-vue'
 import { useAppStore } from '../pinia.js'
 
 const props = defineProps({ book: Object, selected: Boolean, selectable: Boolean })
-const emit = defineEmits(['openBookDetail', 'handleClickCover', 'onBookContextMenu', 'toggleBookSelection', 'openCollection', 'previewCover', 'closeCoverPreview'])
+const emit = defineEmits(['openBookDetail', 'handleClickCover', 'onBookContextMenu', 'toggleBookSelection', 'openCollection', 'previewCover', 'closeCoverPreview', 'openLocalBook', 'viewManga'])
 const { getDisplayTitle } = useAppStore()
 const coverFailed = ref(false)
 watch(() => props.book.coverPath, () => { coverFailed.value = false })
@@ -63,6 +78,10 @@ const handleContextMenu = event => {
   emit('closeCoverPreview')
   if (!props.book.isCollection) emit('onBookContextMenu', event, props.book)
 }
+const handleRead = eventName => {
+  emit('closeCoverPreview')
+  emit(eventName)
+}
 </script>
 
 <style scoped lang="stylus">
@@ -81,8 +100,10 @@ const handleContextMenu = event => {
   color: var(--el-text-color-primary)
   &:hover
     background-color: var(--el-fill-color-light)
+.book-list-row-with-actions
+  grid-template-columns: 56px minmax(0, 1fr) auto
 .book-list-row-selectable
-  grid-template-columns: 22px 56px minmax(0, 1fr)
+  grid-template-columns: 22px 56px minmax(0, 1fr) auto
 .book-list-row-selected
   background-color: var(--el-color-primary-light-9)
   box-shadow: inset 3px 0 0 var(--el-color-primary)
@@ -133,6 +154,32 @@ const handleContextMenu = event => {
     color: var(--el-color-primary)
 .book-list-collection-tag
   margin-bottom: 4px
+.book-list-meta
+  display: flex
+  align-items: center
+  gap: 6px
+  margin-top: 4px
+  min-width: 0
+  .book-list-status
+    flex-shrink: 0
+  .book-list-pages
+    min-width: 0
+    :deep(.el-tag__content)
+      overflow: hidden
+      text-overflow: ellipsis
+      white-space: nowrap
+.book-list-read-actions
+  display: inline-flex
+  flex-shrink: 0
+  white-space: nowrap
+@media (max-width: 900px)
+  .book-list-read-actions .el-button
+    width: 28px
+    padding: 0
+  .book-list-read-label
+    display: none
+  .book-list-read-actions :deep(.el-button > span)
+    margin-left: 0
 @media (max-width: 600px)
   .book-list-row
     gap: 10px
