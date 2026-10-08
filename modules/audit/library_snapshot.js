@@ -45,6 +45,8 @@ const walkLibrary = async (library, onProgress, isCancelled) => {
     visitedDirectories += 1
     let hasDirectImage = false
     for (const dirent of dirents) {
+      // Match the normal library scan's glob default (dot: false).
+      if (dirent.name.startsWith('.')) continue
       const filepath = path.join(current, dirent.name)
       if (dirent.isDirectory()) {
         stack.push(filepath)

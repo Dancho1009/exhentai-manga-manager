@@ -22,6 +22,8 @@ const { buildManualSourceAction } = require('../modules/audit/manual_source_acti
 const { classifyAnomalyAction, getBatchSafeActionIds, getWorkflowSummary } = require('../modules/audit/action_policy.js')
 const { listPendingRecoverySummaries } = require('../modules/audit/page_recovery.js')
 const { prepareMangaModel, prepareMetadataModel } = require('../modules/database.js')
+const { getZipFilelist } = require('../fileLoader/zip.js')
+const { getFolderlist } = require('../fileLoader/folder.js')
 
 test('simplified anomaly workflow classifies safe, manual, and report-only actions', () => {
   const safe = {
@@ -252,6 +254,44 @@ test('snapshot stops on an inaccessible library instead of reporting missing fil
   const databases = await createDatabases(root, [])
   await assert.rejects(buildSnapshot({ library: path.join(root, 'missing'), ...databases,
     isCancelled: () => false, onProgress: () => {} }), { code: 'ENOENT' })
+})
+
+test('audit enumeration matches normal scan exclusions for dot files and directories', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-scan-exclusions-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const library = path.join(root, 'Library')
+  const visibleArchives = ['book.ZIP', 'nested/book.cbz', 'nested/book.RAR', 'nested/book.7z', 'nested/book.cb7', 'nested/book.cbr']
+  const excludedArchives = [
+    '.page-recovery-Bunwcuem.rollback.zip', '.page-recovery-12345678.tmp.cbz',
+    '.book.zip.page-recovery-12345678.tmp.zip', '.book.cbz.audit-1234567890.tmp.cbz',
+    '.hidden-book.rar', '.hidden-book.7z', '.hidden-book.cb7', '.hidden-book.cbr',
+    '.hidden/visible.zip', 'nested/.hidden/visible.cbz', '.hidden/deep/visible.7z'
+  ]
+  const names = [...visibleArchives, ...excludedArchives, 'images/001.JPG', 'images/.cover.webp',
+    'nested/pages/001.png', 'hidden-image-only/.cover.jpg', '.hidden/images/001.webp',
+    'nested/.hidden/images/001.webp', 'notes.txt']
+  for (const name of names) {
+    const filepath = path.join(library, name)
+    await fs.promises.mkdir(path.dirname(filepath), { recursive: true })
+    await fs.promises.writeFile(filepath, Buffer.from('fixture'))
+  }
+  const databases = await createDatabases(root, [])
+  const options = { library, ...databases, onProgress: () => {}, isCancelled: () => false }
+  const snapshot = await buildSnapshot(options)
+  const actualNames = snapshot.actualItems.map(item => path.relative(library, item.filepath).replace(/\\/g, '/')).sort()
+  assert.deepEqual(actualNames, [...visibleArchives, 'images', 'nested/pages'].sort())
+  assert.deepEqual(snapshot.actualItems.filter(item => item.type === 'zip').map(item => normalizePath(item.filepath)).sort(),
+    (await getZipFilelist(library)).map(normalizePath).sort())
+  assert.deepEqual(snapshot.actualItems.filter(item => item.type === 'folder').map(item => normalizePath(item.filepath)).sort(),
+    (await getFolderlist(library)).map(normalizePath).sort())
+  const excluded = await buildSnapshot({ ...options, excludeFile: 'nested' })
+  assert.deepEqual(excluded.actualItems.map(item => path.relative(library, item.filepath)).sort(), ['book.ZIP', 'images'])
+  const report = await writeWorkerReport({ workerFilename: 'anomaly_worker.js', root, jobId: 'hidden-exclusion',
+    options: { library, auditStorePath: path.join(root, 'audit'), onlinePolicy: 'none', ...databases } })
+  assert.equal(report.summary.libraryItems, visibleArchives.length + 2)
+  assert.equal(report.anomalies.filter(item => item.type === 'library-file-untracked').length, visibleArchives.length + 2)
+  assert.equal(report.anomalies.some(item => path.relative(library, item.filepath || library).split(/[\\/]/).some(part => part.startsWith('.'))), false)
+  for (const name of excludedArchives) assert.equal(fs.existsSync(path.join(library, name)), true)
 })
 
 test('anomaly worker reports internal image sequence gaps without changing page count', async t => {
