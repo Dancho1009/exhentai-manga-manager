@@ -1979,6 +1979,7 @@ ipcMain.handle('audit:page-recovery-fetch', async (event, request = {}) => {
     sourceUrl: request.sourceUrl,
     nhentaiId: request.nhentaiId,
     jmcomicId: request.jmcomicId,
+    sourceOffset: request.sourceOffset,
     pageNumbers: request.pageNumbers,
     includeBoundaryPages: request.includeBoundaryPages === true
   })

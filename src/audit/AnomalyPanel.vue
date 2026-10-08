@@ -138,7 +138,7 @@
     </template>
     <el-empty v-else :description="$t('audit.noAnomalyReport')" />
 
-    <el-drawer v-model="drawer" :title="auditTypeLabel(selectedAnomaly?.type)" size="46%">
+    <el-drawer v-model="drawer" :title="auditTypeLabel(selectedAnomaly?.type)" size="46%" class="audit-anomaly-drawer">
       <template v-if="selectedAnomaly">
         <div class="anomaly-navigation" aria-live="polite">
           <el-button-group>
@@ -317,6 +317,26 @@
               {{ $t('audit.pages') }}: ...
             </span>
           </div>
+          <div class="page-recovery-offset">
+            <el-tooltip :content="$t('audit.pageRecoverySourceOffsetHint')" placement="top">
+              <label for="page-recovery-offset" class="page-recovery-label">{{ $t('audit.pageRecoverySourceOffset') }}</label>
+            </el-tooltip>
+            <el-input-number
+              id="page-recovery-offset"
+              v-model="pageRecoverySourceOffset"
+              :aria-label="$t('audit.pageRecoverySourceOffset')"
+              :min="-1000"
+              :max="1000"
+              :step="1"
+              :precision="0"
+              :disabled="pageRecoveryLoading || pageRecoveryApplying"
+            />
+            <div class="page-recovery-offset-mapping">
+              <span v-for="pageNumber in pageRecoverySelectedPages.slice(0, 3)" :key="pageNumber">
+                {{ $t('audit.pageRecoveryPageMapping', { localPage: pageNumber, sourcePage: pageNumber + (pageRecoverySourceOffset || 0) }) }}
+              </span>
+            </div>
+          </div>
           <div class="page-recovery-pages">
             <span class="page-recovery-label">{{ $t('audit.pageRecoveryMissingPages') }}</span>
             <el-checkbox-group v-model="pageRecoverySelectedPages" :disabled="pageRecoveryLoading || pageRecoveryApplying">
@@ -335,14 +355,15 @@
             {{ pageRecoveryLoading ? $t('audit.pageRecoveryFetching') : $t('audit.pageRecoveryFetch') }}
           </el-button>
           <div v-if="pageRecoverySession?.candidates?.length" class="page-recovery-candidates">
+            <el-alert v-if="!pageRecoverySessionMatchesSource" type="warning" :closable="false" :title="$t('audit.pageRecoverySourceChanged')" show-icon />
             <div class="page-recovery-candidate-heading">
               <strong>{{ $t('audit.pageRecoveryPreview') }}</strong>
-              <el-checkbox v-model="pageRecoverySelectAllCandidates" :disabled="pageRecoveryApplying">{{ $t('audit.pageRecoverySelectAll') }}</el-checkbox>
+              <el-checkbox v-model="pageRecoverySelectAllCandidates" :disabled="pageRecoveryApplying || pageRecoveryLoading || !pageRecoverySessionMatchesSource">{{ $t('audit.pageRecoverySelectAll') }}</el-checkbox>
             </div>
-            <el-checkbox-group v-model="pageRecoverySelectedCandidates" :disabled="pageRecoveryApplying">
+            <el-checkbox-group v-model="pageRecoverySelectedCandidates" :disabled="pageRecoveryApplying || pageRecoveryLoading || !pageRecoverySessionMatchesSource">
             <div v-for="candidate in pageRecoverySession.candidates" :key="candidate.id" class="page-recovery-candidate">
               <el-checkbox :label="candidate.id" class="page-recovery-candidate-select">
-                <span>{{ candidate.pageNumber }} · {{ candidate.targetPath }}</span>
+                <span>{{ pageRecoveryCandidatePageLabel(candidate) }} · {{ candidate.targetPath }}</span>
               </el-checkbox>
               <div class="page-recovery-comparison">
                 <div class="page-recovery-comparison-heading">
@@ -358,7 +379,7 @@
                   </div>
                   <div class="page-recovery-context is-target">
                     <el-image :src="candidate.previewDataUrl" fit="contain" class="page-recovery-context-image" :preview-src-list="pageRecoveryPreviewList(candidate)" :initial-index="pageRecoveryPreviewIndex(candidate, 'current')" />
-                    <strong>{{ $t('audit.pageRecoveryFetchedPage', { page: candidate.pageNumber }) }}</strong>
+                    <strong>{{ pageRecoveryCandidatePageLabel(candidate) }}</strong>
                     <span>{{ candidate.targetPath }}</span>
                   </div>
                   <div class="page-recovery-context" :class="{ 'is-fetched-neighbor': candidate.localContext?.next?.status === 'fetched' }">
@@ -373,7 +394,7 @@
             </el-checkbox-group>
             <el-alert v-if="pageRecoverySession.status === 'awaiting-confirmation'" type="info" :closable="false" :title="$t('audit.pageRecoveryAwaitingConfirmation')" show-icon />
             <div class="page-recovery-actions">
-              <el-button type="success" :loading="pageRecoveryApplying" :disabled="pageRecoverySession.status !== 'awaiting-confirmation' || !pageRecoverySelectedCandidates.length" @click="applyPageRecovery">{{ pageRecoverySession.writeBackSupported ? $t('audit.pageRecoveryApply') : $t('audit.pageRecoveryApplyManual') }}</el-button>
+              <el-button type="success" :loading="pageRecoveryApplying" :disabled="pageRecoveryLoading || !pageRecoverySessionMatchesSource || pageRecoverySession.status !== 'awaiting-confirmation' || !pageRecoverySelectedCandidates.length" @click="applyPageRecovery">{{ pageRecoverySession.writeBackSupported ? $t('audit.pageRecoveryApply') : $t('audit.pageRecoveryApplyManual') }}</el-button>
               <el-button :disabled="pageRecoveryApplying" @click="cleanupPageRecovery">{{ $t('audit.pageRecoveryCleanup') }}</el-button>
             </div>
           </div>
@@ -532,6 +553,7 @@ const pageRecoverySession = ref(null)
 const pageRecoveryLoading = ref(false)
 const pageRecoveryApplying = ref(false)
 const pageRecoverySource = ref('current')
+const pageRecoverySourceOffset = ref(0)
 const pageRecoveryNhentaiQuery = ref('')
 const pageRecoveryNhentaiCandidates = ref([])
 const pageRecoveryNhentaiSelectedId = ref('')
@@ -729,8 +751,18 @@ const pageRecoverySourceUrls = computed(() => ({
   nhentai: pageRecoveryNhentaiUrl.value,
   jmcomic: pageRecoveryJmComicUrl.value
 }))
+const pageRecoverySessionMatchesSource = computed(() => Boolean(pageRecoverySession.value) &&
+  Number(pageRecoverySession.value.sourceOffset ?? 0) === Number(pageRecoverySourceOffset.value ?? 0) &&
+  pageRecoverySession.value.source?.url === pageRecoverySourceUrls.value[pageRecoverySource.value])
+const pageRecoveryCandidatePageLabel = candidate => t('audit.pageRecoveryPageMapping', {
+  localPage: candidate.pageNumber,
+  sourcePage: candidate.sourcePageNumber ?? candidate.pageNumber + Number(pageRecoverySession.value?.sourceOffset || 0)
+})
 const pageRecoveryErrorMessage = error => {
   const message = String(error?.message || error || '')
+  if (message.includes('PAGE_RECOVERY_SOURCE_OFFSET_INVALID')) return t('audit.pageRecoverySourceOffsetInvalid')
+  const sourcePageError = message.match(/PAGE_RECOVERY_SOURCE_PAGE_(?:INVALID|UNAVAILABLE):(\d+):(-?\d+)$/)
+  if (sourcePageError) return t('audit.pageRecoverySourcePageUnavailable', { localPage: sourcePageError[1], sourcePage: sourcePageError[2] })
   const unavailable = message.match(/^PAGE_RECOVERY_PAGE_UNAVAILABLE:([^:]+):(\d+)$/)
   if (unavailable) {
     return t('audit.pageRecoveryPageUnavailable', {
@@ -924,7 +956,7 @@ const fetchPageRecoveryBatchItem = async group => {
     reportId: props.report?.reportId,
     anomalyId: anomaly.id
   })
-  const cachedPages = new Set(cached?.candidatePages || [])
+  const cachedPages = new Set(cached?.candidates?.filter(item => item.status === 'downloaded').map(item => item.pageNumber) || cached?.candidatePages || [])
   const boundaryPages = [
     ...(cached?.leadingPages || []),
     ...(cached?.trailingPages || [])
@@ -1200,6 +1232,7 @@ const openAnomaly = async (row, siblings = null) => {
   selectedAnomaly.value = { ...row, siblings: siblings?.length ? siblings : getGroupAnomalies(row) }
   bookPreview.value = null
   pageRecoverySession.value = null
+  pageRecoverySourceOffset.value = 0
   pageRecoverySelectedCandidates.value = []
   pageRecoveryNhentaiQuery.value = ''
   pageRecoveryNhentaiCandidates.value = []
@@ -1269,6 +1302,7 @@ const openAnomaly = async (row, siblings = null) => {
       }
     } else if (cachedSource && cachedSource === pageRecoverySourceUrls.value.ehviewer) pageRecoverySource.value = 'ehviewer'
     else if (cachedSource && cachedSource === pageRecoverySourceUrls.value.current) pageRecoverySource.value = 'current'
+    pageRecoverySourceOffset.value = Number(cachedSession.sourceOffset ?? 0)
   } catch (error) {
     console.debug('Restore page recovery session failed', error)
   }
@@ -1292,6 +1326,7 @@ const fetchPageRecovery = async () => {
       nhentaiId: pageRecoverySource.value === 'nhentai' ? pageRecoveryNhentaiSelectedId.value : null,
       sourceUrl: pageRecoverySource.value === 'jmcomic' ? pageRecoverySourceUrls.value.jmcomic : (pageRecoverySource.value === 'nhentai' ? pageRecoverySourceUrls.value.nhentai : null),
       jmcomicId: pageRecoverySource.value === 'jmcomic' ? pageRecoveryJmComicSelectedId.value : null,
+      sourceOffset: pageRecoverySourceOffset.value ?? 0,
       pageNumbers: [...pageRecoverySelectedPages.value]
     })
     pageRecoverySession.value = session
@@ -1308,7 +1343,7 @@ const pageRecoverySelectAllCandidates = computed({
   set: value => { pageRecoverySelectedCandidates.value = value ? (pageRecoverySession.value?.candidates || []).map(item => item.id) : [] }
 })
 const applyPageRecovery = async () => {
-  if (!pageRecoverySession.value || !pageRecoverySelectedCandidates.value.length || pageRecoveryApplying.value) return
+  if (!pageRecoverySessionMatchesSource.value || !pageRecoverySelectedCandidates.value.length || pageRecoveryApplying.value || pageRecoveryLoading.value) return
   try {
     const confirmMessage = pageRecoverySession.value.writeBackSupported
       ? t('audit.pageRecoveryConfirm')
@@ -1408,6 +1443,11 @@ const openBookDetail = async () => {
   }
 }
 
+watch(() => pageRecoverySourceUrls.value[pageRecoverySource.value], () => {
+  pageRecoverySourceOffset.value = 0
+  pageRecoverySelectedCandidates.value = []
+}, { flush: 'sync' })
+watch(pageRecoverySourceOffset, () => { pageRecoverySelectedCandidates.value = [] }, { flush: 'sync' })
 watch(searchInput, value => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { search.value = normalizeSearchText(value); page.value = 1 }, 140) })
 watch([severityFilter, typeFilter, policyFilter], () => { page.value = 1 })
 watch([() => filteredBookGroups.value.length, pageSize], ([total, size]) => { page.value = Math.min(page.value, Math.max(1, Math.ceil(total / size))) })
@@ -1437,6 +1477,23 @@ watch([page, pageSize, filteredBookGroups], () => { void syncPageRecoveryTableSe
 .anomaly-cover { box-sizing: border-box; display: block; width: 150px; aspect-ratio: 500 / 707; overflow: hidden; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); border-radius: 4px; }.anomaly-cover-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--el-text-color-secondary); font-size: 12px; text-align: center; }.anomaly-cover-placeholder .el-icon { font-size: 28px; }.anomaly-book-preview p { display: -webkit-box; margin: 8px 0 0; overflow: hidden; color: var(--el-text-color-regular); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .ehviewer-recovery-preview { margin-top: 20px; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.ehviewer-recovery-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.ehviewer-recovery-heading strong, .ehviewer-recovery-heading span { display: block; }.ehviewer-recovery-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.ehviewer-recovery-meta { display: grid; grid-template-columns: minmax(0, 1fr) 120px; margin: 0 0 12px; border: 1px solid var(--el-border-color); }.ehviewer-recovery-meta > div { min-width: 0; padding: 10px 12px; }.ehviewer-recovery-meta > div + div { border-left: 1px solid var(--el-border-color); }.ehviewer-recovery-meta dt { color: var(--el-text-color-secondary); font-size: 12px; }.ehviewer-recovery-meta dd { min-width: 0; margin: 5px 0 0; overflow-wrap: anywhere; }.ehviewer-recovery-meta .el-link { max-width: 100%; vertical-align: top; }.ehviewer-recovery-content { min-height: 92px; margin: 0; padding: 14px; overflow: auto; color: var(--el-text-color-primary); font-family: Consolas, 'Courier New', monospace; line-height: 1.55; white-space: pre-wrap; word-break: break-all; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); }
 .ehviewer-recovery-alert { margin-top: 12px; }
+.page-recovery-offset { display: grid; grid-template-columns: 72px 150px minmax(0, 1fr); align-items: start; gap: 12px; margin: 14px 0; }
+.page-recovery-offset .el-input-number { width: 150px; }
+.page-recovery-offset-mapping { min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; padding-top: 6px; color: var(--el-text-color-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.page-recovery-candidate-select { height: auto; min-height: 32px; max-width: 100%; align-items: flex-start; }
+.page-recovery-candidate-select :deep(.el-checkbox__label) { min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+.page-recovery-candidate-select :deep(.el-checkbox__input) { flex: 0 0 auto; margin-top: 3px; }
+.page-recovery-comparison { font-size: 12px; line-height: 1.5; }
+@media (max-width: 900px) {
+  :global(.audit-anomaly-drawer) { width: min(94vw, 620px) !important; }
+  .page-recovery-offset { grid-template-columns: 72px minmax(0, 1fr); }
+  .page-recovery-offset .el-input-number { max-width: 100%; }
+  .page-recovery-offset-mapping { grid-column: 2; }
+}
+@media (max-width: 540px) {
+  .page-recovery-offset { grid-template-columns: minmax(0, 1fr); }
+  .page-recovery-offset-mapping { grid-column: 1; }
+}
  .page-recovery-panel { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.page-recovery-heading, .page-recovery-candidate-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }.page-recovery-heading strong, .page-recovery-heading span { display: block; }.page-recovery-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.page-recovery-heading-meta { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }.page-recovery-page-count { margin-top: 0 !important; color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }.page-recovery-controls, .page-recovery-pages { display: flex; align-items: flex-start; gap: 12px; margin: 14px 0; }.page-recovery-label { flex: 0 0 72px; padding-top: 6px; color: var(--el-text-color-secondary); font-size: 12px; }.page-recovery-pages .el-checkbox-group { display: flex; flex-wrap: wrap; gap: 4px 12px; }.page-recovery-inferred { margin-left: 4px; color: var(--el-color-warning); font-size: 11px; }.page-recovery-nhentai-source { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -4px 0 14px 84px; }.page-recovery-nhentai-source .el-link { max-width: 100%; overflow-wrap: anywhere; }.page-recovery-source-page-count { color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }.page-recovery-candidates { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--el-border-color); }.page-recovery-candidate-heading { align-items: center; margin-bottom: 10px; }.page-recovery-candidate { padding: 10px 0 14px; border-bottom: 1px solid var(--el-border-color-lighter); }.page-recovery-candidate-select { display: flex; margin-bottom: 10px; }.page-recovery-candidate-select .el-checkbox__label { min-width: 0; overflow-wrap: anywhere; }.page-recovery-comparison { min-width: 0; }.page-recovery-comparison-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }.page-recovery-comparison-heading span { color: var(--el-text-color-secondary); font-size: 12px; }.page-recovery-comparison-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }.page-recovery-context { min-width: 0; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-lighter); }.page-recovery-context.is-target { border-color: var(--el-color-success); box-shadow: inset 0 0 0 1px var(--el-color-success-light-5); }.page-recovery-context-image, .page-recovery-context-placeholder { display: block; width: 100%; aspect-ratio: 240 / 340; min-height: 120px; border: 1px solid var(--el-border-color); background: var(--el-fill-color-light); }.page-recovery-context-placeholder { box-sizing: border-box; display: flex; align-items: center; justify-content: center; padding: 12px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; text-align: center; }.page-recovery-context strong, .page-recovery-context span { display: block; min-width: 0; overflow-wrap: anywhere; }.page-recovery-context strong { margin-top: 8px; font-size: 12px; }.page-recovery-context span { margin-top: 4px; color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.4; }.page-recovery-actions { display: flex; gap: 8px; margin-top: 14px; }
  .manual-source-selection { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.manual-source-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.manual-source-heading strong, .manual-source-heading span { display: block; }.manual-source-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.auto-next-selection { display: flex; margin-top: 12px; }.manual-source-alert { margin-top: 12px; }
  .page-recovery-context.is-fetched-neighbor { border-color: var(--el-color-primary); box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5); }
