@@ -422,6 +422,8 @@
     "manualSourceSelectionDescription": "After comparing the title, cover, tags, and page count, choose a source. The choice creates an approval item and is revalidated before URL and metadata are updated.",
     "useCurrentSource": "Use current URL source",
     "useEhviewerSource": "Use .ehviewer source",
+    "unsupportedMetadataSource": "Unsupported source",
+    "nonEhentaiSource": "Non-EH/EX source",
     "manualSourceSelected": "Source selected and added to approvals",
     "autoOpenNextAfterSourceSelection": "Open the next item after choosing a source",
     "previewOnly": "Preview only",

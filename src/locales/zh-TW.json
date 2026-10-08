@@ -422,6 +422,8 @@
     "manualSourceSelectionDescription": "人工比較標題、封面、標籤與頁數後，選擇一個來源。選擇後會產生審批項，執行時重新驗證並更新 URL 與元數據。",
     "useCurrentSource": "使用目前 URL 來源",
     "useEhviewerSource": "使用 .ehviewer 來源",
+    "unsupportedMetadataSource": "未支援的來源",
+    "nonEhentaiSource": "非 EH/EX 來源",
     "manualSourceSelected": "來源已選擇並加入審批",
     "autoOpenNextAfterSourceSelection": "選擇來源後自動開啟下一筆",
     "previewOnly": "僅預覽",

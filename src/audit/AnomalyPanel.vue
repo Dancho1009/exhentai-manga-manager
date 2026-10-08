@@ -173,12 +173,14 @@
               <el-descriptions-item :label="$t('audit.filepath')">{{ selectedAnomaly.filepath || '-' }}</el-descriptions-item>
               <el-descriptions-item :label="$t('audit.recommendation')">{{ recommendationLabel(selectedAnomaly.recommendedAction) }}</el-descriptions-item>
               <el-descriptions-item v-if="currentEvidenceUrl" :label="$t('audit.currentUrl')">
-                <el-link type="primary" :underline="false" @click="openExternalUrl(currentEvidenceUrl)"><span>{{ currentEvidenceUrl }}</span><el-icon><TopRight /></el-icon></el-link>
+                <el-tag class="metadata-source-tag" size="small" effect="plain">{{ currentMetadataSource.label }}</el-tag>
+                <el-link class="anomaly-source-link" type="primary" :underline="false" @click="openExternalUrl(currentEvidenceUrl)"><span>{{ currentEvidenceUrl }}</span><el-icon><TopRight /></el-icon></el-link>
               </el-descriptions-item>
               <el-descriptions-item v-if="ehviewerEvidenceUrl && ehviewerEvidenceUrl !== currentEvidenceUrl" :label="$t('audit.ehviewerUrl')">
-                <el-link type="primary" :underline="false" @click="openExternalUrl(ehviewerEvidenceUrl)"><span>{{ ehviewerEvidenceUrl }}</span><el-icon><TopRight /></el-icon></el-link>
+                <el-link class="anomaly-source-link" type="primary" :underline="false" @click="openExternalUrl(ehviewerEvidenceUrl)"><span>{{ ehviewerEvidenceUrl }}</span><el-icon><TopRight /></el-icon></el-link>
               </el-descriptions-item>
               <el-descriptions-item v-if="currentAvailability" :label="$t('audit.currentAvailability')"><availability-list :value="currentAvailability" /></el-descriptions-item>
+              <el-descriptions-item v-else-if="currentEvidenceUrl && currentMetadataSource.provider !== 'ehentai'" :label="$t('audit.currentAvailability')">{{ $t('audit.nonEhentaiSource') }}</el-descriptions-item>
               <el-descriptions-item v-if="ehviewerAvailability && ehviewerEvidenceUrl !== currentEvidenceUrl" :label="$t('audit.ehviewerAvailability')"><availability-list :value="ehviewerAvailability" /></el-descriptions-item>
               <el-descriptions-item v-if="pageSourceEvidence" :label="$t('audit.sourcePageCounts')">
                 <div class="page-count-evidence">
@@ -189,7 +191,7 @@
                     <span>{{ $t('audit.localPages') }}</span><strong>{{ selectedAnomaly.evidence?.localPages ?? '-' }}</strong><span>-</span>
                   </div>
                   <div class="page-count-row">
-                    <span>{{ $t('audit.currentUrl') }}</span><strong>{{ formatPageCount(pageSourceEvidence.currentUrl) }}</strong><el-tag size="small" effect="plain">{{ formatPageStatus(pageSourceEvidence.currentUrl) }}</el-tag>
+                    <span>{{ $t('audit.currentUrl') }}</span><strong>{{ formatPageCount(pageSourceEvidence.currentUrl) }}</strong><el-tag size="small" effect="plain">{{ currentMetadataSource.provider === 'ehentai' ? formatPageStatus(pageSourceEvidence.currentUrl) : $t('audit.nonEhentaiSource') }}</el-tag>
                   </div>
                   <div class="page-count-row">
                     <span>{{ $t('audit.ehviewerUrl') }}</span><strong>{{ formatPageCount(pageSourceEvidence.ehviewerUrl) }}</strong><el-tag size="small" effect="plain">{{ formatPageStatus(pageSourceEvidence.ehviewerUrl) }}</el-tag>
@@ -217,13 +219,13 @@
             </el-tag>
           </div>
           <el-radio-group :model-value="manualSourceForSelected" :disabled="reviewLocked || manualActionLoading" @change="selectManualSource">
-            <el-radio-button v-if="manualCandidateUrls.current" value="current">{{ $t('audit.useCurrentSource') }}</el-radio-button>
-            <el-radio-button v-if="manualCandidateUrls.ehviewer" value="ehviewer">{{ $t('audit.useEhviewerSource') }}</el-radio-button>
+            <el-radio-button v-if="manualCandidateUrls.current" value="current" :disabled="!manualCurrentSource.supported">{{ $t('audit.useCurrentSource') }} ({{ manualCurrentSource.label }})</el-radio-button>
+            <el-radio-button v-if="manualCandidateUrls.ehviewer" value="ehviewer" :disabled="!getMetadataSourceInfo(manualCandidateUrls.ehviewer).supported">{{ $t('audit.useEhviewerSource') }}</el-radio-button>
           </el-radio-group>
           <el-checkbox v-model="autoOpenNextAfterSelection" class="auto-next-selection" :disabled="reviewLocked || manualActionLoading">
             {{ $t('audit.autoOpenNextAfterSourceSelection') }}
           </el-checkbox>
-          <el-alert v-if="selectedAnomaly.action" class="manual-source-alert" type="success" :closable="false" :title="$t('audit.manualSourceSelected')" show-icon />
+          <el-alert v-if="selectedAnomaly.action?.repairKind === 'manual-source-selection'" class="manual-source-alert" type="success" :closable="false" :title="$t('audit.manualSourceSelected')" show-icon />
         </section>
         <section v-if="selectedAnomaly.type === 'ehviewer-invalid'" class="ehviewer-recovery-preview" aria-labelledby="ehviewer-recovery-title">
           <div class="ehviewer-recovery-heading">
@@ -695,13 +697,29 @@ const restorePageRecoveryCacheStatuses = async reportId => {
 }
 const filterScopeLabel = computed(() => typeFilter.value ? auditTypeLabel(typeFilter.value) : policyFilter.value ? policyLabel(policyFilter.value) : search.value || severityFilter.value ? t('audit.currentFilter') : t('audit.allAnomalies'))
 const filteredBookIds = computed(() => [...new Set(filteredAnomalies.value.map(item => item.bookId).filter(Boolean).map(String))])
+const getMetadataSourceInfo = value => {
+  try {
+    const url = new URL(String(value || '').trim())
+    if (['http:', 'https:'].includes(url.protocol)) {
+      const hostname = url.hostname.toLowerCase()
+      if (['nhentai.net', 'www.nhentai.net'].includes(hostname)) {
+        return { provider: 'nhentai', label: 'nHentai', supported: /^\/g\/[1-9]\d*\/?$/.test(url.pathname) }
+      }
+      if (['e-hentai.org', 'exhentai.org', 'ehentai.org'].includes(hostname)) {
+        return { provider: 'ehentai', label: hostname === 'exhentai.org' ? 'ExHentai' : 'E-Hentai', supported: /^\/g\/[1-9]\d*\/[0-9a-z]+\/?$/i.test(url.pathname) }
+      }
+    }
+  } catch {}
+  return { provider: null, label: t('audit.unsupportedMetadataSource'), supported: false }
+}
 const currentEvidenceUrl = computed(() => selectedAnomaly.value?.evidence?.currentUrl || selectedAnomaly.value?.evidence?.url || '')
+const currentMetadataSource = computed(() => getMetadataSourceInfo(currentEvidenceUrl.value))
 const ehviewerEvidenceUrl = computed(() => {
   if (selectedAnomaly.value?.evidence?.ehviewerUrl) return String(selectedAnomaly.value.evidence.ehviewerUrl)
   const value = selectedAnomaly.value?.evidence?.ehviewer
   return value?.gid && value?.token ? `https://exhentai.org/g/${value.gid}/${value.token}/` : ''
 })
-const currentAvailability = computed(() => selectedAnomaly.value?.evidence?.currentAvailability || null)
+const currentAvailability = computed(() => currentMetadataSource.value.provider === 'ehentai' ? selectedAnomaly.value?.evidence?.currentAvailability || null : null)
 const ehviewerAvailability = computed(() => selectedAnomaly.value?.evidence?.ehviewerAvailability || null)
 const pageSourceEvidence = computed(() => selectedAnomaly.value?.evidence?.pageSources || null)
 const pageRecoveryAnomaly = computed(() => selectedAnomaly.value?.type === 'archive-image-sequence-gap'
@@ -842,7 +860,8 @@ const manualCandidateUrls = computed(() => ({
   current: String(selectedAnomaly.value?.evidence?.currentUrl || selectedAnomaly.value?.evidence?.url || '').trim() || null,
   ehviewer: ehviewerEvidenceUrl.value || null
 }))
-const manualSourceSelectionSupported = computed(() => ['unverified-page-mismatch', 'ehviewer-url-conflict-online', 'filename-url-id-conflict'].includes(selectedAnomaly.value?.type) &&
+const manualCurrentSource = computed(() => getMetadataSourceInfo(manualCandidateUrls.value.current))
+const manualSourceSelectionSupported = computed(() => ['unverified-page-mismatch', 'ehviewer-url-conflict-online', 'filename-url-id-conflict', 'metadata-incomplete'].includes(selectedAnomaly.value?.type) &&
   Boolean(manualCandidateUrls.value.current || manualCandidateUrls.value.ehviewer))
 const manualSourceForSelected = computed(() => selectedAnomaly.value?.action?.source || '')
 const anomalyNavigation = computed(() => getAnomalyNavigation(filteredAnomalies.value, selectedAnomaly.value?.id))
@@ -1475,6 +1494,13 @@ watch([page, pageSize, filteredBookGroups], () => { void syncPageRecoveryTableSe
 .review-action-bar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 58px; margin-top: 8px; padding: 8px 12px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-lighter); }.review-action-summary { min-width: 0; }.review-action-summary strong, .review-action-summary span { display: block; }.review-action-summary span { margin-top: 3px; color: var(--el-text-color-secondary); font-size: 12px; }.review-action-buttons { display: flex; flex: 0 0 auto; gap: 8px; }
 .anomaly-checkbox { display: inline-flex; align-items: center; justify-content: center; }
 .anomaly-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }.anomaly-detail-grid.has-book-preview { grid-template-columns: 150px minmax(0, 1fr); }
+.anomaly-description :deep(.el-descriptions__table) { table-layout: fixed; }
+.anomaly-description :deep(.el-descriptions__label) { width: 96px; }
+.anomaly-description :deep(.el-descriptions__content) { overflow-wrap: anywhere; }
+.anomaly-source-link { max-width: 100%; vertical-align: top; }
+.anomaly-source-link :deep(.el-link__inner) { min-width: 0; max-width: 100%; }
+.anomaly-source-link span { min-width: 0; overflow-wrap: anywhere; }
+.anomaly-source-link .el-icon { flex: 0 0 auto; }
 .anomaly-description, .anomaly-book-preview { min-width: 0; }.anomaly-cover-button { display: block; width: 150px; padding: 0; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }.anomaly-cover-button:disabled { cursor: wait; }.anomaly-cover-button:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }.anomaly-cover-button:not(:disabled):hover .anomaly-cover { border-color: var(--el-color-primary); box-shadow: 0 0 0 1px var(--el-color-primary-light-5); }
 .anomaly-cover { box-sizing: border-box; display: block; width: 150px; aspect-ratio: 500 / 707; overflow: hidden; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); border-radius: 4px; }.anomaly-cover-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--el-text-color-secondary); font-size: 12px; text-align: center; }.anomaly-cover-placeholder .el-icon { font-size: 28px; }.anomaly-book-preview p { display: -webkit-box; margin: 8px 0 0; overflow: hidden; color: var(--el-text-color-regular); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .ehviewer-recovery-preview { margin-top: 20px; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.ehviewer-recovery-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.ehviewer-recovery-heading strong, .ehviewer-recovery-heading span { display: block; }.ehviewer-recovery-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.ehviewer-recovery-meta { display: grid; grid-template-columns: minmax(0, 1fr) 120px; margin: 0 0 12px; border: 1px solid var(--el-border-color); }.ehviewer-recovery-meta > div { min-width: 0; padding: 10px 12px; }.ehviewer-recovery-meta > div + div { border-left: 1px solid var(--el-border-color); }.ehviewer-recovery-meta dt { color: var(--el-text-color-secondary); font-size: 12px; }.ehviewer-recovery-meta dd { min-width: 0; margin: 5px 0 0; overflow-wrap: anywhere; }.ehviewer-recovery-meta .el-link { max-width: 100%; vertical-align: top; }.ehviewer-recovery-content { min-height: 92px; margin: 0; padding: 14px; overflow: auto; color: var(--el-text-color-primary); font-family: Consolas, 'Courier New', monospace; line-height: 1.55; white-space: pre-wrap; word-break: break-all; background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); }
@@ -1497,7 +1523,7 @@ watch([page, pageSize, filteredBookGroups], () => { void syncPageRecoveryTableSe
   .page-recovery-offset-mapping { grid-column: 1; }
 }
  .page-recovery-panel { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.page-recovery-heading, .page-recovery-candidate-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }.page-recovery-heading strong, .page-recovery-heading span { display: block; }.page-recovery-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.page-recovery-heading-meta { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }.page-recovery-page-count { margin-top: 0 !important; color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }.page-recovery-controls, .page-recovery-pages { display: flex; align-items: flex-start; gap: 12px; margin: 14px 0; }.page-recovery-label { flex: 0 0 72px; padding-top: 6px; color: var(--el-text-color-secondary); font-size: 12px; }.page-recovery-pages .el-checkbox-group { display: flex; flex-wrap: wrap; gap: 4px 12px; }.page-recovery-inferred { margin-left: 4px; color: var(--el-color-warning); font-size: 11px; }.page-recovery-nhentai-source { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -4px 0 14px 84px; }.page-recovery-nhentai-source .el-link { max-width: 100%; overflow-wrap: anywhere; }.page-recovery-source-page-count { color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }.page-recovery-candidates { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--el-border-color); }.page-recovery-candidate-heading { align-items: center; margin-bottom: 10px; }.page-recovery-candidate { padding: 10px 0 14px; border-bottom: 1px solid var(--el-border-color-lighter); }.page-recovery-candidate-select { display: flex; margin-bottom: 10px; }.page-recovery-candidate-select .el-checkbox__label { min-width: 0; overflow-wrap: anywhere; }.page-recovery-comparison { min-width: 0; }.page-recovery-comparison-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }.page-recovery-comparison-heading span { color: var(--el-text-color-secondary); font-size: 12px; }.page-recovery-comparison-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }.page-recovery-context { min-width: 0; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-fill-color-lighter); }.page-recovery-context.is-target { border-color: var(--el-color-success); box-shadow: inset 0 0 0 1px var(--el-color-success-light-5); }.page-recovery-context-image, .page-recovery-context-placeholder { display: block; width: 100%; aspect-ratio: 240 / 340; min-height: 120px; border: 1px solid var(--el-border-color); background: var(--el-fill-color-light); }.page-recovery-context-placeholder { box-sizing: border-box; display: flex; align-items: center; justify-content: center; padding: 12px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; text-align: center; }.page-recovery-context strong, .page-recovery-context span { display: block; min-width: 0; overflow-wrap: anywhere; }.page-recovery-context strong { margin-top: 8px; font-size: 12px; }.page-recovery-context span { margin-top: 4px; color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.4; }.page-recovery-actions { display: flex; gap: 8px; margin-top: 14px; }
- .manual-source-selection { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.manual-source-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.manual-source-heading strong, .manual-source-heading span { display: block; }.manual-source-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.auto-next-selection { display: flex; margin-top: 12px; }.manual-source-alert { margin-top: 12px; }
+ .metadata-source-tag { margin-right: 8px; }.manual-source-selection { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.manual-source-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.manual-source-heading strong, .manual-source-heading span { display: block; }.manual-source-heading span { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }.auto-next-selection { display: flex; margin-top: 12px; }.manual-source-alert { margin-top: 12px; }
  .page-recovery-context.is-fetched-neighbor { border-color: var(--el-color-primary); box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5); }
 .book-anomaly-summary { margin: 20px 0 0; padding: 16px 0; border-top: 1px solid var(--el-border-color); border-bottom: 1px solid var(--el-border-color); }.book-anomaly-summary > strong { display: block; margin-bottom: 10px; }.book-anomaly-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; color: var(--el-text-color-regular); font-size: 12px; line-height: 1.5; }.book-anomaly-item + .book-anomaly-item { border-top: 1px solid var(--el-border-color-lighter); }.book-anomaly-item span { min-width: 0; overflow-wrap: anywhere; }
 .anomaly-navigation { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -4px 0 16px; }.anomaly-navigation-count { color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }.page-count-evidence { display: grid; gap: 4px; width: 100%; font-size: 12px; }.page-count-row { display: grid; grid-template-columns: minmax(0, 1fr) 72px minmax(88px, auto); align-items: center; gap: 10px; min-height: 28px; }.page-count-row > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.page-count-row strong { color: var(--el-text-color-primary); }.page-count-header { color: var(--el-text-color-secondary); border-bottom: 1px solid var(--el-border-color); }.page-count-header span:nth-child(2), .page-count-row strong { text-align: right; }
