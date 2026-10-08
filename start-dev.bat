@@ -59,6 +59,17 @@ if "%NEED_INSTALL%"=="1" (
   )
 )
 
+call :check_sqlite >nul 2>&1
+if not errorlevel 1 goto dependencies_ready
+
+echo SQLite native dependency is missing or cannot be loaded. Running npm rebuild sqlite3...
+call npm rebuild sqlite3
+if errorlevel 1 goto sqlite_failed
+
+call :check_sqlite
+if errorlevel 1 goto sqlite_failed
+
+:dependencies_ready
 echo [4/5] Starting Vite dev server...
 if exist .vite-dev.pid del .vite-dev.pid >nul 2>nul
 if exist .vite-dev.log del .vite-dev.log >nul 2>nul
@@ -125,3 +136,16 @@ if not "%APP_EXIT%"=="0" (
 )
 
 echo Done.
+exit /b 0
+
+:check_sqlite
+set ELECTRON_RUN_AS_NODE=1
+call node_modules\.bin\electron.cmd -e "require('sqlite3')"
+set SQLITE_CHECK_EXIT=%ERRORLEVEL%
+set ELECTRON_RUN_AS_NODE=
+exit /b %SQLITE_CHECK_EXIT%
+
+:sqlite_failed
+echo SQLite native dependency repair failed. Electron was not started.
+pause
+exit /b 1
