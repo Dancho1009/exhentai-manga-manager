@@ -7,7 +7,9 @@ const {
   restoreMetadataRows,
   createExecutionContext
 } = require('./execution_common.js')
-const { sanitizeEhviewerTitle, prepareEhviewerRepair } = require('./ehviewer_repair.js')
+const { sanitizeEhviewerTitle, prepareEhviewerRepair, getBookFileSnapshot } = require('./ehviewer_repair.js')
+const { inspectEhviewerIdentity } = require('./archive_inspector.js')
+const { buildSourceConfirmation, saveSourceConfirmations } = require('./source_confirmation.js')
 const { invalidateAuditCacheEntries } = require('./cache.js')
 const { mergeEffectiveBook } = require('../book_detail.js')
 const { getAnomalyAction } = require('./review_validator.js')
@@ -157,6 +159,7 @@ const executeApprovedAnomalies = async ({
   collectionList,
   rendererState,
   verifyRepairAction,
+  sevenZipPath,
   setProgress = async () => {},
   appendLog = async () => {},
   isCancelled = () => false
@@ -174,6 +177,7 @@ const executeApprovedAnomalies = async ({
   const preparedFileRepairs = []
   const skippedItems = []
   const affectedHashes = new Set()
+  const sourceSnapshots = new Map()
   let databaseCommitted = false
   let metadataCommitted = false
 
@@ -226,8 +230,20 @@ const executeApprovedAnomalies = async ({
           if (!prepared?.valid) {
             throw createRepairValidationError({ anomaly, action, prepared, index: completed + 1, total: approvedAnomalies.length })
           }
+          let sourceConfirmation = null
+          if (action.repairKind === 'manual-source-selection') {
+            await ensureExpectedFile({ filepath: action.filepath, size: action.expectedSize, mtimeMs: action.expectedMtimeMs, bookType: action.bookType || book.type })
+            if (!sourceSnapshots.has(book.id)) {
+              const ehviewer = await inspectEhviewerIdentity(book, { sevenZipPath })
+              const stat = await getBookFileSnapshot(book)
+              sourceSnapshots.set(book.id, { ehviewer, stat: { size: stat.bundleSize, mtimeMs: stat.mtimeMs } })
+            }
+            sourceConfirmation = buildSourceConfirmation({
+              book: { ...book, url: prepared.newUrl || action.newUrl }, ...sourceSnapshots.get(book.id), executionId
+            })
+          }
           if (book.hash) affectedHashes.add(book.hash)
-          preparedRepairs.push({ anomaly, action, book, prepared })
+          preparedRepairs.push({ anomaly, action, book, prepared, sourceConfirmation })
         }
       } catch (error) {
         if (error?.message === 'AUDIT_CANCELLED') throw error
@@ -326,6 +342,8 @@ const executeApprovedAnomalies = async ({
           type: repair.action.type,
           anomalyId: repair.anomaly.id,
           bookId: repair.action.bookId ? String(repair.action.bookId) : null,
+          repairKind: repair.action.repairKind || null,
+          ...(repair.sourceConfirmation ? { sourceConfirmation: repair.sourceConfirmation } : {}),
           ...(repair.action.type === 'delete-orphan-metadata'
             ? { metadataHash: repair.action.metadataHash }
             : repair.action.type === 'repair-ehviewer'
@@ -376,6 +394,9 @@ const executeApprovedAnomalies = async ({
         await writeActionLog({ status: 'cleanup-pending', target: fileRepair.targetPath, error: error.stack || error.message }).catch(() => {})
       })
     }
+    await saveSourceConfirmations(auditStorePath, preparedRepairs.map(item => item.sourceConfirmation).filter(Boolean)).catch(async error => {
+      await appendLog(`元数据已更新，但人工来源确认记录保存失败：${error.message}；下次检查将从成功执行日志恢复`, 'warning')
+    })
     await invalidateAuditCacheEntries(
       auditStorePath,
       preparedRepairs.filter(item => ['repair-ehviewer', 'repair-local-scan'].includes(item.action.type)).map(item => item.action.filepath)

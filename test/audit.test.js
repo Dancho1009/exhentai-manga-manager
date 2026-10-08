@@ -10,7 +10,9 @@ const { open } = require('sqlite')
 const { LibraryTaskCoordinator } = require('../modules/audit/task_coordinator.js')
 const { AuditWorkspaceManager } = require('../modules/audit/job_manager.js')
 const { AuditReportRepository } = require('../modules/audit/report_repository.js')
-const { AuditCache } = require('../modules/audit/cache.js')
+const { AuditCache, clearAuditCacheDatabase } = require('../modules/audit/cache.js')
+const { loadSourceConfirmations, confirmationKey, matchesSourceConfirmation } = require('../modules/audit/source_confirmation.js')
+const { describeAvailabilityFailure } = require('../modules/audit/repair_availability.js')
 const { buildSnapshot } = require('../modules/audit/library_snapshot.js')
 const { EhentaiAvailabilityCache } = require('../modules/ehentai_availability_cache.js')
 const { atomicWriteJson, normalizePath, metadataFingerprint } = require('../modules/audit/utils.js')
@@ -18,7 +20,7 @@ const { analyzeEntityAnomalies } = require('../modules/audit/anomaly_analyzer.js
 const { analyzeImageSequence, inspectBookContent, inspectEhviewerIdentity, inspectBookHealth } = require('../modules/audit/archive_inspector.js')
 const { executeApprovedActions } = require('../modules/audit/action_executor.js')
 const { normalizeAnomalyReview, normalizeDedupeReview, buildExecutionPreview, getAnomalyAction } = require('../modules/audit/review_validator.js')
-const { buildManualSourceAction } = require('../modules/audit/manual_source_action.js')
+const { buildManualSourceAction, verifyNhentaiSourceAction } = require('../modules/audit/manual_source_action.js')
 const { classifyAnomalyAction, getBatchSafeActionIds, getWorkflowSummary } = require('../modules/audit/action_policy.js')
 const { listPendingRecoverySummaries } = require('../modules/audit/page_recovery.js')
 const { prepareMangaModel, prepareMetadataModel } = require('../modules/database.js')
@@ -364,6 +366,188 @@ test('non-EH metadata sources do not enter EH identity conflicts while local che
     assert.ok(report.anomalies.some(item => item.bookId === 'local-gap' && item.type === 'unverified-page-mismatch'))
   }
   for (const [filepath, bytes] of before) assert.deepEqual(await fs.promises.readFile(filepath), bytes)
+})
+
+test('nHentai approval execution preserves records on failure, rejects legacy replacements and saves both databases on success', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-nh-execution-'))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  const executionDir = path.join(auditStorePath, 'executions', 'nh-execution')
+  await fs.promises.mkdir(library, { recursive: true })
+  await fs.promises.mkdir(executionDir, { recursive: true })
+  const filepath = path.join(library, '3555871-book.zip')
+  const bytes = makeArchiveBuffer({ gid: '3981890', token: '533feb3a94' })
+  await fs.promises.writeFile(filepath, bytes)
+  const stat = await fs.promises.stat(filepath)
+  const url = 'https://nhentai.net/g/599555/'
+  const databases = await createDatabases(root, [{ id: 'nh-book', title: 'Old title', hash: 'nh-hash', filepath,
+    pageCount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString(), filecount: 1, url }])
+  const Manga = prepareMangaModel(databases.databasePath)
+  const Metadata = prepareMetadataModel(databases.metadataPath)
+  t.after(async () => {
+    await Promise.all([Manga.sequelize.close(), Metadata.sequelize.close()])
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
+  const anomaly = { id: 'nh-incomplete', type: 'metadata-incomplete', bookId: 'nh-book', filepath, evidence: { currentUrl: url } }
+  const action = buildManualSourceAction({ anomaly, source: 'current', actual: { filepath, bundleSize: stat.size, mtimeMs: stat.mtimeMs } })
+  const report = { reportId: 'anomaly:nh-execution', executable: true, anomalies: [anomaly] }
+  const common = { taskType: 'anomaly', anomalyReport: report,
+    anomalyReview: { reportId: report.reportId, actionIds: [anomaly.id], manualActions: { [anomaly.id]: action } },
+    executionId: 'nh-execution', executionDir, auditStorePath, Manga, Metadata, ...databases, library, collectionList: [], rendererState: {} }
+  const originalBook = await Manga.findByPk('nh-book', { raw: true })
+  const originalMetadata = await Metadata.findByPk('nh-hash', { raw: true })
+  for (const message of ['NHENTAI_API_KEY_MISSING', 'socket hang up']) {
+    const failed = await executeApprovedActions({ ...common, verifyRepairAction: candidate => verifyNhentaiSourceAction({ action: candidate,
+      fetchMetadata: async () => { throw new Error(message) } }) })
+    assert.equal(failed.repairedCount, 0)
+    assert.equal(failed.skippedCount, 1)
+    assert.deepEqual(await Manga.findByPk('nh-book', { raw: true }), originalBook)
+    assert.deepEqual(await Metadata.findByPk('nh-hash', { raw: true }), originalMetadata)
+    assert.equal((await loadSourceConfirmations(auditStorePath)).size, 0)
+  }
+  const legacyAction = { ...action, repairKind: 'identity-replacement', newUrl: 'https://exhentai.org/g/3981890/533feb3a94/' }
+  const skipped = await executeApprovedActions({ ...common,
+    anomalyReport: { ...report, anomalies: [{ ...anomaly, action: legacyAction }] },
+    anomalyReview: { reportId: report.reportId, actionIds: [anomaly.id] },
+    verifyRepairAction: async () => { throw new Error('Legacy replacement must not reach online validation') } })
+  assert.equal(skipped.skippedItems[0].code, 'AUTOMATIC_CROSS_SOURCE_REPAIR')
+  const result = await executeApprovedActions({ ...common, verifyRepairAction: candidate => verifyNhentaiSourceAction({ action: candidate,
+    fetchMetadata: async () => ({ title: 'Fresh NH title', title_jpn: 'Fresh Japanese title', url, filecount: 59, category: 'Manga', tags: { artist: ['nh artist'] }, status: 'tagged' }) }) })
+  assert.equal(result.repairedCount, 1)
+  assert.equal(result.skippedCount, 0)
+  for (const record of [await Manga.findByPk('nh-book', { raw: true }), await Metadata.findByPk('nh-hash', { raw: true })]) {
+    assert.equal(record.url, url)
+    assert.equal(record.title, 'Fresh NH title')
+    assert.equal(record.filecount, 59)
+    assert.deepEqual(typeof record.tags === 'string' ? JSON.parse(record.tags) : record.tags, { artist: ['nh artist'] })
+  }
+  assert.equal((await Manga.findByPk('nh-book', { raw: true })).pageCount, 1)
+  assert.equal((await loadSourceConfirmations(auditStorePath)).size, 1)
+  assert.deepEqual(await fs.promises.readFile(filepath), bytes)
+})
+
+test('manual confirmations survive repeated scans but retain local gaps, incomplete metadata and page mismatch', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-confirmed-sources-'))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const books = []
+  const bytesByPath = new Map()
+  const url = 'https://exhentai.org/g/3379429/156e2a74f0/'
+  for (const id of ['absent', 'conflicting', 'failed']) {
+    const filepath = path.join(library, `3371152-${id}.zip`)
+    const zip = new AdmZip()
+    for (const page of [1, 3, 4]) zip.addFile(`${String(page).padStart(3, '0')}.webp`, Buffer.from('page'))
+    if (id === 'conflicting') zip.addFile('.ehviewer', Buffer.from('VERSION2\nname\n3371152\nabcdef1234\n'))
+    const bytes = zip.toBuffer()
+    bytesByPath.set(filepath, bytes)
+    await fs.promises.writeFile(filepath, bytes)
+    const stat = await fs.promises.stat(filepath)
+    books.push({ id, hash: id, title: id, filepath, url, pageCount: 3, filecount: 20,
+      bundleSize: stat.size, mtime: stat.mtime.toISOString(), tags: { artist: ['author'] } })
+  }
+  const databases = await createDatabases(root, books)
+  const options = { library, auditStorePath, onlinePolicy: 'none', ...databases }
+  const report = await writeWorkerReport({ workerFilename: 'anomaly_worker.js', root, jobId: 'before-confirmation', options })
+  const chosen = report.anomalies.filter(item => item.type === 'filename-url-id-conflict')
+  assert.equal(chosen.length, 3)
+  const manualActions = {}
+  for (const item of chosen) {
+    const stat = await fs.promises.stat(item.filepath)
+    manualActions[item.id] = buildManualSourceAction({ anomaly: item, source: 'current', actual: { filepath: item.filepath, bundleSize: stat.size, mtimeMs: stat.mtimeMs } })
+  }
+  const Manga = prepareMangaModel(databases.databasePath)
+  const Metadata = prepareMetadataModel(databases.metadataPath)
+  t.after(async () => {
+    await Promise.all([Manga.sequelize.close(), Metadata.sequelize.close()])
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
+  const logs = []
+  await fs.promises.mkdir(path.join(auditStorePath, 'executions', 'confirmed-execution'), { recursive: true })
+  const result = await executeApprovedActions({ taskType: 'anomaly', anomalyReport: report,
+    anomalyReview: { reportId: report.reportId, actionIds: chosen.map(item => item.id), manualActions },
+    executionId: 'confirmed-execution', executionDir: path.join(auditStorePath, 'executions', 'confirmed-execution'),
+    auditStorePath, Manga, Metadata, ...databases, collectionList: [], rendererState: {},
+    appendLog: async message => logs.push(message),
+    verifyRepairAction: async action => action.bookId === 'failed'
+      ? describeAvailabilityFailure({ sites: { ehentai: { status: 'generic-unavailable', httpStatus: 404 }, exhentai: { status: 'network-error', error: 'socket hang up' } } })
+      : { valid: true, newUrl: url, metadata: { title: 'Confirmed source', filecount: 20, category: 'Manga', tags: {} } }
+  })
+  assert.equal(result.repairedCount, 2)
+  assert.equal(result.skippedCount, 1)
+  assert.equal(result.skippedItems[0].code, 'REPAIR_CANDIDATE_NETWORK_ERROR')
+  assert.ok(logs.some(message => message.includes('E-Hentai=generic-unavailable (HTTP 404)') && message.includes('ExHentai=network-error') && message.includes('socket hang up')))
+  assert.equal(logs.some(message => message.includes('原审批已失效')), false)
+  const confirmations = await loadSourceConfirmations(auditStorePath)
+  assert.equal(confirmations.size, 2)
+  assert.equal(confirmations.has(confirmationKey(books[2])), false)
+  const actionEntries = (await fs.promises.readFile(path.join(auditStorePath, 'executions', 'confirmed-execution', 'action-audit.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert.equal(actionEntries.filter(item => item.status === 'prepared' && item.sourceConfirmation).length, 2)
+  for (const book of books.slice(0, 2)) {
+    const stat = await fs.promises.stat(book.filepath)
+    assert.equal(matchesSourceConfirmation(confirmations.get(confirmationKey(book)), { book, stat, ehviewer: await inspectEhviewerIdentity(book) }), true)
+  }
+  for (const [jobId, forceLocal] of [['new-scan', false], ['forced-scan', true], ['cleared-cache', false]]) {
+    if (jobId === 'cleared-cache') await clearAuditCacheDatabase(auditStorePath)
+    const next = await writeWorkerReport({ workerFilename: 'anomaly_worker.js', root, jobId, options: { ...options, forceLocal } })
+    assert.equal(next.summary.confirmedSources, 2)
+    assert.equal(next.anomalies.filter(item => item.type === 'filename-url-id-conflict').length, 1)
+    assert.equal(next.anomalies.some(item => item.type === 'ehviewer-url-conflict'), false)
+    for (const id of ['absent', 'conflicting']) {
+      assert.ok(next.anomalies.some(item => item.bookId === id && item.type === 'metadata-incomplete'))
+      assert.ok(next.anomalies.some(item => item.bookId === id && item.type === 'archive-image-sequence-gap'))
+    }
+    assert.ok(next.anomalies.some(item => item.bookId === 'conflicting' && item.type === 'exact-source-page-mismatch'))
+    assert.equal(next.anomalies.some(item => item.bookId === 'conflicting' && item.type === 'unverified-page-mismatch'), false)
+  }
+  const cache = await EhentaiAvailabilityCache.open(auditStorePath)
+  try {
+    for (const site of ['ehentai', 'exhentai']) await cache.set({ site, gid: '3379429', token: '156e2a74f0', status: 'copyright', httpStatus: 404, claimant: 'Fixture Comics', checkedAt: Date.now() })
+  } finally { await cache.close() }
+  const online = await writeWorkerReport({ workerFilename: 'anomaly_worker.js', root, jobId: 'online-confirmed', options: { ...options, onlinePolicy: 'urls' } })
+  assert.equal(online.summary.onlineIdentities, 1)
+  assert.equal(online.anomalies.filter(item => item.type === 'gallery-copyright').length, 3)
+  assert.equal(online.anomalies.some(item => item.type === 'ehviewer-url-conflict-online'), false)
+  for (const [filepath, bytes] of bytesByPath) assert.deepEqual(await fs.promises.readFile(filepath), bytes)
+  const zip = new AdmZip(bytesByPath.get(books[1].filepath))
+  zip.addFile('.ehviewer', Buffer.from('VERSION2\nname\n123456\nabcdef1234\n'))
+  await fs.promises.writeFile(books[1].filepath, zip.toBuffer())
+  const changed = await writeWorkerReport({ workerFilename: 'anomaly_worker.js', root, jobId: 'changed-marker', options })
+  assert.equal(changed.summary.confirmedSources, 1)
+  assert.ok(changed.anomalies.some(item => item.bookId === 'conflicting' && item.type === 'ehviewer-url-conflict'))
+})
+
+test('failed metadata transactions never save a source confirmation', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-confirmation-rollback-'))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const filepath = path.join(library, '3371152-book.zip')
+  await fs.promises.writeFile(filepath, makeArchiveBuffer())
+  const stat = await fs.promises.stat(filepath)
+  const url = 'https://exhentai.org/g/3379429/156e2a74f0/'
+  const databases = await createDatabases(root, [{ id: 'book', hash: 'hash', title: 'Original', filepath, url,
+    pageCount: 1, filecount: 1, bundleSize: stat.size, mtime: stat.mtime.toISOString() }])
+  const Manga = prepareMangaModel(databases.databasePath)
+  const Metadata = prepareMetadataModel(databases.metadataPath)
+  t.after(async () => {
+    await Promise.all([Manga.sequelize.close(), Metadata.sequelize.close()])
+    await fs.promises.rm(root, { recursive: true, force: true })
+  })
+  const anomaly = { id: 'conflict', type: 'filename-url-id-conflict', bookId: 'book', filepath, evidence: { currentUrl: url } }
+  const action = buildManualSourceAction({ anomaly, source: 'current', actual: { filepath, bundleSize: stat.size, mtimeMs: stat.mtimeMs } })
+  const report = { reportId: 'anomaly:rollback', executable: true, anomalies: [anomaly] }
+  await fs.promises.mkdir(path.join(auditStorePath, 'executions', 'rollback'), { recursive: true })
+  Metadata.upsert = async () => { throw new Error('FIXTURE_DATABASE_WRITE_FAILED') }
+  await assert.rejects(executeApprovedActions({ taskType: 'anomaly', anomalyReport: report,
+    anomalyReview: { reportId: report.reportId, actionIds: [anomaly.id], manualActions: { [anomaly.id]: action } },
+    executionId: 'rollback', executionDir: path.join(auditStorePath, 'executions', 'rollback'), auditStorePath,
+    Manga, Metadata, ...databases, collectionList: [], rendererState: {},
+    verifyRepairAction: async () => ({ valid: true, newUrl: url, metadata: { title: 'Must not persist' } })
+  }), /FIXTURE_DATABASE_WRITE_FAILED/)
+  assert.equal((await loadSourceConfirmations(auditStorePath)).size, 0)
+  assert.equal((await Manga.findByPk('book', { raw: true })).title, 'Original')
+  assert.equal((await Metadata.findByPk('hash', { raw: true })).title, 'Original')
 })
 
 test('anomaly worker restores pending page recovery from the audit store path', async t => {

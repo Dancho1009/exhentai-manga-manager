@@ -2224,6 +2224,7 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
       executionId: execution.executionId,
       executionDir: execution.executionDir,
       auditStorePath: path.join(STORE_PATH, 'audit'),
+      sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe'),
       Manga,
       Metadata,
       databasePath: path.join(STORE_PATH, 'database.sqlite'),

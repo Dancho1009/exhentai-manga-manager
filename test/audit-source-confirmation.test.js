@@ -1,10 +1,115 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const {
+  confirmationKey, buildSourceConfirmation, matchesSourceConfirmation,
+  loadSourceConfirmations, saveSourceConfirmations, restoreSourceConfirmations
+} = require('../modules/audit/source_confirmation.js')
+const { atomicWriteJson } = require('../modules/audit/utils.js')
+const { clearAuditCacheDatabase } = require('../modules/audit/cache.js')
 const { checkRepairCandidate, describeAvailabilityFailure } = require('../modules/audit/repair_availability.js')
 
 const url = 'https://exhentai.org/g/3379429/156e2a74f0/'
+const context = {
+  executionId: 'execution',
+  book: { id: 'book', hash: 'hash', filepath: path.join(os.tmpdir(), '3371152-book.zip'), url },
+  stat: { size: 123, mtimeMs: 1000 },
+  ehviewer: { status: 'absent' }
+}
 const availability = (eh, ex) => ({
   sites: { ehentai: { status: eh, httpStatus: 404 }, exhentai: { status: ex, httpStatus: ex === 'available' ? 200 : null } }
+})
+
+test('source confirmations bind file and marker identity, not the EH domain', () => {
+  const record = buildSourceConfirmation({ ...context, executionId: 'execution' })
+  assert.equal(matchesSourceConfirmation(record, context), true)
+  assert.equal(matchesSourceConfirmation(record, { ...context, book: { ...context.book, url: url.replace('exhentai', 'e-hentai') } }), true)
+  for (const changed of [
+    { book: { ...context.book, id: 'other' } },
+    { book: { ...context.book, filepath: context.book.filepath.replace('3371152', '3379429') } },
+    { book: { ...context.book, hash: 'changed' } },
+    { book: { ...context.book, url: 'https://exhentai.org/g/3379429/abcdef1234/' } },
+    { book: { ...context.book, url: 'https://exhentai.org/g/3371152/156e2a74f0/' } },
+    { book: { ...context.book, url: 'https://nhentai.net/g/3379429/' } },
+    { stat: { ...context.stat, size: 124 } },
+    { stat: { ...context.stat, mtimeMs: 1002 } },
+    { ehviewer: { status: 'parsed', gid: '3371152', token: 'abcdef1234' } }
+  ]) assert.equal(matchesSourceConfirmation(record, { ...context, ...changed }), false)
+  assert.equal(buildSourceConfirmation({ ...context, book: { ...context.book, url: 'invalid' } }), null)
+})
+
+test('source confirmations survive store reopening and inspection cache cleanup', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-source-store-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const record = buildSourceConfirmation(context)
+  await saveSourceConfirmations(root, [record])
+  await clearAuditCacheDatabase(root)
+  assert.deepEqual((await loadSourceConfirmations(root)).get(confirmationKey(context.book)), record)
+  await fs.promises.writeFile(path.join(root, 'source-confirmations.json'), '{broken')
+  await assert.rejects(loadSourceConfirmations(root), SyntaxError)
+})
+
+test('only verified manual execution logs restore legacy confirmations, excluding skipped items', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-source-restore-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const report = { reportId: 'anomaly:report', anomalies: [
+    { id: 'success', type: 'filename-url-id-conflict', bookId: 'book', filepath: context.book.filepath, action: null },
+    { id: 'automatic', type: 'filename-url-id-conflict', bookId: 'automatic', filepath: context.book.filepath, action: { type: 'repair-url' } }
+  ] }
+  const state = { latestJobId: 'execution', status: 'completed', options: { reportId: report.reportId, sourceTaskType: 'anomaly' } }
+  const prepared = { status: 'prepared', type: 'repair-url', anomalyId: 'success', bookId: 'book', oldUrl: url, newUrl: url, at: new Date(2000).toISOString() }
+  const verified = { status: 'verified', taskType: 'anomaly', repairedCount: 1 }
+  const args = { storePath: root,
+    books: ['book', 'automatic', 'skipped'].map(id => ({ raw: { ...context.book, id }, effective: { url }, actual: context.stat })),
+    healthById: new Map(['book', 'automatic', 'skipped'].map(id => [id, { ehviewer: context.ehviewer }])) }
+  await atomicWriteJson(path.join(root, 'channels', 'execution-state.json'), state)
+  await atomicWriteJson(path.join(root, 'jobs', 'anomaly', 'report', 'report.json'), report)
+  const logPath = path.join(root, 'executions', 'execution', 'action-audit.jsonl')
+  await fs.promises.mkdir(path.dirname(logPath), { recursive: true })
+  const writeLog = entries => fs.promises.writeFile(logPath, entries.map(item => JSON.stringify(item)).join('\n'))
+  await writeLog([prepared, { status: 'skipped', bookId: 'skipped' }, verified])
+  const confirmations = new Map()
+  assert.equal(await restoreSourceConfirmations({ ...args, confirmations, persist: false }), 1)
+  assert.equal(confirmations.size, 1)
+  assert.equal(fs.existsSync(path.join(root, 'source-confirmations.json')), false)
+  assert.equal(await restoreSourceConfirmations({ ...args, confirmations: new Map() }), 1)
+  assert.equal((await loadSourceConfirmations(root)).size, 1)
+  for (const entries of [
+    [prepared], [prepared, verified, { status: 'failed' }], [prepared, { ...verified, repairedCount: 2 }],
+    [{ ...prepared, anomalyId: 'automatic', bookId: 'automatic' }, verified],
+    [{ ...prepared, newUrl: url.replace('3379429', '3371152') }, verified]
+  ]) {
+    await writeLog(entries)
+    assert.equal(await restoreSourceConfirmations({ ...args, confirmations: new Map(), persist: false }), 0)
+  }
+  await writeLog([prepared, verified])
+  assert.equal(await restoreSourceConfirmations({ ...args, books: [{ ...args.books[0], actual: { ...context.stat, mtimeMs: 3000 } }], confirmations: new Map(), persist: false }), 0)
+  await atomicWriteJson(path.join(root, 'channels', 'execution-state.json'), { ...state, status: 'failed' })
+  assert.equal(await restoreSourceConfirmations({ ...args, confirmations: new Map(), persist: false }), 0)
+})
+
+test('new execution logs restore their exact source snapshot instead of rebinding changed files', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-source-new-log-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  await atomicWriteJson(path.join(root, 'channels', 'execution-state.json'), {
+    latestJobId: 'execution', status: 'completed', options: { reportId: 'anomaly:report', sourceTaskType: 'anomaly' }
+  })
+  await atomicWriteJson(path.join(root, 'jobs', 'anomaly', 'report', 'report.json'), { reportId: 'anomaly:report', anomalies: [] })
+  const sourceConfirmation = buildSourceConfirmation(context)
+  const logPath = path.join(root, 'executions', 'execution', 'action-audit.jsonl')
+  await fs.promises.mkdir(path.dirname(logPath), { recursive: true })
+  await fs.promises.writeFile(logPath, [
+    { status: 'prepared', bookId: 'book', sourceConfirmation },
+    { status: 'verified', taskType: 'anomaly', repairedCount: 1 }
+  ].map(item => JSON.stringify(item)).join('\n'))
+  const args = { storePath: root, books: [{ raw: context.book, effective: { url }, actual: context.stat }],
+    healthById: new Map([['book', { ehviewer: context.ehviewer }]]), persist: false }
+  const confirmations = new Map()
+  assert.equal(await restoreSourceConfirmations({ ...args, confirmations }), 1)
+  assert.deepEqual([...confirmations.values()], [sourceConfirmation])
+  assert.equal(await restoreSourceConfirmations({ ...args, books: [{ ...args.books[0], actual: { ...context.stat, size: 124 } }], confirmations: new Map() }), 0)
 })
 
 test('approval accepts either accessible site, retrying transient failure only once', async () => {

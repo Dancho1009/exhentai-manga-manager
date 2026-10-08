@@ -31,6 +31,10 @@ const { REPORT_SCHEMA_VERSION, getReportId } = require('./report_repository.js')
 const { createWorkerRuntime, mapWithConcurrency } = require('./worker_runtime.js')
 const { classifyAnomalies, getWorkflowSummary } = require('./action_policy.js')
 const { listPendingRecoverySummaries, getRecoveryMissingPages } = require('./page_recovery.js')
+const {
+  IDENTITY_ANOMALY_TYPES, confirmationKey, matchesSourceConfirmation, loadSourceConfirmations, restoreSourceConfirmations
+} = require('./source_confirmation.js')
+
 const LOCAL_INSPECTION_CONCURRENCY = 4
 const HEALTH_CACHE_BATCH_SIZE = 32
 const runtime = createWorkerRuntime()
@@ -301,6 +305,22 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       }
     }
 
+    const confirmations = await loadSourceConfirmations(options.auditStorePath)
+    const restored = await restoreSourceConfirmations({ storePath: options.auditStorePath, books: wrappedBooks, healthById, confirmations })
+    const confirmedBookIds = new Set(wrappedBooks.filter(wrapped => matchesSourceConfirmation(
+      confirmations.get(confirmationKey(wrapped.raw)),
+      { book: { ...wrapped.raw, url: wrapped.effective.url }, stat: wrapped.actual, ehviewer: healthById.get(String(wrapped.raw.id))?.ehviewer }
+    )).map(wrapped => String(wrapped.raw.id)))
+    for (let index = anomalies.length - 1; index >= 0; index -= 1) {
+      const item = anomalies[index]
+      if (!confirmedBookIds.has(String(item.bookId))) continue
+      if (IDENTITY_ANOMALY_TYPES.has(item.type)) anomalies.splice(index, 1)
+      else if (item.type === 'unverified-page-mismatch') anomalies[index] = makeAnomaly('exact-source-page-mismatch', 'medium', {
+        bookId: item.bookId, filepath: item.filepath, reason: '已人工确认来源，但本地与来源页数不同', evidence: item.evidence
+      })
+    }
+    if (restored) log(`从成功执行日志恢复 ${restored} 本人工来源确认`)
+    if (confirmedBookIds.size) log(`保留 ${confirmedBookIds.size} 本人工确认来源，仅跳过未变化的身份冲突`)
     recordTiming('localAnalysisMs', performance.now() - analysisStarted)
     const recoveryStarted = performance.now()
     // A previous write-back may have fixed internal gaps while leaving inferred
@@ -390,7 +410,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         if (String(wrapped.effective.url || '').trim() && getMetadataSourceProvider(wrapped.effective.url) !== 'ehentai') continue
         const currentIdentity = extractEhentaiIdentity(wrapped.effective.url)
         const ehviewer = healthById.get(String(wrapped.raw.id))?.ehviewer || null
-        const ehviewerIdentity = ehviewer?.status === 'parsed' && ehviewer.gid && ehviewer.token
+        const ehviewerIdentity = !confirmedBookIds.has(String(wrapped.raw.id)) && ehviewer?.status === 'parsed' && ehviewer.gid && ehviewer.token
           ? { gid: String(ehviewer.gid), token: String(ehviewer.token).toLowerCase() }
           : null
         const identitiesConflict = Boolean(ehviewerIdentity) && (!currentIdentity || currentIdentity.gid !== ehviewerIdentity.gid || currentIdentity.token !== ehviewerIdentity.token)
@@ -778,7 +798,8 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         onlineIdentities: onlineChecks.length,
         onlineCopyright: onlineChecks.filter(item => Object.values(item.sites).some(site => site.status === 'copyright')).length,
         onlineAvailable: onlineChecks.filter(item => isIdentityWebAvailable(item)).length,
-        versionChainMatches
+        versionChainMatches,
+        confirmedSources: confirmedBookIds.size
       },
       anomalies: classifiedAnomalies,
       onlineChecks,
