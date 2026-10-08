@@ -1,5 +1,8 @@
 {
   "m": {
+    "bookCardView": "Cover cards",
+    "bookListView": "Row list",
+    "coverUnavailable": "No cover",
     "folderTree": "Folder Tree",
     "search": "Search",
     "shuffle": "Shuffle",

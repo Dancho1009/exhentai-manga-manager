@@ -1,5 +1,8 @@
 {
   "m": {
+    "bookCardView": "封面卡片",
+    "bookListView": "行列表",
+    "coverUnavailable": "暫無封面",
     "folderTree": "資料夾樹",
     "search": "搜尋",
     "shuffle": "隨機排序",

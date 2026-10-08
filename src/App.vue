@@ -2,11 +2,11 @@
   <el-config-provider :locale="localeFile">
     <div id="progressbar" :style="{ width: progress + '%' }"></div>
     <el-button class="fullscreen-button" circle :icon="FullScreen" size="large" @click="switchFullscreen"></el-button>
-    <el-row :gutter="20" class="book-search-bar">
-      <el-col :span="1" :offset="2">
+    <el-row class="book-search-bar">
+      <el-col :span="1">
         <el-button type="primary" :icon="TreeViewAlt" plain @click="$refs.FolderTreeRef.openFolderTree()" :title="$t('m.folderTree')"></el-button>
       </el-col>
-      <el-col :span="7">
+      <el-col :span="7" class="book-search-input-col">
         <el-autocomplete
           :model-value="searchString"
           :fetch-suggestions="querySearch"
@@ -46,7 +46,7 @@
       <el-col :span="1">
         <el-button :icon="SettingIcon" plain @click="$refs.SettingRef.dialogVisibleSetting = true" :title="$t('m.setting')" :disabled="auditLocked"></el-button>
       </el-col>
-      <el-col :span="3">
+      <el-col :span="3" class="book-view-controls">
         <el-select :placeholder="$t('m.sort_filter')" @change="handleSortChange" clearable v-model="sortValue">
           <el-option-group :label="$t('m.filter')">
             <el-option :label="$t('m.all')" value=""></el-option>
@@ -75,9 +75,17 @@
             <el-option :label="$t('m.pageDescend')" value="pageDescend"></el-option>
           </el-option-group>
         </el-select>
+        <el-button-group class="book-view-switch">
+          <el-tooltip :content="$t('m.bookCardView')" placement="bottom">
+            <el-button :icon="Grid" :type="bookListViewMode === 'card' ? 'primary' : ''" :aria-label="$t('m.bookCardView')" :aria-pressed="bookListViewMode === 'card'" plain @click="handleBookListViewChange('card')" />
+          </el-tooltip>
+          <el-tooltip :content="$t('m.bookListView')" placement="bottom">
+            <el-button :icon="List" :type="bookListViewMode === 'list' ? 'primary' : ''" :aria-label="$t('m.bookListView')" :aria-pressed="bookListViewMode === 'list'" plain @click="handleBookListViewChange('list')" />
+          </el-tooltip>
+        </el-button-group>
       </el-col>
-      <el-col :span="4">
-        <el-row :gutter="20">
+      <el-col :span="4" class="book-manage-controls">
+        <el-row class="book-manage-button-row">
           <el-col :span="6"  v-if="!editTagView && !editCollectionView">
             <el-button plain @click="$refs.EditViewRef.enterEditCollectionView()" :icon="CicsSystemGroup" :title="$t('m.manageCollection')" :disabled="auditLocked"></el-button>
           </el-col>
@@ -107,12 +115,14 @@
       v-if="!editTagView && !editCollectionView && !setting.disableRandomTag"
       @search="handleSearchString"
     />
-    <el-row :gutter="20" class="book-card-area">
-      <el-col :span="24" v-if="!editTagView && !editCollectionView" class="book-card-list" :style="{height: setting.disableRandomTag ? 'calc(100vh - 96px)' : 'calc(100vh - 134px)'}" @click.self="clearHomeBookSelection">
+    <el-row :gutter="20" class="book-card-area" @scroll.capture="closeBookCoverPreview()">
+      <el-col :span="24" v-if="!editTagView && !editCollectionView" class="book-card-list" :class="{ 'book-row-list': bookListViewMode === 'list' }" @click.self="clearHomeBookSelection">
         <div
           v-for="(book, index) in visibleChunkDisplayBookList"
-          :key="book.id"
+          :key="`${bookListViewMode}:${book.id}`"
           class="book-card-frame"
+          :class="{ 'book-list-frame': bookListViewMode === 'list' }"
+          :data-book-id="book.id"
           v-lazy:[book.id]="{'enter': loadBookCardContent, 'leave': unloadBookCardContent}"
           :tabindex="index + 1"
         >
@@ -120,11 +130,24 @@
             <!-- show book card when book isn't a collection, book isn't hidden because collected,
               and book isn't hidden by user except sorting by onlyHiddenBook
               and book isn't hidden by folder select -->
+            <BookListRow
+              v-if="bookListViewMode === 'list' && visibilityMap[book.id]"
+              :book="book"
+              selectable
+              :selected="isHomeBookSelected(book.id)"
+              @open-book-detail="openListBookDetail(book)"
+              @handle-click-cover="handleClickCover(book)"
+              @on-book-context-menu="onBookContextMenu"
+              @toggle-book-selection="toggleHomeBookSelection"
+              @open-collection="openCollection(book)"
+              @preview-cover="showBookCoverPreview"
+              @close-cover-preview="closeBookCoverPreview"
+            />
             <BookCard
               :book="book"
               selectable
               :selected="isHomeBookSelected(book.id)"
-              v-if="!book.isCollection && !book.collectionHide && (sortValue === 'hidden' || !book.hiddenBook) && !book.folderHide && visibilityMap[book.id]"
+              v-else-if="!book.isCollection && !book.collectionHide && (sortValue === 'hidden' || !book.hiddenBook) && !book.folderHide && visibilityMap[book.id]"
               @open-book-detail="$refs.BookDetailDialogRef.openBookDetail(book)"
               @handle-click-cover="handleClickCover(book)"
               @on-book-context-menu="onBookContextMenu"
@@ -169,6 +192,7 @@
       size="calc(100vh - 60px)"
       destroy-on-close
       class="collection-drawer"
+      @close="closeBookCoverPreview()"
     >
       <template #header>
         <div>
@@ -176,15 +200,27 @@
           <el-button type="primary" :icon="Edit" plain link class="collection-edit-button" @click="editCurrentCollection"/>
         </div>
       </template>
-      <div class="collection-book-card-list">
+      <div class="collection-book-card-list" :class="{ 'book-row-list': bookListViewMode === 'list' }" @scroll.capture="closeBookCoverPreview()">
         <div
           v-for="(book, index) in openCollectionBookList"
           :key="book.id"
           class="book-card-frame"
+          :class="{ 'book-list-frame': bookListViewMode === 'list' }"
+          :tabindex="index + 1"
+          :data-book-id="book.id"
         >
-          <BookCard
+          <BookListRow
+            v-if="bookListViewMode === 'list'"
             :book="book"
-            :tabindex="index + 1"
+            @open-book-detail="openListBookDetail(book)"
+            @handle-click-cover="handleClickCover(book)"
+            @on-book-context-menu="onBookContextMenu"
+            @preview-cover="showBookCoverPreview"
+            @close-cover-preview="closeBookCoverPreview"
+          />
+          <BookCard
+            v-else
+            :book="book"
             @open-book-detail="$refs.BookDetailDialogRef.openBookDetail(book)"
             @handle-click-cover="handleClickCover(book)"
             @on-book-context-menu="onBookContextMenu"
@@ -196,6 +232,7 @@
         </div>
       </div>
     </el-drawer>
+    <BookCoverPreview ref="BookCoverPreviewRef" />
     <el-dialog v-model="moveFileDialogVisible" :title="$t('m.moveFile')" width="400px">
       <el-cascader
         v-model="moveFileTargetFolder"
@@ -241,7 +278,7 @@
 <script>
 import { defineComponent } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { Setting as SettingIcon, FullScreen, Edit, DataAnalysis } from '@element-plus/icons-vue'
+import { Setting as SettingIcon, FullScreen, Edit, DataAnalysis, Grid, List } from '@element-plus/icons-vue'
 import { ArrowTrendingLines20Filled, Collections24Regular, Search32Filled, Save16Regular } from '@vicons/fluent'
 import { MdShuffle, MdRefresh, MdCodeDownload, MdExit } from '@vicons/ionicons4'
 import { TreeViewAlt, CicsSystemGroup, TagGroup } from '@vicons/carbon'
@@ -256,6 +293,8 @@ import BookDetailDialog from './components/BookDetailDialog.vue'
 import FolderTree from './components/FolderTree.vue'
 import BookCard from './components/BookCard.vue'
 import BookCardCollection from './components/BookCardCollection.vue'
+import BookListRow from './components/BookListRow.vue'
+import BookCoverPreview from './components/BookCoverPreview.vue'
 import EditView from './components/EditView.vue'
 import RandomTags from './components/RandomTags.vue'
 
@@ -272,12 +311,14 @@ export default defineComponent({
     FolderTree,
     BookCard,
     BookCardCollection,
+    BookListRow,
+    BookCoverPreview,
     EditView,
     RandomTags,
   },
   setup () {
     return {
-      SettingIcon, FullScreen, Edit, DataAnalysis,
+      SettingIcon, FullScreen, Edit, DataAnalysis, Grid, List,
       Collections24Regular, Search32Filled, ArrowTrendingLines20Filled, Save16Regular,
       MdRefresh, MdCodeDownload, MdExit, MdShuffle,
       TreeViewAlt, CicsSystemGroup, TagGroup
@@ -291,6 +332,7 @@ export default defineComponent({
       progress: 0,
       randomTags: [],
       visibilityMap: {},
+      bookListViewMode: localStorage.getItem('bookListViewMode') === 'list' ? 'list' : 'card',
       buttonLoadBookListLoading: false,
       buttonGetMetadatasLoading: false,
       actionHistory: [],
@@ -380,7 +422,10 @@ export default defineComponent({
     window.addEventListener('keydown', this.resolveKey)
     window.addEventListener('wheel', this.resolveWheel)
     window.addEventListener('mousedown', this.resolveMouseDown)
+    window.addEventListener('scroll', this.closePreviewOnScroll, true)
+    window.addEventListener('resize', this.closePreviewOnScroll)
     ipcRenderer.on('send-action', async (event, arg) => {
+      this.closeBookCoverPreview()
       switch (arg.action) {
         case 'setting':
           this.$refs.SettingRef.dialogVisibleSetting = true
@@ -443,11 +488,17 @@ export default defineComponent({
     window.removeEventListener('keydown', this.resolveKey)
     window.removeEventListener('wheel', this.resolveWheel)
     window.removeEventListener('mousedown', this.resolveMouseDown)
+    window.removeEventListener('scroll', this.closePreviewOnScroll, true)
+    window.removeEventListener('resize', this.closePreviewOnScroll)
+    this.closeBookCoverPreview()
   },
   watch: {
     bookList () {
+      this.closeBookCoverPreview()
       this.handleSortChange(this.sortValue, this.bookList)
     },
+    editTagView () { this.closeBookCoverPreview() },
+    editCollectionView () { this.closeBookCoverPreview() },
   },
   methods: {
     ...mapActions(useAppStore, [
@@ -515,6 +566,7 @@ export default defineComponent({
       return 'home'
     },
     resolveKey (event) {
+      this.closeBookCoverPreview()
       let next, prev
       if (this.setting.reverseLeftRight) {
         ;({ next, prev } = this.keyMap.reverse)
@@ -522,7 +574,10 @@ export default defineComponent({
         ;({ next, prev } = this.keyMap.normal)
       }
       const currentUIValue = this.currentUI()
-      const bookEachLine = Math.floor(getWidth(document.querySelector('.book-card-area div:first-child'), 'width') / getWidth(document.querySelector('.book-card'), 'full'))
+      const bookContainer = currentUIValue === 'collection' ? '.collection-book-card-list' : '.book-card-list'
+      const cardWidth = getWidth(document.querySelector(`${bookContainer} .book-card`), 'full')
+      const bookEachLine = this.bookListViewMode === 'list' || !cardWidth ? 1 : Math.max(1,
+        Math.floor(getWidth(document.querySelector(bookContainer), 'width') / cardWidth))
       if (currentUIValue !== 'inputing') {
         if (event.key === 'Backspace') {
           document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))
@@ -605,8 +660,7 @@ export default defineComponent({
         if (event.key === 'Escape' && this.selectedHomeBookIds.length) {
           this.clearHomeBookSelection()
         } else if (event.key === 'Enter') {
-          event.preventDefault()
-          document.activeElement.querySelector('.book-cover').click()
+          this.activateFocusedBook(event)
         } else if (event.key === 'F5' && !this.auditLocked) {
           this.loadBookList(true)
         } else if (event.key === 'F6' || (event.ctrlKey && event.key === 'l')) {
@@ -636,7 +690,7 @@ export default defineComponent({
         }
       } else if (currentUIValue === 'collection') {
         if (event.key === 'Enter') {
-          document.activeElement.querySelector('.book-cover').click()
+          this.activateFocusedBook(event)
         } else if (event.key === 'ArrowDown') {
           this.jumpBookByTabindex(bookEachLine, '.collection-drawer')
         } else if (event.key === 'ArrowUp') {
@@ -649,6 +703,7 @@ export default defineComponent({
       }
     },
     resolveWheel (event) {
+      this.closeBookCoverPreview()
       if (event.ctrlKey) {
         const level = electronFunction['get-zoom-level']()
         if (event.deltaY > 0) {
@@ -659,6 +714,7 @@ export default defineComponent({
       }
     },
     resolveMouseDown (event) {
+      this.closeBookCoverPreview()
       const currentUIValue = this.currentUI()
       if (event.button === 3) {
         if (currentUIValue === 'viewer-comicread') {
@@ -1101,7 +1157,39 @@ export default defineComponent({
       this.searchBook()
     },
     // home main
+    async handleBookListViewChange (mode) {
+      if (mode === this.bookListViewMode) return
+      this.closeBookCoverPreview()
+      this.bookListViewMode = mode === 'list' ? 'list' : 'card'
+      localStorage.setItem('bookListViewMode', this.bookListViewMode)
+      this.visibilityMap = {}
+      await this.$nextTick()
+      this.scrollMainPageTop()
+      const collectionBody = document.querySelector('.collection-drawer .el-drawer__body')
+      if (collectionBody) collectionBody.scrollTop = 0
+    },
+    showBookCoverPreview (book, reference) {
+      this.$refs.BookCoverPreviewRef.show(book, reference)
+    },
+    closeBookCoverPreview (reference) {
+      this.$refs.BookCoverPreviewRef?.hide(reference)
+    },
+    closePreviewOnScroll () {
+      this.closeBookCoverPreview()
+    },
+    openListBookDetail (book) {
+      this.closeBookCoverPreview()
+      this.$refs.BookDetailDialogRef.openBookDetail(book)
+    },
+    activateFocusedBook (event) {
+      const cover = document.activeElement.closest('.book-card-frame')?.querySelector('.book-list-cover-button, .book-cover')
+      if (cover) {
+        event.preventDefault()
+        cover.click()
+      }
+    },
     handleClickCover (book) {
+      this.closeBookCoverPreview()
       switch (this.setting.directEnter) {
         case 'internalViewer':
           this.$refs.InternalViewerRef.viewManga(book)
@@ -1135,19 +1223,12 @@ export default defineComponent({
       if (id) this.actionHistory.push({type: 'openBook', value: id})
     },
     jumpBookByTabindex (step, container) {
-      try {
-        const activeElement = document.activeElement
-        if (!document.querySelector(container).contains(activeElement)) {
-          throw new Error('active element not in container')
-        }
-        const tabIndexNow = activeElement.getAttribute('tabindex')
-        const tabIndexNext = parseInt(tabIndexNow, 10) + step
-        if (!(tabIndexNext >= 1)) throw new Error('detect illegal tabindex')
-        document.querySelector(`${container} div[tabindex="${tabIndexNext}"]`).focus()
-      } catch (error) {
-        console.log(error)
-        document.querySelector(`${container} div[tabindex="1"]`).focus()
-      }
+      const root = document.querySelector(container)
+      const activeFrame = document.activeElement.closest('.book-card-frame')
+      const tabIndexNext = Number(activeFrame?.getAttribute('tabindex')) + step
+      const nextFrame = root?.contains(activeFrame) && root.querySelector(`.book-card-frame[tabindex="${tabIndexNext}"]`)
+      const target = nextFrame || root?.querySelector('.book-card-frame[tabindex="1"]')
+      target?.focus()
     },
     loadBookCardContent (id) {
       this.visibilityMap[id] = true
@@ -1156,6 +1237,7 @@ export default defineComponent({
       this.visibilityMap[id] = false
     },
     chunkList () {
+      this.closeBookCoverPreview()
       this.currentPage = 1
       this.chunkDisplayBookList = this.customChunk(this.displayBookList, this.setting.pageSize, 0)
       this.scrollMainPageTop()
@@ -1166,6 +1248,7 @@ export default defineComponent({
       this.scrollMainPageTop()
     },
     handleCurrentPageChange (currentPage) {
+      this.closeBookCoverPreview()
       this.visibilityMap = {}
       this.chunkDisplayBookList = this.customChunk(this.displayBookList, this.setting.pageSize, currentPage - 1)
       this.scrollMainPageTop()
@@ -1235,6 +1318,7 @@ export default defineComponent({
       if (!existingIds.has(this.selectionAnchorId)) this.selectionAnchorId = null
     },
     onBookContextMenu (e, book) {
+      this.closeBookCoverPreview()
       e.preventDefault()
       if (this.currentUI() === 'home') {
         if (!this.isHomeBookSelected(book.id)) {
@@ -1578,6 +1662,7 @@ export default defineComponent({
       })
     },
     openCollection (collection) {
+      this.closeBookCoverPreview()
       this.drawerVisibleCollection = true
       this.openCollectionBookList = _.compact(_.flatten(collection.list.map(hash_id => {
         return _.filter(this.bookList, book => book.id === hash_id || book.hash === hash_id)
@@ -1663,6 +1748,9 @@ body
   font-family: Avenir, Helvetica, Arial, sans-serif
   text-align: center
   margin-top: 20px
+  height: calc(100vh - 28px)
+  display: flex
+  flex-direction: column
 
 @keyframes striped-flow
   0%
@@ -1708,6 +1796,38 @@ body
 .search-input,
 .function-button
   width: 100%
+.book-search-bar
+  gap: 8px
+  margin: 0 12px
+  flex-shrink: 0
+  > .el-col
+    flex: 0 0 auto
+    width: auto
+    max-width: none
+  > .book-search-input-col
+    flex: 1 1 240px
+    min-width: 180px
+  > .book-manage-controls
+    .book-manage-button-row
+      gap: 8px
+      > .el-col
+        flex: 0 0 auto
+        width: auto
+        max-width: none
+.book-search-bar .book-view-controls
+  display: flex
+  align-items: center
+  gap: 8px
+  width: 244px
+  .el-select
+    flex: 1
+    min-width: 0
+  .book-view-switch
+    display: inline-flex
+    flex-shrink: 0
+    .el-button
+      width: 32px
+      padding: 0
 .autocomplete-value
   margin-left: 2em
   float: right
@@ -1723,17 +1843,20 @@ body
 .pagination-bar
   margin: 4px 0
   justify-content: center
+  flex-shrink: 0
   .el-pagination--small .el-select
     width: 110px
     .el-select__wrapper
       text-align: center
 
 .book-card-area
-  overflow-x: auto
+  flex: 1
+  min-height: 0
+  overflow: auto
   justify-content: center
   margin-top: 8px
   .book-card-list
-    height: calc(100vh - 96px)
+    height: 100%
     display: flex
     flex-wrap: wrap
     justify-content: center
@@ -1750,10 +1873,31 @@ body
   justify-content: center
   align-content: flex-start
 
+.book-card-list.book-row-list,
+.collection-book-card-list.book-row-list
+  display: block
+  text-align: left
+.book-card-frame.book-list-frame
+  display: block
+  width: 100%
+  min-width: 0
+  height: 96px
+  min-height: 96px
+  box-sizing: border-box
+  &:focus-visible
+    outline: 2px solid var(--el-color-primary)
+    outline-offset: -2px
+
 .open-collection-title
   margin: 0 4px
 .collection-edit-button
   margin-bottom: 2px
+
+@media (max-width: 600px)
+  .pagination-bar .el-pagination
+    flex-wrap: wrap
+    justify-content: center
+    gap: 4px
 
 
 </style>

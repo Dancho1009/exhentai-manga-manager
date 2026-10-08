@@ -1,0 +1,269 @@
+const assert = require('node:assert/strict')
+const path = require('node:path')
+
+module.exports = async ({ chromium, executablePath, baseUrl, screenshotDir }) => {
+  const browser = await chromium.launch({ headless: true, executablePath })
+  const context = await browser.newContext({ viewport: { width: 1320, height: 860 } })
+  const page = await context.newPage()
+  page.setDefaultTimeout(15000)
+  const errors = []
+  const screenshots = []
+  page.on('pageerror', error => errors.push(error.message))
+  const installFixture = () => {
+    const listeners = {}
+    const setting = {
+      language: 'zh-CN', theme: 'dark', library: 'C:/fixture', pageSize: 12,
+      displayTitle: 'japaneseTitle', directEnter: '', disableRandomTag: true,
+      showTranslation: false, showComment: false, autoCheckUpdates: false,
+      loadOnStart: false, customOptions: '', imageExplorer: 'fixture-reader'
+    }
+    const books = Array.from({ length: 52 }, (_, index) => ({
+      id: `book-${index + 1}`, hash: `hash-${index + 1}`, filepath: `C:/fixture/book-${index + 1}.zip`,
+      title: `Book ${index + 1}`, title_jpn: index === 0 ? '[Fixture] A very long title with a continuous word ' + 'LongTitle'.repeat(28) : `Fixture title ${index + 1}`,
+      coverPath: index === 2 ? '/missing-fixture-cover.png' : index === 3 ? '' : '/icon.png',
+      type: 'zip', status: index === 1 ? 'non-tag' : index === 2 ? 'tag-failed' : 'tagged', tags: { artist: ['fixture'] }, category: 'Non-H',
+      pageCount: 24, filecount: index === 0 ? 30 : index === 1 ? 27 : 24, rating: 3.5, readCount: 0, mark: index === 0,
+      hiddenBook: index === 24, date: '2026-10-08', mtime: '2026-10-08',
+      url: 'https://example.com/fixture', filesize: 12345
+    }))
+    window.fixtureCalls = []
+    window.fixtureEmit = (channel, value) => (listeners[channel] || []).forEach(fn => fn({}, value))
+    window.ipcRenderer = {
+      on: (channel, fn) => { (listeners[channel] ||= []).push(fn) },
+      removeAllListeners: channel => { delete listeners[channel] },
+      sendSync: () => '/',
+      invoke: async (channel, ...args) => {
+        window.fixtureCalls.push({ channel, args })
+        if (channel === 'load-setting') return structuredClone(setting)
+        if (channel === 'load-book-list') return structuredClone(books)
+        if (channel === 'load-collection-list') return [{ id: 'collection-1', title: 'Fixture collection', list: ['hash-27', 'hash-28'] }]
+        if (channel === 'get-folder-tree') return []
+        if (channel === 'get-locale') return 'zh-CN'
+        if (channel === 'get-ehviewer-data') return null
+        return null
+      }
+    }
+    window.electronFunction = { 'get-zoom-level': () => 0, 'set-zoom-level': () => {}, 'insert-css': () => {} }
+  }
+  await context.addInitScript(installFixture)
+  const app = async (fn, arg) => page.evaluate(({ fn, arg }) => {
+    const vm = document.querySelector('#app').__vue_app__._instance.proxy
+    return new Function('vm', 'arg', `return (${fn})(vm, arg)`)(vm, arg)
+  }, { fn: fn.toString(), arg })
+  const home = page.locator('.book-card-list')
+  const preview = page.locator('.book-cover-preview:visible')
+  const switchTo = async mode => {
+    await page.getByRole('button', { name: mode === 'list' ? '行列表' : '封面卡片', exact: true }).click()
+    await page.waitForFunction(mode => document.querySelector('#app').__vue_app__._instance.proxy.bookListViewMode === mode, mode)
+    await home.locator(mode === 'list' ? '.book-list-row' : '.book-card').first().waitFor()
+  }
+  const closeDetail = async () => {
+    await page.locator('.dialog-detail:visible .el-dialog__headerbtn').click()
+    await page.locator('.dialog-detail:visible').waitFor({ state: 'hidden' })
+  }
+  const hoverCover = async cover => {
+    await page.mouse.move(2, 2)
+    await cover.hover()
+    await preview.waitFor()
+    await page.waitForFunction(() => {
+      const popper = document.querySelector('.book-cover-preview')
+      return popper && Number(getComputedStyle(popper).opacity) === 1
+    })
+  }
+  const row = id => home.locator(`.book-card-frame[data-book-id="${id}"]`)
+  const saveScreenshot = async name => {
+    const screenshot = path.join(screenshotDir, `${name}.png`)
+    await page.screenshot({ path: screenshot })
+    screenshots.push(screenshot)
+  }
+  try {
+    await page.goto(baseUrl)
+    await home.locator('.book-card').first().waitFor()
+    assert.equal(await app(vm => vm.bookListViewMode), 'card')
+    const initialIds = await home.locator('.book-card-frame').evaluateAll(nodes => nodes.map(node => node.dataset.bookId))
+    await switchTo('list')
+    await home.locator('.book-list-row').first().waitFor()
+    assert.deepEqual(await home.locator('.book-card-frame').evaluateAll(nodes => nodes.map(node => node.dataset.bookId)), initialIds)
+    assert.equal(await home.locator('.book-card').count(), 0)
+    const first = home.locator('.book-list-row').first()
+    assert.equal((await first.boundingBox()).height, 96)
+    assert.equal((await first.locator('.book-list-cover-button').boundingBox()).width, 56)
+    assert.equal((await first.locator('.book-list-cover-button').boundingBox()).height, 80)
+    assert.equal(await home.locator('.el-rate, .book-card-mark, .book-card-language, .book-collect-tag').count(), 0, 'Only the requested information is added')
+    await hoverCover(first.locator('.book-list-cover-button'))
+    assert.equal(await preview.locator('img').getAttribute('src'), '/icon.png')
+    await saveScreenshot('book-list-desktop-dark')
+    const bounds = await preview.boundingBox()
+    assert.ok(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 1320 && bounds.y + bounds.height <= 860, JSON.stringify(bounds))
+    await page.mouse.move(1200, 50)
+    await preview.waitFor({ state: 'hidden' })
+    await saveScreenshot('book-list-information-desktop-dark')
+    await first.locator('.book-list-cover-button').hover()
+    await page.mouse.move(1200, 50)
+    await page.waitForTimeout(250)
+    assert.equal(await preview.count(), 0, 'Quick hover must not leave a delayed preview')
+    await hoverCover(first.locator('.book-list-cover-button'))
+    await page.mouse.wheel(0, 250)
+    await preview.waitFor({ state: 'hidden' })
+    await app(vm => vm.scrollMainPageTop())
+    await row('book-1').locator('.book-list-select').click()
+    assert.deepEqual(await app(vm => vm.selectedHomeBookIds), ['book-1'])
+    await row('book-2').locator('.book-list-cover-button').click({ modifiers: ['Control'] })
+    assert.equal(await app(vm => vm.selectedHomeBookIds.length), 2)
+    await row('book-4').locator('.book-list-name').click({ modifiers: ['Shift'] })
+    assert.equal(await app(vm => vm.selectedHomeBookIds.length), 4)
+    await page.locator('.el-pagination .btn-next').click()
+    await row('book-13').locator('.book-list-row').waitFor()
+    await row('book-13').locator('.book-list-select').click()
+    assert.equal(await app(vm => vm.selectedHomeBookIds.length), 5)
+    const page2Ids = await home.locator('.book-card-frame').evaluateAll(nodes => nodes.map(node => node.dataset.bookId))
+    await switchTo('card')
+    assert.equal(await app(vm => vm.currentPage), 2)
+    assert.equal(await app(vm => vm.selectedHomeBookIds.length), 5)
+    assert.deepEqual(await home.locator('.book-card-frame').evaluateAll(nodes => nodes.map(node => node.dataset.bookId)), page2Ids)
+    await row('book-13').locator('.book-card-selected').waitFor()
+    await row('book-13').focus()
+    const columns = await home.evaluate(node => Math.floor(node.clientWidth / 234))
+    await page.keyboard.press('ArrowDown')
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.bookId), `book-${13 + columns}`)
+    await switchTo('list')
+    await page.locator('.el-pagination .btn-prev').click()
+    await row('book-1').locator('.book-list-row-selected').waitFor()
+    await row('book-1').focus()
+    await page.keyboard.press('ArrowDown')
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.bookId), 'book-2')
+    await page.keyboard.press('ArrowUp')
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.bookId), 'book-1')
+    await page.keyboard.press('Enter')
+    await page.locator('.dialog-detail:visible').waitFor()
+    assert.equal(await app(vm => vm.bookDetail.id), 'book-1')
+    assert.equal(await preview.count(), 0)
+    await closeDetail()
+    await app(vm => { vm.setting.directEnter = 'externalViewer'; vm.clearHomeBookSelection() })
+    await row('book-2').locator('.book-list-name').click()
+    await page.locator('.dialog-detail:visible').waitFor()
+    assert.equal(await app(vm => vm.bookDetail.id), 'book-2', 'Title click always opens details')
+    await closeDetail()
+    await row('book-2').locator('.book-list-cover-button').click()
+    await page.waitForFunction(() => window.fixtureCalls.some(call => call.channel === 'open-local-book' && call.args[0] === 'C:/fixture/book-2.zip'))
+    await app(vm => { vm.setting.directEnter = 'internalViewer' })
+    await row('book-2').locator('.book-list-cover-button').click()
+    await page.locator('.viewer-drawer:visible').waitFor()
+    await page.waitForFunction(() => window.fixtureCalls.some(call => call.channel === 'load-manga-image-list' && call.args[0].id === 'book-2'))
+    await app(vm => { vm.$refs.InternalViewerRef.drawerVisibleViewer = false; vm.setting.directEnter = '' })
+    await page.locator('.viewer-drawer:visible').waitFor({ state: 'hidden' })
+    await page.waitForTimeout(600)
+    await hoverCover(row('book-2').locator('.book-list-cover-button'))
+    await row('book-2').locator('.book-list-cover-button').click({ button: 'right' })
+    await preview.waitFor({ state: 'hidden' })
+    await page.getByText('在独立窗口打开详情', { exact: true }).click()
+    await page.waitForFunction(() => window.fixtureCalls.some(call => call.channel === 'book-detail:open-window' && call.args[0].bookId === 'book-2'))
+    assert.equal(await row('book-3').locator('.book-list-cover-placeholder').count(), 1)
+    assert.equal(await row('book-4').locator('.book-list-cover-placeholder').count(), 1)
+    await row('book-3').locator('.book-list-cover-button').hover()
+    await page.waitForTimeout(250)
+    assert.equal(await preview.count(), 0)
+    await app(vm => { vm.setting.displayTitle = 'filename' })
+    assert.equal(await row('book-1').locator('.book-list-name').innerText(), 'book-1')
+    await app(vm => { vm.setting.displayTitle = 'japaneseTitle'; vm.sortValue = 'collection'; vm.handleSortChange('collection') })
+    const collection = home.locator('[data-book-id="collection-1"]')
+    await collection.locator('.book-list-row').waitFor()
+    assert.equal(await collection.locator('.book-list-select').count(), 0)
+    assert.equal(await collection.locator('.book-list-read-actions, .book-list-meta').count(), 0, 'Collection summaries do not provide per-book actions')
+    await collection.locator('.book-list-name').click()
+    const drawer = page.locator('.collection-drawer:visible')
+    await drawer.locator('.book-list-row').first().waitFor()
+    assert.equal(await drawer.locator('.book-list-row').count(), 2)
+    assert.equal(await drawer.locator('.book-list-select').count(), 0)
+    await drawer.locator('.book-card-frame').first().focus()
+    await page.keyboard.press('ArrowDown')
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.bookId), 'book-28')
+    await hoverCover(drawer.locator('.book-list-cover-button').last())
+    await drawer.locator('.el-drawer__close-btn').click()
+    await preview.waitFor({ state: 'hidden' })
+    await app(vm => { vm.sortValue = 'mark'; vm.handleSortChange('mark'); vm.searchString = 'Fixture' })
+    const filterIds = await home.locator('.book-card-frame').evaluateAll(nodes => nodes.map(node => node.dataset.bookId))
+    await switchTo('card')
+    await switchTo('list')
+    assert.equal(await app(vm => vm.sortValue), 'mark')
+    assert.equal(await app(vm => vm.searchString), 'Fixture')
+    assert.deepEqual(await home.locator('.book-card-frame').evaluateAll(nodes => nodes.map(node => node.dataset.bookId)), filterIds)
+    await app(vm => { vm.sortValue = ''; vm.searchString = ''; vm.handleSortChange('', vm.bookList) })
+    const windowCount = await app(vm => vm.visibleChunkDisplayBookList.length)
+    assert.equal(windowCount, 12)
+    await page.waitForTimeout(600)
+    const saveCount = await page.evaluate(() => window.fixtureCalls.filter(call => call.channel === 'save-setting').length)
+    await page.evaluate(() => window.fixtureEmit('audit:lock-state', { auditRunning: true }))
+    await switchTo('card')
+    await switchTo('list')
+    assert.equal(await app(vm => vm.auditLocked), true)
+    assert.equal(await page.evaluate(() => window.fixtureCalls.filter(call => call.channel === 'save-setting').length), saveCount, 'View switch must not save settings during an audit')
+    assert.equal(await page.locator('button[title="手动扫描"]').isDisabled(), true)
+    assert.equal(await page.evaluate(() => window.fixtureCalls.filter(call => call.channel === 'save-book' || call.channel.startsWith('ehentai:')).length), 0)
+    for (const viewport of [{ width: 1800, height: 900 }, { width: 820, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 844 }]) {
+      await page.setViewportSize(viewport)
+      await app(vm => vm.scrollMainPageTop())
+      await hoverCover(row('book-1').locator('.book-list-cover-button'))
+      const popperBounds = await preview.boundingBox()
+      assert.ok(popperBounds.x >= 0 && popperBounds.y >= 0 && popperBounds.x + popperBounds.width <= viewport.width && popperBounds.y + popperBounds.height <= viewport.height, `Preview overflow: ${JSON.stringify(popperBounds)}`)
+      const titleBounds = await row('book-1').locator('.book-list-name').boundingBox()
+      assert.ok(titleBounds.x + titleBounds.width <= viewport.width && titleBounds.height <= 44, 'Title must fit and clamp to two lines')
+      const rowBounds = await row('book-1').locator('.book-list-row').boundingBox()
+      assert.equal(rowBounds.height, 96)
+      const paginationBounds = await page.locator('.pagination-bar').boundingBox()
+      assert.ok(paginationBounds.y + paginationBounds.height <= viewport.height, 'Pagination must remain inside the window')
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'No horizontal overflow')
+      const toolbarOverlaps = await page.locator('.book-search-bar button').evaluateAll(buttons => {
+        const bounds = buttons.map(button => button.getBoundingClientRect()).filter(rect => rect.width && rect.height)
+        return bounds.some((rect, index) => bounds.slice(index + 1).some(other => rect.left < other.right - 1 && rect.right > other.left + 1 && rect.top < other.bottom - 1 && rect.bottom > other.top + 1))
+      })
+      assert.equal(toolbarOverlaps, false, 'Toolbar buttons must not overlap')
+      await saveScreenshot(`book-list-dark-${viewport.width}`)
+      await page.mouse.move(viewport.width - 2, 2)
+      await preview.waitFor({ state: 'hidden' })
+      if (viewport.width === 390) await saveScreenshot('book-list-information-dark-390')
+    }
+    await page.setViewportSize({ width: 1320, height: 860 })
+    await page.evaluate(() => document.documentElement.className = 'light')
+    await hoverCover(row('book-1').locator('.book-list-cover-button'))
+    await saveScreenshot('book-list-desktop-light')
+    await page.mouse.move(1200, 50)
+    await preview.waitFor({ state: 'hidden' })
+    await saveScreenshot('book-list-information-desktop-light')
+    await switchTo('card')
+    await preview.waitFor({ state: 'hidden' })
+    await saveScreenshot('book-cards-desktop-light')
+    await switchTo('list')
+    await page.reload()
+    await home.locator('.book-list-row').first().waitFor()
+    assert.equal(await app(vm => vm.bookListViewMode), 'list')
+    const restartContext = await browser.newContext({ storageState: await context.storageState() })
+    await restartContext.addInitScript(installFixture)
+    const restartedPage = await restartContext.newPage()
+    await restartedPage.goto(baseUrl)
+    await restartedPage.locator('.book-list-row').first().waitFor()
+    assert.equal(await restartedPage.getByRole('button', { name: '行列表', exact: true }).getAttribute('aria-pressed'), 'true')
+    await restartContext.close()
+    await app(vm => { vm.setting.pageSize = 5000; vm.handleCurrentPageChange(1) })
+    await page.waitForTimeout(100)
+    const lazyCounts = { frames: await home.locator('.book-card-frame').count(), rendered: await home.locator('.book-list-row').count() }
+    assert.ok(lazyCounts.frames > lazyCounts.rendered && lazyCounts.rendered > 0, `Rows must retain lazy loading: ${JSON.stringify(lazyCounts)}`)
+    await page.evaluate(() => localStorage.setItem('bookListViewMode', 'invalid-mode'))
+    await page.reload()
+    await home.locator('.book-card').first().waitFor()
+    assert.equal(await app(vm => vm.bookListViewMode), 'card')
+    await switchTo('list')
+    await app(vm => { vm.displayBookList = []; vm.chunkList() })
+    await page.locator('.book-search-bar').click({ position: { x: 1, y: 1 } })
+    await page.keyboard.press('ArrowDown')
+    await page.keyboard.press('Enter')
+    assert.equal(await home.locator('.book-card-frame').count(), 0)
+    assert.deepEqual(errors, [])
+    return { result: 'Card/list layouts, keyboard navigation, cover previews, multi-selection, pagination, collections, audit lock, persistence and empty results verified', screenshots, errors }
+  } catch (error) {
+    await page.screenshot({ path: path.join(screenshotDir, 'book-list-test-failure.png') })
+    throw error
+  } finally {
+    await browser.close()
+  }
+}
