@@ -11,7 +11,7 @@ const { sanitizeEhviewerTitle, prepareEhviewerRepair } = require('./ehviewer_rep
 const { invalidateAuditCacheEntries } = require('./cache.js')
 const { mergeEffectiveBook } = require('../book_detail.js')
 const { getAnomalyAction } = require('./review_validator.js')
-const { metadataFingerprint } = require('./utils.js')
+const { metadataFingerprint, isAutomaticSourceReplacementBlocked } = require('./utils.js')
 
 const selectModelFields = (model, value) => Object.fromEntries(
   Object.keys(model.rawAttributes || {})
@@ -47,6 +47,10 @@ const createStaleUrlError = ({ action, book, metadata, effectiveUrl }) => {
 }
 
 const REPAIR_ERROR_MESSAGES = {
+  AUTOMATIC_CROSS_SOURCE_REPAIR: '旧审批试图自动覆盖非 EH/EX 来源，请重新检查或人工选择来源',
+  NHENTAI_API_KEY_MISSING: '请先在设置中填写 nHentai API Key，未修改元数据',
+  NHENTAI_METADATA_UNAVAILABLE: 'nHentai 元数据获取失败，未修改 URL 或元数据',
+  NHENTAI_METADATA_INVALID: 'nHentai 返回的元数据与所选来源不一致，未修改数据库',
   CURRENT_GALLERY_IS_AVAILABLE_OR_UNCERTAIN: '当前 Gallery 已恢复可访问或状态不确定，原审批已失效',
   CURRENT_SITE_IS_AVAILABLE: '当前站点已恢复访问，不再需要切换域名',
   CURRENT_SITE_AVAILABILITY_UNCERTAIN: '当前站点只是网络错误或状态不确定，不能据此切换域名',
@@ -201,6 +205,7 @@ const executeApprovedAnomalies = async ({
             const approvedUrl = normalizeApprovalUrl(action.currentUrl)
             if (approvedUrl !== effectiveUrl) throw createStaleUrlError({ action, book, metadata, effectiveUrl })
           }
+          if (isAutomaticSourceReplacementBlocked(action)) throw new Error('AUTOMATIC_CROSS_SOURCE_REPAIR')
           if (action.type === 'repair-ehviewer') {
             const effectiveTitle = sanitizeEhviewerTitle(effectiveBook.title_jpn || effectiveBook.title)
             if (effectiveTitle !== action.expectedTitle) throw new Error(`APPROVAL_STALE_TITLE: ${action.bookId}`)

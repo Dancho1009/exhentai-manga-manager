@@ -1,9 +1,12 @@
-const { buildGalleryUrl, extractGalleryIdentity } = require('../ehentai.js')
+const { buildGalleryUrl } = require('../ehentai.js')
+const { getNhentaiMetadata } = require('../nhentai.js')
+const { getMetadataSourceProvider, extractMetadataSourceIdentity, isSameMetadataSource } = require('./utils.js')
 
 const MANUAL_SOURCE_ANOMALY_TYPES = new Set([
   'unverified-page-mismatch',
   'ehviewer-url-conflict-online',
-  'filename-url-id-conflict'
+  'filename-url-id-conflict',
+  'metadata-incomplete'
 ])
 
 const normalizeSource = value => value === 'ehviewer' ? 'ehviewer' : value === 'current' ? 'current' : null
@@ -24,7 +27,9 @@ const buildManualSourceAction = ({ anomaly, source, actual } = {}) => {
   const currentUrl = String(anomaly.evidence?.currentUrl || anomaly.evidence?.url || '').trim() || null
   const ehviewerUrl = getEhviewerUrl(anomaly)
   const newUrl = normalizedSource === 'current' ? currentUrl : ehviewerUrl
-  if (!newUrl || !extractGalleryIdentity(newUrl)) throw new Error('MANUAL_SOURCE_URL_MISSING')
+  if (!newUrl) throw new Error('MANUAL_SOURCE_URL_MISSING')
+  if (!getMetadataSourceProvider(newUrl)) throw new Error('MANUAL_SOURCE_PROVIDER_UNSUPPORTED')
+  if (!extractMetadataSourceIdentity(newUrl)) throw new Error('MANUAL_SOURCE_URL_INVALID')
   if (!actual?.filepath || !Number.isFinite(Number(actual.bundleSize)) || !actual.mtimeMs) {
     throw new Error('MANUAL_SOURCE_FILE_SNAPSHOT_MISSING')
   }
@@ -49,9 +54,30 @@ const getManualSourceCandidateUrls = anomaly => ({
   ehviewer: getEhviewerUrl(anomaly)
 })
 
+const verifyNhentaiSourceAction = async ({ action, setting, storePath, fetchMetadata = getNhentaiMetadata }) => {
+  const identity = extractMetadataSourceIdentity(action.newUrl)
+  if (action.repairKind !== 'manual-source-selection' || identity?.provider !== 'nhentai') {
+    return { valid: false, error: 'INVALID_REPAIR_CANDIDATE_URL' }
+  }
+  try {
+    const metadata = await fetchMetadata({ id: identity.id, url: action.newUrl, setting, storePath })
+    if (!metadata?.title || !isSameMetadataSource(identity, extractMetadataSourceIdentity(metadata.url))) {
+      return { valid: false, error: 'NHENTAI_METADATA_INVALID' }
+    }
+    return { valid: true, newUrl: metadata.url, metadata }
+  } catch (error) {
+    return {
+      valid: false,
+      error: String(error.message || '').includes('NHENTAI_API_KEY_MISSING') ? 'NHENTAI_API_KEY_MISSING' : 'NHENTAI_METADATA_UNAVAILABLE',
+      detail: { metadataError: error.message || String(error) }
+    }
+  }
+}
+
 module.exports = {
   MANUAL_SOURCE_ANOMALY_TYPES,
   normalizeSource,
   getManualSourceCandidateUrls,
-  buildManualSourceAction
+  buildManualSourceAction,
+  verifyNhentaiSourceAction
 }

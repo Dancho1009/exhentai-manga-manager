@@ -330,6 +330,42 @@ test('anomaly worker reports internal image sequence gaps without changing page 
   assert.equal(report.summary.onlineIdentities, 0)
 })
 
+test('non-EH metadata sources do not enter EH identity conflicts while local checks remain active', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-provider-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const books = []
+  const before = new Map()
+  for (const [id, names, url, filecount, tags] of [
+    ['healthy', ['001.webp', '002.webp', '003.webp'], 'https://nhentai.net/g/599555/', 3, { artist: ['author'] }],
+    ['local-gap', ['001.webp', '003.webp', '004.webp'], 'https://nhentai.net/g/123456/', 20, {}],
+    ['other-provider', ['001.webp'], 'https://example.com/book/123456', 1, { artist: ['author'] }]
+  ]) {
+    const filepath = path.join(library, `3555871-${id}.zip`)
+    const buffer = makeSequenceArchiveBuffer({ names, gid: '3981890', token: '533feb3a94' })
+    before.set(filepath, buffer)
+    await fs.promises.writeFile(filepath, buffer)
+    const stat = await fs.promises.stat(filepath)
+    books.push({ id, title: id, hash: id, filepath, pageCount: names.length, bundleSize: stat.size, mtime: stat.mtime.toISOString(), filecount, tags, url })
+  }
+  const databases = await createDatabases(root, books)
+  for (const onlinePolicy of ['conflicts', 'ehviewer', 'urls']) {
+    const report = await writeWorkerReport({ workerFilename: 'anomaly_worker.js', root, jobId: onlinePolicy,
+      options: { library, auditStorePath, onlinePolicy, forceOnline: true, ...databases } })
+    assert.equal(report.summary.onlineIdentities, 0)
+    assert.equal(report.anomalies.some(item => ['ehviewer-url-conflict', 'ehviewer-url-conflict-online', 'ehviewer-source-recoverable', 'gallery-domain-fallback'].includes(item.type)), false)
+    assert.equal(report.anomalies.some(item => item.bookId === 'healthy'), false)
+    const incomplete = report.anomalies.find(item => item.bookId === 'local-gap' && item.type === 'metadata-incomplete')
+    assert.equal(incomplete.evidence.currentUrl, books[1].url)
+    assert.equal(incomplete.actionPolicy, 'manual')
+    assert.ok(report.anomalies.some(item => item.bookId === 'local-gap' && item.type === 'archive-image-sequence-gap'))
+    assert.ok(report.anomalies.some(item => item.bookId === 'local-gap' && item.type === 'unverified-page-mismatch'))
+  }
+  for (const [filepath, bytes] of before) assert.deepEqual(await fs.promises.readFile(filepath), bytes)
+})
+
 test('anomaly worker restores pending page recovery from the audit store path', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-pending-recovery-'))
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }))

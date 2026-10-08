@@ -122,7 +122,7 @@ const analyzeEntityAnomalies = snapshot => {
     if (!effective.title || !effective.category || !effective.filecount || tagCount === 0) {
       anomalies.push(makeAnomaly('metadata-incomplete', 'low', {
         bookId: raw.id, filepath: raw.filepath, reason: '存在缺失的常用元数据字段',
-        evidence: { title: Boolean(effective.title), category: Boolean(effective.category), filecount: effective.filecount, tagCount }
+        evidence: { title: Boolean(effective.title), category: Boolean(effective.category), filecount: effective.filecount, tagCount, currentUrl: effective.url || null }
       }))
     }
   }

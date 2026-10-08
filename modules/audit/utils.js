@@ -61,6 +61,33 @@ const extractGalleryIdentity = value => {
   return match ? { gid: match[1], token: match[2] || null } : null
 }
 
+const getMetadataSourceProvider = value => {
+  try {
+    const url = new URL(String(value || '').trim())
+    if (!['http:', 'https:'].includes(url.protocol)) return null
+    if (['e-hentai.org', 'exhentai.org', 'ehentai.org'].includes(url.hostname.toLowerCase())) return 'ehentai'
+    if (['nhentai.net', 'www.nhentai.net'].includes(url.hostname.toLowerCase())) return 'nhentai'
+  } catch {}
+  return null
+}
+
+const extractMetadataSourceIdentity = value => {
+  const provider = getMetadataSourceProvider(value)
+  if (!provider) return null
+  const pathname = new URL(String(value).trim()).pathname
+  const match = provider === 'ehentai'
+    ? pathname.match(/^\/g\/([1-9]\d*)\/([0-9a-z]+)\/?$/i)
+    : pathname.match(/^\/g\/([1-9]\d*)\/?$/)
+  return match ? { provider, id: match[1], token: match[2]?.toLowerCase() || null } : null
+}
+
+const isSameMetadataSource = (left, right) => Boolean(left && right &&
+  left.provider === right.provider && left.id === right.id && left.token === right.token)
+
+const isAutomaticSourceReplacementBlocked = action => Boolean(action?.type === 'repair-url' &&
+  action.repairKind !== 'manual-source-selection' && String(action.currentUrl || '').trim() &&
+  extractMetadataSourceIdentity(action.currentUrl)?.provider !== 'ehentai')
+
 const extractFilenameIdentity = value => {
   const match = path.basename(String(value || '')).match(/^(?:(nhentai)[-_\s]*)?(\d{4,})\b/i)
   if (!match) return null
@@ -98,6 +125,10 @@ module.exports = {
   stableId,
   hashFile,
   extractGalleryIdentity,
+  getMetadataSourceProvider,
+  extractMetadataSourceIdentity,
+  isSameMetadataSource,
+  isAutomaticSourceReplacementBlocked,
   extractFilenameIdentity,
   extractFilenameId,
   parseTags,

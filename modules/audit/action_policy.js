@@ -1,3 +1,5 @@
+const { extractMetadataSourceIdentity, isAutomaticSourceReplacementBlocked } = require('./utils.js')
+
 const BATCH_SAFE_REPAIR_KINDS = new Set([
   'local-scan-sync',
   'same-identity-domain-switch',
@@ -29,7 +31,8 @@ const classifyAnomalyAction = anomaly => {
   if (!action) {
     const recommendedAction = String(anomaly?.recommendedAction || '')
     return {
-      actionPolicy: MANUAL_RECOMMENDATIONS.has(recommendedAction) || (!REPORT_ONLY_RECOMMENDATIONS.has(recommendedAction) && MANUAL_ANOMALY_TYPES.has(anomaly?.type))
+      actionPolicy: MANUAL_RECOMMENDATIONS.has(recommendedAction) || (!REPORT_ONLY_RECOMMENDATIONS.has(recommendedAction) && MANUAL_ANOMALY_TYPES.has(anomaly?.type)) ||
+        (anomaly?.type === 'metadata-incomplete' && extractMetadataSourceIdentity(anomaly.evidence?.currentUrl))
         ? 'manual'
         : 'report-only',
       actionRisk: 'none',
@@ -38,6 +41,9 @@ const classifyAnomalyAction = anomaly => {
   }
 
   const repairKind = String(action.repairKind || '')
+  if (isAutomaticSourceReplacementBlocked(action)) {
+    return { actionPolicy: 'manual', actionRisk: 'medium', actionReason: '跨来源切换必须由用户选择来源，不能自动覆盖当前元数据' }
+  }
   if (MANUAL_REPAIR_KINDS.has(repairKind)) {
     return {
       actionPolicy: 'manual',

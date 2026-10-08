@@ -45,7 +45,8 @@ const { AuditWorkspaceManager } = require('./modules/audit/job_manager.js')
 const { executeApprovedActions } = require('./modules/audit/action_executor.js')
 const { buildExecutionPreview } = require('./modules/audit/review_validator.js')
 const { isConclusiveSiteUnavailable, getGalleryVersionRelation } = require('./modules/audit/online_decision.js')
-const { buildManualSourceAction } = require('./modules/audit/manual_source_action.js')
+const { buildManualSourceAction, verifyNhentaiSourceAction } = require('./modules/audit/manual_source_action.js')
+const { extractMetadataSourceIdentity } = require('./modules/audit/utils.js')
 const { getBookFileSnapshot } = require('./modules/audit/ehviewer_repair.js')
 const { PageRecoveryManager } = require('./modules/audit/page_recovery.js')
 const { invalidateAuditCacheEntries } = require('./modules/audit/cache.js')
@@ -2269,6 +2270,9 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
               detail: { inspectionError: error.message }
             }
           }
+        }
+        if (action.type === 'repair-url' && extractMetadataSourceIdentity(action.newUrl)?.provider === 'nhentai') {
+          return await verifyNhentaiSourceAction({ action, setting, storePath: STORE_PATH })
         }
         return await withEhentaiAvailabilityCache(async cache => {
         if (action.type === 'repair-ehviewer') {

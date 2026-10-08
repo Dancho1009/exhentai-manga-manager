@@ -1,5 +1,5 @@
 const path = require('path')
-const { extractGalleryIdentity, normalizePath } = require('./utils.js')
+const { extractMetadataSourceIdentity, isSameMetadataSource, normalizePath } = require('./utils.js')
 const { MANUAL_SOURCE_ANOMALY_TYPES } = require('./manual_source_action.js')
 const { getBatchSafeActionIds } = require('./action_policy.js')
 
@@ -14,9 +14,9 @@ const ensureMatchingReport = (report, review, taskType) => {
 
 const getRepairKind = anomaly => {
   if (anomaly?.action?.repairKind) return anomaly.action.repairKind
-  const current = extractGalleryIdentity(anomaly?.action?.currentUrl)
-  const candidate = extractGalleryIdentity(anomaly?.action?.newUrl)
-  return current && candidate && current.gid === candidate.gid && current.token === candidate.token
+  const current = extractMetadataSourceIdentity(anomaly?.action?.currentUrl)
+  const candidate = extractMetadataSourceIdentity(anomaly?.action?.newUrl)
+  return isSameMetadataSource(current, candidate)
     ? 'same-identity-domain-switch'
     : 'identity-replacement'
 }
@@ -39,12 +39,12 @@ const normalizeManualActions = (report, review = {}) => {
       throw new Error(`INVALID_MANUAL_SOURCE_ACTION: ${id}`)
     }
     const expectedIdentity = rawAction.source === 'current'
-      ? extractGalleryIdentity(anomaly.evidence?.currentUrl || anomaly.evidence?.url)
-      : extractGalleryIdentity(`https://exhentai.org/g/${anomaly.evidence?.ehviewer?.gid || ''}/${anomaly.evidence?.ehviewer?.token || ''}/`)
-    const actionIdentity = extractGalleryIdentity(rawAction.newUrl)
-    const actionCurrentIdentity = extractGalleryIdentity(rawAction.currentUrl)
-    if (!expectedIdentity || !actionIdentity || expectedIdentity.gid !== actionIdentity.gid || expectedIdentity.token !== actionIdentity.token ||
-      (rawAction.source === 'current' && (!actionCurrentIdentity || actionCurrentIdentity.gid !== expectedIdentity.gid || actionCurrentIdentity.token !== expectedIdentity.token))) {
+      ? extractMetadataSourceIdentity(anomaly.evidence?.currentUrl || anomaly.evidence?.url)
+      : extractMetadataSourceIdentity(`https://exhentai.org/g/${anomaly.evidence?.ehviewer?.gid || ''}/${anomaly.evidence?.ehviewer?.token || ''}/`)
+    const actionIdentity = extractMetadataSourceIdentity(rawAction.newUrl)
+    const actionCurrentIdentity = extractMetadataSourceIdentity(rawAction.currentUrl)
+    if (!isSameMetadataSource(expectedIdentity, actionIdentity) ||
+      (rawAction.source === 'current' && !isSameMetadataSource(actionCurrentIdentity, expectedIdentity))) {
       throw new Error(`INVALID_MANUAL_SOURCE_TARGET: ${id}`)
     }
     manualActions[id] = {

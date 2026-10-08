@@ -26,7 +26,7 @@ const {
 } = require('./online_decision.js')
 const { inspectBookHealth } = require('./archive_inspector.js')
 const { getEhviewerRepairSupport, normalizeEhviewerIdentity, sanitizeEhviewerTitle } = require('./ehviewer_repair.js')
-const { atomicWriteJson, normalizePath } = require('./utils.js')
+const { atomicWriteJson, normalizePath, getMetadataSourceProvider } = require('./utils.js')
 const { REPORT_SCHEMA_VERSION, getReportId } = require('./report_repository.js')
 const { createWorkerRuntime, mapWithConcurrency } = require('./worker_runtime.js')
 const { classifyAnomalies, getWorkflowSummary } = require('./action_policy.js')
@@ -386,6 +386,8 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       const sources = []
       for (const wrapped of wrappedBooks) {
         if (!wrapped.actual || (requestedIds.size && !requestedIds.has(String(wrapped.raw.id)))) continue
+        // A non-EH metadata source is not a missing or unavailable EH identity.
+        if (String(wrapped.effective.url || '').trim() && getMetadataSourceProvider(wrapped.effective.url) !== 'ehentai') continue
         const currentIdentity = extractEhentaiIdentity(wrapped.effective.url)
         const ehviewer = healthById.get(String(wrapped.raw.id))?.ehviewer || null
         const ehviewerIdentity = ehviewer?.status === 'parsed' && ehviewer.gid && ehviewer.token
