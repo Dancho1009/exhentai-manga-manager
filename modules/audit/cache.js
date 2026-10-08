@@ -62,6 +62,9 @@ class AuditCache {
         contentVersion = CASE WHEN inspection IS NOT NULL AND contentVersion IS NULL THEN ? ELSE contentVersion END,
         contentInspection = COALESCE(contentInspection, inspection),
         ehviewerVersion = CASE WHEN ehviewerInspection IS NOT NULL AND ehviewerVersion IS NULL THEN ? ELSE ehviewerVersion END
+      WHERE (archiveSha256 IS NOT NULL AND archiveHashVersion IS NULL)
+        OR (inspection IS NOT NULL AND (contentVersion IS NULL OR contentInspection IS NULL))
+        OR (ehviewerInspection IS NOT NULL AND ehviewerVersion IS NULL)
     `, [ARCHIVE_HASH_VERSION, CONTENT_INSPECTION_VERSION, EHVIEWER_INSPECTION_VERSION])
     return new AuditCache(db)
   }
@@ -118,6 +121,64 @@ class AuditCache {
       next.contentInspection ? JSON.stringify(next.contentInspection) : null
     ])
     return next
+  }
+
+  async getHealthMany(items) {
+    const healthByPath = new Map()
+    const targets = new Map(items.map(item => [normalizePath(item.raw.filepath), item.actual]))
+    const paths = [...targets.keys()]
+    for (let offset = 0; offset < paths.length; offset += 200) {
+      const batch = paths.slice(offset, offset + 200)
+      const rows = await this.db.all(`
+        SELECT filepath, size, mtimeMs, healthVersion, healthInspection
+        FROM cache_entries WHERE filepath IN (${batch.map(() => '?').join(',')})
+      `, batch)
+      for (const row of rows) {
+        const stat = targets.get(row.filepath)
+        if (row.size !== stat.size || Math.abs(row.mtimeMs - stat.mtimeMs) > 1 || row.healthVersion !== HEALTH_INSPECTION_VERSION) continue
+        const health = parseJson(row.healthInspection)
+        if (health) healthByPath.set(row.filepath, health)
+      }
+    }
+    return healthByPath
+  }
+
+  async updateHealthMany(items) {
+    if (!items.length) return
+    let statement
+    await this.db.exec('BEGIN IMMEDIATE;')
+    try {
+      // Keep dedupe evidence only when it still describes the same file snapshot.
+      const unchanged = 'cache_entries.size = excluded.size AND ABS(cache_entries.mtimeMs - excluded.mtimeMs) <= 1'
+      statement = await this.db.prepare(`
+        INSERT INTO cache_entries(filepath, size, mtimeMs, version, healthInspection, healthVersion, ehviewerInspection, ehviewerVersion)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(filepath) DO UPDATE SET
+          archiveSha256 = CASE WHEN ${unchanged} THEN cache_entries.archiveSha256 ELSE NULL END,
+          archiveHashVersion = CASE WHEN ${unchanged} THEN cache_entries.archiveHashVersion ELSE NULL END,
+          contentInspection = CASE WHEN ${unchanged} THEN cache_entries.contentInspection ELSE NULL END,
+          contentVersion = CASE WHEN ${unchanged} THEN cache_entries.contentVersion ELSE NULL END,
+          inspection = CASE WHEN ${unchanged} THEN cache_entries.inspection ELSE NULL END,
+          size = excluded.size, mtimeMs = excluded.mtimeMs, version = excluded.version,
+          healthInspection = excluded.healthInspection, healthVersion = excluded.healthVersion,
+          ehviewerInspection = excluded.ehviewerInspection, ehviewerVersion = excluded.ehviewerVersion
+      `)
+      for (const { book, stat, health } of items) {
+        await statement.run(
+          normalizePath(book.filepath), stat.size, stat.mtimeMs, CACHE_VERSION,
+          JSON.stringify(health), HEALTH_INSPECTION_VERSION,
+          health.ehviewer ? JSON.stringify(health.ehviewer) : null,
+          health.ehviewer ? EHVIEWER_INSPECTION_VERSION : null
+        )
+      }
+      await statement.finalize()
+      statement = null
+      await this.db.exec('COMMIT;')
+    } catch (error) {
+      if (statement) await statement.finalize().catch(() => {})
+      await this.db.exec('ROLLBACK;')
+      throw error
+    }
   }
 
   async close() {

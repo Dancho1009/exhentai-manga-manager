@@ -38,16 +38,24 @@ const createWorkerRuntime = () => {
 const mapWithConcurrency = async (items, limit, task, isCancelled = () => false) => {
   const results = new Array(items.length)
   let cursor = 0
+  let failed = false
   const workerCount = Math.min(Math.max(1, Number.parseInt(limit, 10) || 1), Math.max(items.length, 1))
   const workers = Array.from({ length: workerCount }, async () => {
-    while (!isCancelled()) {
+    while (!failed && !isCancelled()) {
       const index = cursor
       cursor += 1
       if (index >= items.length) return
-      results[index] = await task(items[index], index)
+      try {
+        results[index] = await task(items[index], index)
+      } catch (error) {
+        failed = true
+        throw error
+      }
     }
   })
-  await Promise.all(workers)
+  const settled = await Promise.allSettled(workers)
+  const rejected = settled.find(result => result.status === 'rejected')
+  if (rejected) throw rejected.reason
   if (isCancelled()) throw new Error('AUDIT_CANCELLED')
   return results
 }

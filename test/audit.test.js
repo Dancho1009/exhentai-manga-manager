@@ -11,6 +11,7 @@ const { LibraryTaskCoordinator } = require('../modules/audit/task_coordinator.js
 const { AuditWorkspaceManager } = require('../modules/audit/job_manager.js')
 const { AuditReportRepository } = require('../modules/audit/report_repository.js')
 const { AuditCache } = require('../modules/audit/cache.js')
+const { buildSnapshot } = require('../modules/audit/library_snapshot.js')
 const { EhentaiAvailabilityCache } = require('../modules/ehentai_availability_cache.js')
 const { atomicWriteJson, normalizePath, metadataFingerprint } = require('../modules/audit/utils.js')
 const { analyzeEntityAnomalies } = require('../modules/audit/anomaly_analyzer.js')
@@ -162,6 +163,96 @@ const writeWorkerReport = async ({ workerFilename, root, jobId, options, onMessa
   const completed = await runAuditWorker(workerFilename, { jobId, jobDir, options, onMessage })
   return JSON.parse(await fs.promises.readFile(completed.reportPath, 'utf8'))
 }
+
+test('anomaly performance reports cache hits and forced reads without changing results', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-performance-worker-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  await fs.promises.mkdir(library, { recursive: true })
+  const books = []
+  for (let index = 0; index < 35; index += 1) {
+    const filepath = path.join(library, `sample-${index}.zip`)
+    await fs.promises.writeFile(filepath, makeSequenceArchiveBuffer({ names: ['001.webp', '002.webp', '004.webp'] }))
+    const stat = await fs.promises.stat(filepath)
+    books.push({ id: `book-${index}`, hash: `hash-${index}`, title: 'sample', filepath,
+      bundleSize: stat.size, mtime: stat.mtime.toISOString(), pageCount: 3, filecount: 4 })
+  }
+  const options = { library, auditStorePath, onlinePolicy: 'none', ...await createDatabases(root, books) }
+  const reports = []
+  for (const [jobId, forceLocal] of [['cold', false], ['warm', false], ['forced', true]]) {
+    reports.push(await writeWorkerReport({ workerFilename: 'anomaly_worker.js', root, jobId, options: { ...options, forceLocal } }))
+  }
+  const [cold, warm, forced] = reports
+  assert.equal(cold.performance.local.inspected, 35)
+  assert.equal(cold.performance.local.cacheHits, 0)
+  assert.equal(warm.performance.local.inspected, 0)
+  assert.equal(warm.performance.local.cacheHits, 35)
+  assert.equal(warm.performance.local.readCalls, 0)
+  assert.equal(forced.performance.local.inspected, 35)
+  assert.equal(forced.performance.local.cacheHits, 0)
+  assert.ok(forced.performance.local.readCalls > 0)
+  assert.deepEqual(warm.anomalies, cold.anomalies)
+  assert.deepEqual(forced.anomalies, cold.anomalies)
+  for (const report of reports) {
+    for (const key of ['libraryEnumerationMs', 'databaseReadMs', 'fileStatsMs', 'snapshotMs', 'cacheReadMs', 'localHealthMs', 'cacheWriteMs', 'localAnalysisMs', 'recoveryReviewMs', 'onlineMs', 'totalMs']) {
+      assert.ok(Number.isFinite(report.performance.timings[key]), key)
+      assert.ok(report.performance.timings[key] >= 0, key)
+    }
+  }
+})
+
+test('cancelled anomaly inspection persists completed files in its last cache batch', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-cancel-cache-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const library = path.join(root, 'Library')
+  const auditStorePath = path.join(root, 'audit')
+  const jobDir = path.join(root, 'job')
+  await fs.promises.mkdir(library, { recursive: true })
+  await fs.promises.mkdir(auditStorePath)
+  await fs.promises.mkdir(jobDir)
+  const books = []
+  for (let index = 0; index < 64; index += 1) {
+    const filepath = path.join(library, `sample-${index}.zip`)
+    await fs.promises.writeFile(filepath, makeArchiveBuffer())
+    const stat = await fs.promises.stat(filepath)
+    books.push({ id: `book-${index}`, hash: `hash-${index}`, title: 'sample', filepath,
+      bundleSize: stat.size, mtime: stat.mtime.toISOString(), pageCount: 1, filecount: 1 })
+  }
+  const options = { library, auditStorePath, onlinePolicy: 'none', ...await createDatabases(root, books) }
+  let stopRequested = false
+  let cancelled = false
+  let workerError = null
+  await new Promise((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, '../modules/audit/anomaly_worker.js'), { workerData: { jobId: 'cancel', jobDir, options } })
+    worker.on('message', message => {
+      if (message.type === 'failed') workerError = new Error(message.error)
+      if (message.type === 'cancelled') cancelled = true
+      if (!stopRequested && message.phase === 'inspecting-book-health' && message.completed > 0) {
+        stopRequested = true
+        worker.postMessage({ type: 'cancel' })
+      }
+    })
+    worker.on('error', reject)
+    worker.on('exit', code => workerError ? reject(workerError) : code ? reject(new Error(`worker exit ${code}`)) : resolve())
+  })
+  assert.equal(cancelled, true)
+  const cache = await AuditCache.open(auditStorePath)
+  try {
+    const { count } = await cache.db.get('SELECT COUNT(*) AS count FROM cache_entries WHERE healthInspection IS NOT NULL')
+    assert.ok(count > 0 && count < 64, `saved ${count} inspections`)
+  } finally {
+    await cache.close()
+  }
+})
+
+test('snapshot stops on an inaccessible library instead of reporting missing files', async t => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-inaccessible-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const databases = await createDatabases(root, [])
+  await assert.rejects(buildSnapshot({ library: path.join(root, 'missing'), ...databases,
+    isCancelled: () => false, onProgress: () => {} }), { code: 'ENOENT' })
+})
 
 test('anomaly worker reports internal image sequence gaps without changing page count', async t => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'manga-audit-image-sequence-gap-'))

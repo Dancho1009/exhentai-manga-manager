@@ -1,5 +1,6 @@
 const path = require('path')
 const { workerData } = require('worker_threads')
+const { performance } = require('perf_hooks')
 const { buildSnapshot } = require('./library_snapshot.js')
 const { analyzeEntityAnomalies, makeAnomaly, buildLocalScanAction } = require('./anomaly_analyzer.js')
 const { AuditCache } = require('./cache.js')
@@ -30,8 +31,8 @@ const { REPORT_SCHEMA_VERSION, getReportId } = require('./report_repository.js')
 const { createWorkerRuntime, mapWithConcurrency } = require('./worker_runtime.js')
 const { classifyAnomalies, getWorkflowSummary } = require('./action_policy.js')
 const { listPendingRecoverySummaries, getRecoveryMissingPages } = require('./page_recovery.js')
-
 const LOCAL_INSPECTION_CONCURRENCY = 4
+const HEALTH_CACHE_BATCH_SIZE = 32
 const runtime = createWorkerRuntime()
 
 const toCurrentItem = wrapped => ({
@@ -63,6 +64,21 @@ const removeVersionChainNoise = (anomalies, bookId, relation) => {
 
 runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
   const { options, jobDir, jobId } = workerData
+  const started = performance.now()
+  const performanceData = {
+    timings: { cacheWriteMs: 0 },
+    local: { concurrency: LOCAL_INSPECTION_CONCURRENCY, cacheHits: 0, inspected: 0, failed: 0, readCalls: 0, readBytes: 0 }
+  }
+  const timingLabels = {
+    libraryEnumerationMs: '目录枚举', databaseReadMs: '数据库读取', fileStatsMs: '文件属性读取',
+    snapshotMs: '全库快照', cacheReadMs: '本地缓存读取', localHealthMs: '本地文件检查',
+    cacheWriteMs: '缓存提交', localAnalysisMs: '本地异常分析', recoveryReviewMs: '恢复记录核对',
+    siteAvailabilityMs: '双站可用性检查', gdataMs: '来源元数据读取', onlineMs: '在线核验'
+  }
+  const recordTiming = (key, elapsed) => {
+    performanceData.timings[key] = Math.round(elapsed)
+    log(`${timingLabels[key]}耗时 ${(elapsed / 1000).toFixed(2)} 秒`)
+  }
   let cache
   let availabilityCache
   try {
@@ -75,7 +91,8 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       metadataPath: options.metadataPath,
       excludeFile: options.excludeFile,
       onProgress: progress,
-      isCancelled
+      isCancelled,
+      onTiming: recordTiming
     })
     const anomalies = analyzeEntityAnomalies(snapshot)
     const actualByPath = new Map(snapshot.actualItems.map(item => [normalizePath(item.filepath), item]))
@@ -84,42 +101,80 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     let completed = 0
     const inspectTargets = wrappedBooks.filter(item => item.actual)
     const activeHealthItems = new Map()
-    const healthResults = await mapWithConcurrency(inspectTargets, LOCAL_INSPECTION_CONCURRENCY, async wrapped => {
-      assertNotCancelled()
-      const currentItem = toCurrentItem(wrapped)
-      const currentKey = currentItem.id || currentItem.filepath
-      activeHealthItems.set(currentKey, currentItem)
-      progress('inspecting-book-health', completed, inspectTargets.length, currentItem, [...activeHealthItems.values()])
-      let health
+    progress('inspecting-book-health', 0, inspectTargets.length, null)
+    const cacheReadStarted = performance.now()
+    const cachedHealth = options.forceLocal ? new Map() : await cache.getHealthMany(inspectTargets)
+    recordTiming('cacheReadMs', performance.now() - cacheReadStarted)
+    let pendingCacheEntries = []
+    let cacheWriteQueue = Promise.resolve()
+    const flushHealthCache = () => {
+      if (!pendingCacheEntries.length) return cacheWriteQueue
+      const entries = pendingCacheEntries
+      pendingCacheEntries = []
+      cacheWriteQueue = cacheWriteQueue.then(async () => {
+        const writeStarted = performance.now()
+        try {
+          await cache.updateHealthMany(entries)
+        } finally {
+          performanceData.timings.cacheWriteMs += performance.now() - writeStarted
+        }
+      })
+      return cacheWriteQueue
+    }
+    const healthStarted = performance.now()
+    let healthResults
+    try {
+      healthResults = await mapWithConcurrency(inspectTargets, LOCAL_INSPECTION_CONCURRENCY, async wrapped => {
+        assertNotCancelled()
+        const currentItem = toCurrentItem(wrapped)
+        const currentKey = currentItem.id || currentItem.filepath
+        activeHealthItems.set(currentKey, currentItem)
+        progress('inspecting-book-health', completed, inspectTargets.length, currentItem, [...activeHealthItems.values()])
+        try {
+          let health = cachedHealth.get(normalizePath(wrapped.raw.filepath))
+          if (health) {
+            performanceData.local.cacheHits += 1
+          } else {
+            try {
+              health = await inspectBookHealth(wrapped.raw, { sevenZipPath: options.sevenZipPath, ioStats: performanceData.local })
+            } catch (error) {
+              performanceData.local.failed += 1
+              return {
+                wrapped,
+                health: null,
+                anomaly: makeAnomaly('archive-inspection-failed', 'high', {
+                  bookId: wrapped.raw.id,
+                  filepath: wrapped.raw.filepath,
+                  reason: '作品内部结构检查失败',
+                  evidence: { error: error.message }
+                })
+              }
+            }
+            performanceData.local.inspected += 1
+            pendingCacheEntries.push({ book: wrapped.raw, stat: wrapped.actual, health })
+            if (pendingCacheEntries.length >= HEALTH_CACHE_BATCH_SIZE) await flushHealthCache()
+          }
+          return { wrapped, health, anomaly: null }
+        } finally {
+          completed += 1
+          activeHealthItems.delete(currentKey)
+          const remainingItems = [...activeHealthItems.values()]
+          progress('inspecting-book-health', completed, inspectTargets.length, remainingItems[0] || null, remainingItems)
+        }
+      }, isCancelled)
+    } finally {
+      // Finish in-flight files and persist the last partial batch before closing SQLite.
       try {
-        const cached = options.forceLocal ? null : await cache.get(wrapped.raw, wrapped.actual)
-        health = cached?.healthInspection || await inspectBookHealth(wrapped.raw, { sevenZipPath: options.sevenZipPath })
-        if (!cached?.healthInspection || options.forceLocal) {
-          await cache.update(wrapped.raw, wrapped.actual, {
-            healthInspection: health,
-            ehviewerInspection: health.ehviewer
-          })
-        }
-      } catch (error) {
-        return {
-          wrapped,
-          health: null,
-          anomaly: makeAnomaly('archive-inspection-failed', 'high', {
-            bookId: wrapped.raw.id,
-            filepath: wrapped.raw.filepath,
-            reason: '作品内部结构检查失败',
-            evidence: { error: error.message }
-          })
-        }
+        await flushHealthCache()
       } finally {
-        completed += 1
-        activeHealthItems.delete(currentKey)
-        const remainingItems = [...activeHealthItems.values()]
-        progress('inspecting-book-health', completed, inspectTargets.length, remainingItems[0] || null, remainingItems)
+        recordTiming('localHealthMs', performance.now() - healthStarted)
+        recordTiming('cacheWriteMs', performanceData.timings.cacheWriteMs)
+        const stats = performanceData.local
+        log(`本地检查统计：缓存命中 ${stats.cacheHits} 本，重新读取 ${stats.inspected} 本，失败 ${stats.failed} 本；ZIP 读取 ${stats.readCalls} 次，${(stats.readBytes / 1024 / 1024).toFixed(2)} MiB`)
       }
-      return { wrapped, health, anomaly: null }
-    }, isCancelled)
+    }
 
+    const analysisStarted = performance.now()
     for (const { wrapped, health, anomaly } of healthResults) {
       if (anomaly) {
         anomalies.push(anomaly)
@@ -246,6 +301,8 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       }
     }
 
+    recordTiming('localAnalysisMs', performance.now() - analysisStarted)
+    const recoveryStarted = performance.now()
     // A previous write-back may have fixed internal gaps while leaving inferred
     // boundary pages pending. Keep that review state visible only while the
     // current archive still has an actionable local issue. Once the local
@@ -309,6 +366,8 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       }))
     }
 
+    recordTiming('recoveryReviewMs', performance.now() - recoveryStarted)
+    const onlineStarted = performance.now()
     const onlineChecks = []
     let versionChainMatches = 0
     const onlinePolicy = options.onlinePolicy || 'none'
@@ -352,6 +411,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         }
       }
       completed = 0
+      const availabilityStarted = performance.now()
       for (const [key, identity] of identities) {
         assertNotCancelled()
         progress('checking-online-sources', completed, identities.size, identity.currentItem)
@@ -369,6 +429,8 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         progress('checking-online-sources', completed, identities.size, identity.currentItem)
       }
 
+      recordTiming('siteAvailabilityMs', performance.now() - availabilityStarted)
+      const gdataStarted = performance.now()
       const versionIdentities = new Map()
       for (const source of sources) {
         const recoverySupport = source.invalidEhviewer
@@ -408,6 +470,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
             }
           })
         : new Map()
+      recordTiming('gdataMs', performance.now() - gdataStarted)
 
       for (const source of sources) {
         const { wrapped, currentIdentity, ehviewer, ehviewerIdentity } = source
@@ -680,10 +743,12 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       }
     }
 
+    recordTiming('onlineMs', performance.now() - onlineStarted)
     progress('finalizing-report', 0, 1, null)
     const classifiedAnomalies = classifyAnomalies(anomalies)
     sortAnomalies(classifiedAnomalies)
     const workflowSummary = getWorkflowSummary({ anomalies: classifiedAnomalies })
+    performanceData.timings.totalMs = Math.round(performance.now() - started)
     const report = {
       schemaVersion: REPORT_SCHEMA_VERSION,
       workflowVersion: 2,
@@ -714,7 +779,8 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         versionChainMatches
       },
       anomalies: classifiedAnomalies,
-      onlineChecks
+      onlineChecks,
+      performance: performanceData
     }
     const reportPath = path.join(jobDir, 'report.json')
     await atomicWriteJson(reportPath, report)

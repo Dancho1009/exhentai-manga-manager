@@ -2,6 +2,8 @@ const fs = require('fs')
 const path = require('path')
 const sqlite3 = require('sqlite3')
 const { open } = require('sqlite')
+const { performance } = require('perf_hooks')
+const { mapWithConcurrency } = require('./worker_runtime.js')
 const { mergeEffectiveBook } = require('../book_detail.js')
 const {
   IMAGE_EXTENSIONS,
@@ -9,6 +11,8 @@ const {
   normalizePath,
   parseTags
 } = require('./utils.js')
+
+const FILE_STAT_CONCURRENCY = 8
 
 const openReadonly = filename => open({
   filename,
@@ -64,8 +68,9 @@ const walkLibrary = async (library, onProgress, isCancelled) => {
 
 const loadDatabaseSnapshot = async (databasePath, metadataPath) => {
   const database = await openReadonly(databasePath)
-  const metadata = await openReadonly(metadataPath)
+  let metadata
   try {
+    metadata = await openReadonly(metadataPath)
     const databaseIntegrity = await database.get('PRAGMA quick_check')
     const metadataIntegrity = await metadata.get('PRAGMA quick_check')
     const books = await database.all('SELECT * FROM Mangas')
@@ -77,15 +82,25 @@ const loadDatabaseSnapshot = async (databasePath, metadataPath) => {
       metadataRows: metadataRows.map(row => ({ ...row, tags: parseTags(row.tags) }))
     }
   } finally {
-    await Promise.allSettled([database.close(), metadata.close()])
+    await Promise.allSettled([database.close(), metadata?.close()].filter(Boolean))
   }
 }
 
-const buildSnapshot = async ({ library, databasePath, metadataPath, excludeFile, onProgress, isCancelled }) => {
-  let [libraryItems, databaseSnapshot] = await Promise.all([
-    walkLibrary(library, onProgress, isCancelled),
-    loadDatabaseSnapshot(databasePath, metadataPath)
+const buildSnapshot = async ({ library, databasePath, metadataPath, excludeFile, onProgress, isCancelled, onTiming = () => {} }) => {
+  const snapshotStarted = performance.now()
+  const snapshotResults = await Promise.allSettled([
+    walkLibrary(library, onProgress, isCancelled).then(result => {
+      onTiming('libraryEnumerationMs', performance.now() - snapshotStarted)
+      return result
+    }),
+    loadDatabaseSnapshot(databasePath, metadataPath).then(result => {
+      onTiming('databaseReadMs', performance.now() - snapshotStarted)
+      return result
+    })
   ])
+  const failedSnapshot = snapshotResults.find(result => result.status === 'rejected')
+  if (failedSnapshot) throw failedSnapshot.reason
+  let [libraryItems, databaseSnapshot] = snapshotResults.map(result => result.value)
   if (excludeFile) {
     try {
       const excludePattern = new RegExp(excludeFile)
@@ -96,21 +111,22 @@ const buildSnapshot = async ({ library, databasePath, metadataPath, excludeFile,
     throw new Error(`SQLite quick_check failed: database=${databaseSnapshot.databaseIntegrity}, metadata=${databaseSnapshot.metadataIntegrity}`)
   }
 
-  const actualItems = []
-  for (let index = 0; index < libraryItems.length; index += 1) {
-    if (isCancelled()) throw new Error('AUDIT_CANCELLED')
-    const item = libraryItems[index]
+  const statStarted = performance.now()
+  let completed = 0
+  const actualItems = await mapWithConcurrency(libraryItems, FILE_STAT_CONCURRENCY, async item => {
     const stat = item.type === 'folder'
       ? await statFolder(item.filepath)
       : await fs.promises.stat(item.filepath).then(value => ({ size: value.size, mtimeMs: value.mtimeMs, mtime: value.mtime.toISOString() }))
-    actualItems.push({ ...item, ...stat })
-    if (index % 50 === 0 || index + 1 === libraryItems.length) {
-      onProgress('snapshot-files', index + 1, libraryItems.length, {
+    completed += 1
+    if (completed % 50 === 0 || completed === libraryItems.length) {
+      onProgress('snapshot-files', completed, libraryItems.length, {
         title: path.basename(item.filepath),
         filepath: item.filepath
       })
     }
-  }
+    return { ...item, ...stat }
+  }, isCancelled)
+  onTiming('fileStatsMs', performance.now() - statStarted)
 
   const metadataByHash = new Map(databaseSnapshot.metadataRows.map(row => [row.hash, row]))
   const hashPeers = new Map()
@@ -127,6 +143,7 @@ const buildSnapshot = async ({ library, databasePath, metadataPath, excludeFile,
       hashPeers: raw.hash ? hashPeers.get(raw.hash) : []
     })
   }))
+  onTiming('snapshotMs', performance.now() - snapshotStarted)
   return {
     createdAt: new Date().toISOString(),
     library,

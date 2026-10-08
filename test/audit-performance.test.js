@@ -152,3 +152,73 @@ test('buffered ZIP reader handles short reads and releases its handle on an I/O 
   await assert.rejects(openBufferedZip(filepath), { code: 'EIO' })
   assert.equal(handles[0].fd, -1)
 })
+
+test('health cache batches preserve unchanged dedupe evidence and invalidate changed files', async t => {
+  let cache
+  const root = await makeRoot(t, () => cache?.close())
+  cache = await AuditCache.open(root)
+  const book = { filepath: path.join(root, 'sample.zip') }
+  const stat = { size: 123, mtimeMs: 456 }
+  const health = { pageCount: 7, ehviewer: { status: 'absent' } }
+  await cache.update(book, stat, { archiveSha256: 'sha256', contentInspection: { pageCount: 7 } })
+  await cache.updateHealthMany([{ book, stat, health }])
+  let cached = await cache.get(book, stat)
+  assert.equal(cached.archiveSha256, 'sha256')
+  assert.equal(cached.contentInspection.pageCount, 7)
+  let healthByPath = await cache.getHealthMany([{ raw: book, actual: stat }])
+  assert.deepEqual(healthByPath.get(normalizePath(book.filepath)), health)
+  assert.equal((await cache.getHealthMany([{ raw: book, actual: { ...stat, size: 124 } }])).size, 0)
+  const changedStat = { size: 124, mtimeMs: 500 }
+  await cache.updateHealthMany([{ book, stat: changedStat, health: { ...health, pageCount: 8 } }])
+  cached = await cache.get(book, changedStat)
+  assert.equal(cached.archiveSha256, null)
+  assert.equal(cached.contentInspection, null)
+  assert.equal(cached.healthInspection.pageCount, 8)
+  await cache.db.run('UPDATE cache_entries SET healthVersion = ?', HEALTH_INSPECTION_VERSION - 1)
+  healthByPath = await cache.getHealthMany([{ raw: book, actual: changedStat }])
+  assert.equal(healthByPath.size, 0)
+})
+
+test('health cache batching crosses query limits and rolls back failed batches', async t => {
+  let cache
+  const root = await makeRoot(t, () => cache?.close())
+  cache = await AuditCache.open(root)
+  const entries = Array.from({ length: 205 }, (_, index) => ({
+    book: { filepath: path.join(root, `${index}.zip`) },
+    stat: { size: index + 1, mtimeMs: 100 },
+    health: { pageCount: index + 1 }
+  }))
+  await cache.updateHealthMany(entries)
+  assert.equal((await cache.getHealthMany(entries.map(({ book, stat }) => ({ raw: book, actual: stat })))).size, 205)
+  await assert.rejects(cache.updateHealthMany([
+    { ...entries[0], health: { pageCount: 999 } },
+    { ...entries[1], stat: { mtimeMs: 100 } }
+  ]), /NOT NULL/)
+  assert.equal((await cache.get(entries[0].book, entries[0].stat)).healthInspection.pageCount, 1)
+})
+
+test('bounded concurrency drains in-flight tasks after cancellation', async () => {
+  let cancelled = false
+  const started = []
+  const finished = []
+  await assert.rejects(mapWithConcurrency([1, 2, 3, 4], 2, async item => {
+    started.push(item)
+    await new Promise(resolve => setTimeout(resolve, item === 1 ? 5 : 20))
+    cancelled = true
+    finished.push(item)
+    return item
+  }, () => cancelled), /AUDIT_CANCELLED/)
+  assert.deepEqual(started, [1, 2])
+  assert.deepEqual(finished, [1, 2])
+})
+
+test('bounded concurrency waits for remaining work before propagating an error', async () => {
+  let finished = false
+  await assert.rejects(mapWithConcurrency([1, 2, 3], 2, async item => {
+    if (item === 1) throw new Error('read failed')
+    await new Promise(resolve => setTimeout(resolve, 10))
+    finished = true
+    return item
+  }), /read failed/)
+  assert.equal(finished, true)
+})
