@@ -37,6 +37,25 @@ const normalizePageNumbers = values => [...new Set((Array.isArray(values) ? valu
   .map(value => Number.parseInt(value, 10))
   .filter(value => Number.isSafeInteger(value) && value >= 1))].sort((a, b) => a - b)
 
+const normalizeSourceOffset = value => {
+  const offset = Number(value ?? 0)
+  if (!Number.isSafeInteger(offset) || Math.abs(offset) > 1000) throw new Error('PAGE_RECOVERY_SOURCE_OFFSET_INVALID')
+  return offset
+}
+
+const resolveSourcePageNumber = (pageNumber, sourceOffset) => {
+  const sourcePageNumber = pageNumber + sourceOffset
+  if (!Number.isSafeInteger(sourcePageNumber) || sourcePageNumber < 1) {
+    throw new Error(`PAGE_RECOVERY_SOURCE_PAGE_INVALID:${pageNumber}:${sourcePageNumber}`)
+  }
+  return sourcePageNumber
+}
+
+const getMappedLocalPageCount = (onlinePageCount, sourceOffset) => {
+  const count = Number(onlinePageCount)
+  return Number.isSafeInteger(count) && count > 0 ? Math.max(0, count - sourceOffset) : 0
+}
+
 const decodeHtml = value => String(value || '')
   .replace(/&amp;/gi, '&')
   .replace(/&quot;/gi, '"')
@@ -245,6 +264,7 @@ const linkFetchedNeighborPages = candidates => {
       if (!neighbor) continue
       candidate.localContext[direction] = {
         pageNumber: neighbor.pageNumber,
+        sourcePageNumber: neighbor.sourcePageNumber,
         path: neighbor.targetPath,
         status: 'fetched',
         previewDataUrl: neighbor.previewDataUrl
@@ -360,6 +380,7 @@ const createSessionSummary = session => ({
   filepath: session.filepath,
   bookType: session.bookType,
   source: session.source || null,
+  sourceOffset: normalizeSourceOffset(session.sourceOffset),
   snapshot: session.snapshot || null,
   online: session.online || null,
   status: session.status,
@@ -474,7 +495,18 @@ const readSessionRecord = async (jobDir, recoveryId) => {
   void writeJson(summaryPath, summary).catch(() => {})
   return { summary, statePath, mtimeMs: stateStat.mtimeMs, session }
 }
-const toSerializableSession = session => JSON.parse(JSON.stringify(session))
+const toSerializableSession = session => {
+  const serialized = JSON.parse(JSON.stringify(session))
+  serialized.sourceOffset = normalizeSourceOffset(serialized.sourceOffset)
+  if (Number(serialized.online?.pageCount) > 0) {
+    serialized.online.localPageCount = getMappedLocalPageCount(serialized.online.pageCount, serialized.sourceOffset)
+    serialized.online.sourceOffset = serialized.sourceOffset
+  }
+  for (const candidate of serialized.candidates || []) {
+    candidate.sourcePageNumber ??= candidate.pageNumber + serialized.sourceOffset
+  }
+  return serialized
+}
 const isContinuablePageRecoveryReport = report => report?.staleReason === 'page-recovery'
 const isPendingRecoverySummary = summary => ['awaiting-confirmation', 'failed'].includes(summary?.status) ||
   (summary?.status === 'completed' && normalizePageNumbers(summary?.remainingMissingPages).length > 0)
@@ -520,8 +552,9 @@ class PageRecoveryManager {
     const normalized = String(recoveryId || '').trim()
     if (!normalized) throw new Error('PAGE_RECOVERY_ID_MISSING')
     if (this.sessions.has(normalized)) return this.sessions.get(normalized)
-    const session = await readJson(path.join(this.getJobDir(normalized), 'state.json')).catch(() => null)
-    if (!session) throw new Error('PAGE_RECOVERY_SESSION_MISSING')
+    const stored = await readJson(path.join(this.getJobDir(normalized), 'state.json')).catch(() => null)
+    if (!stored) throw new Error('PAGE_RECOVERY_SESSION_MISSING')
+    const session = toSerializableSession(stored)
     this.sessions.set(normalized, session)
     return session
   }
@@ -544,8 +577,9 @@ class PageRecoveryManager {
       }
     }
     const latestRecord = candidates.sort((left, right) => right.mtimeMs - left.mtimeMs)[0]
-    const latest = latestRecord?.session || (latestRecord ? await readJson(latestRecord.statePath).catch(() => null) : null)
-    if (!latest) return null
+    const stored = latestRecord?.session || (latestRecord ? await readJson(latestRecord.statePath).catch(() => null) : null)
+    if (!stored) return null
+    const latest = toSerializableSession(stored)
     const book = await this.Manga.findByPk(latest.bookId, { raw: true }).catch(() => null)
     if (!book || book.filepath !== latest.filepath) return null
     const currentSnapshot = await getBookFileSnapshot(book).catch(() => null)
@@ -564,16 +598,17 @@ class PageRecoveryManager {
       : await inspectBookHealth(book, { sevenZipPath: this.sevenZipPath }).catch(() => null)
     if (!health) return null
     if (legacyPending) latest.local = { pageCount: health.pageCount, sequence: health.imageSequence }
-    const recoveryHealth = buildRecoveryHealth(health, latest.online?.pageCount)
+    const localPageCount = getMappedLocalPageCount(latest.online?.pageCount, latest.sourceOffset)
+    const recoveryHealth = buildRecoveryHealth(health, localPageCount)
     const selectedPages = legacyPending ? legacyRemaining : normalizePageNumbers(latest.selectedPages)
     const availablePages = new Set(getRecoveryPageOptions(recoveryHealth).availablePages)
     if (!selectedPages.length || (latest.status === 'awaiting-confirmation' && selectedPages.some(page => !availablePages.has(page)))) return null
-    const hasOnlinePageCount = Number.isSafeInteger(latest.online?.pageCount)
+    const hasOnlinePageCount = localPageCount > 0
     const mapping = hasOnlinePageCount
-      ? assessPageMapping({ health: recoveryHealth, onlinePageCount: latest.online.pageCount, pageNumbers: selectedPages })
+      ? assessPageMapping({ health: recoveryHealth, onlinePageCount: localPageCount, pageNumbers: selectedPages })
       : { supported: false, confidence: 'unknown' }
     const batchMapping = hasOnlinePageCount
-      ? assessBatchPageMapping({ health, onlinePageCount: latest.online.pageCount, pageNumbers: selectedPages })
+      ? assessBatchPageMapping({ health, onlinePageCount: localPageCount, pageNumbers: selectedPages })
       : { batchSupported: false, batchReason: 'PAGE_RECOVERY_BATCH_MAPPING_UNCERTAIN' }
     const previousReportId = String(latest.reportId || '')
     const previousStatus = latest.status
@@ -650,7 +685,8 @@ class PageRecoveryManager {
       trailingPages: normalizePageNumbers(summary.trailingPages),
       candidatePages: normalizePageNumbers(summary.candidatePages),
       candidateCount: Number(summary.candidateCount) || 0,
-      source: summary.source || null
+      source: summary.source || null,
+      sourceOffset: normalizeSourceOffset(summary.sourceOffset)
     }))
   }
 
@@ -724,9 +760,11 @@ class PageRecoveryManager {
     return { onlinePageCount, pagesByNumber, loadPage, pagination }
   }
 
-  async fetchSelectedPages({ report, anomalyId, source = 'current', sourceUrl = null, nhentaiId = null, jmcomicId = null, pageNumbers, includeBoundaryPages = false }) {
+  async fetchSelectedPages({ report, anomalyId, source = 'current', sourceUrl = null, nhentaiId = null, jmcomicId = null, sourceOffset = 0, pageNumbers, includeBoundaryPages = false }) {
+    sourceOffset = normalizeSourceOffset(sourceOffset)
     const requestedPages = normalizePageNumbers(pageNumbers)
     if (requestedPages.length === 0) throw new Error('PAGE_RECOVERY_PAGE_SELECTION_EMPTY')
+    const requestedSourcePages = requestedPages.map(page => resolveSourcePageNumber(page, sourceOffset))
     const { anomaly, book, source: sourceInfo, sourceUrl: resolvedSourceUrl, identity, health } = await this.getRecoveryBook({ report, anomalyId, source, sourceUrl, nhentaiId, jmcomicId })
     const snapshot = await getBookFileSnapshot(book)
     const recoveryId = createRecoveryId()
@@ -741,6 +779,7 @@ class PageRecoveryManager {
       bookId: String(anomaly.bookId),
       filepath: book.filepath,
       bookType: book.type,
+      sourceOffset,
       source: {
         type: sourceInfo.type,
         url: resolvedSourceUrl,
@@ -805,13 +844,15 @@ class PageRecoveryManager {
           galleryId: String(manifest.galleryId || sourceInfo.id)
         })
       } else {
-        const manifest = await this.loadGalleryManifest({ sourceUrl: resolvedSourceUrl, setting, requestedPages })
+        const manifest = await this.loadGalleryManifest({ sourceUrl: resolvedSourceUrl, setting, requestedPages: requestedSourcePages })
         onlinePageCount = manifest.onlinePageCount
         pagesByNumber = manifest.pagesByNumber
         pagination = manifest.pagination
         loadPage = manifest.loadPage
       }
-      const recoveryHealth = buildRecoveryHealth(health, onlinePageCount)
+      const localPageCount = getMappedLocalPageCount(onlinePageCount, sourceOffset)
+      session.online = { pageCount: onlinePageCount, localPageCount, sourceOffset, checkedAt: Date.now() }
+      const recoveryHealth = buildRecoveryHealth(health, localPageCount)
       const pageOptions = getRecoveryPageOptions(recoveryHealth)
       const boundaryPages = includeBoundaryPages
         ? [...pageOptions.leadingPages, ...pageOptions.trailingPages]
@@ -820,17 +861,26 @@ class PageRecoveryManager {
       if (selectedPages.some(page => !pageOptions.availablePages.includes(page))) {
         throw new Error('PAGE_RECOVERY_PAGE_NOT_MISSING')
       }
+      const selectedSourcePages = selectedPages.map(page => resolveSourcePageNumber(page, sourceOffset))
+      for (let index = 0; index < selectedPages.length; index += 1) {
+        if (selectedSourcePages[index] > onlinePageCount) {
+          throw new Error(`PAGE_RECOVERY_SOURCE_PAGE_UNAVAILABLE:${selectedPages[index]}:${selectedSourcePages[index]}`)
+        }
+      }
       for (const url of pagination.pageUrls.slice(1)) {
-        if (selectedPages.every(page => pagesByNumber.has(page))) break
+        if (selectedSourcePages.every(page => pagesByNumber.has(page))) break
         await loadPage(url)
       }
-      const unavailablePages = selectedPages.filter(page => !pagesByNumber.has(page))
-      if (unavailablePages.length) throw new Error(`PAGE_RECOVERY_PAGE_UNAVAILABLE:${unavailablePages.join(',')}:${pagesByNumber.size}`)
-      const mapping = assessPageMapping({ health: recoveryHealth, onlinePageCount, pageNumbers: selectedPages })
-      const batchMapping = assessBatchPageMapping({ health, onlinePageCount, pageNumbers: selectedPages })
+      const unavailablePages = selectedPages.filter(page => !pagesByNumber.has(page + sourceOffset))
+      if (unavailablePages.length) {
+        if (sourceOffset === 0) throw new Error(`PAGE_RECOVERY_PAGE_UNAVAILABLE:${unavailablePages.join(',')}:${pagesByNumber.size}`)
+        throw new Error(`PAGE_RECOVERY_SOURCE_PAGE_UNAVAILABLE:${unavailablePages[0]}:${unavailablePages[0] + sourceOffset}`)
+      }
+      const mapping = assessPageMapping({ health: recoveryHealth, onlinePageCount: localPageCount, pageNumbers: selectedPages })
+      const batchMapping = assessBatchPageMapping({ health, onlinePageCount: localPageCount, pageNumbers: selectedPages })
       const mappingConfirmed = mapping.supported
       Object.assign(session, {
-        online: { pageCount: onlinePageCount, checkedAt: Date.now(), mappingConfirmed },
+        online: { ...session.online, mappingConfirmed },
         writeBackSupported: Boolean(mappingConfirmed),
         mappingConfidence: mapping.confidence,
         batchWriteBackSupported: batchMapping.batchSupported,
@@ -856,7 +906,8 @@ class PageRecoveryManager {
       }
 
       for (const pageNumber of selectedPages) {
-        const page = pagesByNumber.get(pageNumber)
+        const sourcePageNumber = resolveSourcePageNumber(pageNumber, sourceOffset)
+        const page = pagesByNumber.get(sourcePageNumber)
         let imageUrl
         let image
         if (sourceInfo.type === 'nhentai') {
@@ -909,6 +960,7 @@ class PageRecoveryManager {
         session.candidates.push({
           id: `${recoveryId}:${pageNumber}`,
           pageNumber,
+          sourcePageNumber,
           pageUrl: page.pageUrl,
           imageUrl,
           targetPath,
@@ -951,10 +1003,11 @@ class PageRecoveryManager {
       throw new Error('PAGE_RECOVERY_STALE_FILE')
     }
     const health = await inspectBookHealth(book, { sevenZipPath: this.sevenZipPath })
-    const recoveryHealth = buildRecoveryHealth(health, session.online?.pageCount)
+    const localPageCount = getMappedLocalPageCount(session.online?.pageCount, session.sourceOffset)
+    const recoveryHealth = buildRecoveryHealth(health, localPageCount)
     const mapping = assessPageMapping({
       health: recoveryHealth,
-      onlinePageCount: session.online?.pageCount,
+      onlinePageCount: localPageCount,
       pageNumbers: candidates.map(candidate => candidate.pageNumber)
     })
     if (!mapping.supported && confirmPageMapping !== true) throw new Error('PAGE_RECOVERY_MAPPING_UNCERTAIN')
@@ -1013,7 +1066,8 @@ class PageRecoveryManager {
       }
 
       const verified = await inspectBookHealth({ filepath: session.filepath, type: session.bookType }, { sevenZipPath: this.sevenZipPath })
-      const remainingMissing = getRecoveryPageOptions(buildRecoveryHealth(verified, session.online?.pageCount)).availablePages
+      const remainingOptions = getRecoveryPageOptions(buildRecoveryHealth(verified, localPageCount))
+      const remainingMissing = remainingOptions.availablePages
       for (const candidate of candidates) {
         if (remainingMissing.includes(candidate.pageNumber)) throw new Error(`PAGE_RECOVERY_VERIFY_GAP_REMAINS:${candidate.pageNumber}`)
         candidate.status = 'applied'
@@ -1021,8 +1075,8 @@ class PageRecoveryManager {
       const hasRemainingMissing = remainingMissing.length > 0
       session.status = hasRemainingMissing ? 'awaiting-confirmation' : 'completed'
       session.remainingMissingPages = remainingMissing
+      session.local = { pageCount: verified.pageCount, sequence: verified.imageSequence }
       if (hasRemainingMissing) {
-        const remainingOptions = getRecoveryPageOptions(buildRecoveryHealth(verified, session.online?.pageCount))
         session.selectedPages = remainingMissing
         session.availablePages = remainingMissing
         session.leadingPages = remainingOptions.leadingPages

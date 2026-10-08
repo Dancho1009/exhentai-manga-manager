@@ -817,3 +817,214 @@ test('page recovery writes a selected page into a CBZ and keeps an original back
     await fs.promises.rm(root, { recursive: true, force: true })
   }
 })
+
+const createOffsetRecoveryFixture = async (t, { source = 'nhentai', localEnd = 22, sourceEnd = 24, missing = [19], omittedSourcePages = [], archive = false } = {}) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'page-recovery-offset-'))
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }))
+  const filepath = path.join(root, archive ? 'book.cbz' : 'book')
+  const localBuffer = await sharp({ create: { width: 20, height: 30, channels: 3, background: '#369963' } }).png().toBuffer()
+  const zip = archive ? new AdmZip() : null
+  if (!archive) await fs.promises.mkdir(filepath)
+  for (let page = 1; page <= localEnd; page += 1) {
+    if (missing.includes(page)) continue
+    const name = `page-${String(page).padStart(4, '0')}.png`
+    if (zip) zip.addFile(name, localBuffer)
+    else await fs.promises.writeFile(path.join(filepath, name), localBuffer)
+  }
+  if (zip) {
+    zip.addFile('notes.txt', Buffer.from('preserve local attachment'))
+    zip.writeZip(filepath)
+  }
+  const urls = {
+    ehentai: 'https://e-hentai.org/g/1234567/abcdef1234/',
+    exhentai: 'https://exhentai.org/g/1234567/abcdef1234/',
+    nhentai: 'https://nhentai.net/g/615436/',
+    jmcomic: 'https://18comic.vip/album/567890/'
+  }
+  const sourceUrl = urls[source]
+  const book = { id: 'offset-book', filepath, type: archive ? 'zip' : 'folder', url: sourceUrl }
+  const health = await inspectBookHealth(book)
+  const report = {
+    reportId: 'offset-report', stale: false,
+    anomalies: [{ id: 'offset-gap', type: 'archive-image-sequence-gap', bookId: book.id, filepath, evidence: { currentUrl: sourceUrl, imageSequence: health.imageSequence } }]
+  }
+  const galleryRequests = []
+  const imageRequests = []
+  const imageForPage = page => sharp({ create: { width: 20, height: 30, channels: 3, background: { r: page * 7 % 256, g: page * 11 % 256, b: page * 13 % 256 } } }).png().toBuffer()
+  const imageRequester = async request => {
+    const page = Number(new URL(request.imageUrl || request.url).pathname.match(/(\d+)\.png$/)[1])
+    imageRequests.push(page)
+    return { buffer: await imageForPage(page), httpStatus: 200, contentType: 'image/png' }
+  }
+  const manifestFetcher = async () => ({
+    galleryId: source === 'jmcomic' ? '567890' : '615436',
+    onlinePageCount: sourceEnd,
+    pages: Array.from({ length: sourceEnd }, (_value, index) => index + 1)
+      .filter(page => !omittedSourcePages.includes(page))
+      .map(page => ({ pageNumber: page, imageUrl: `https://images.example/${page}.png` }))
+  })
+  const options = {
+    storePath: root, Manga: { findByPk: async () => book }, getSetting: () => ({}),
+    getNhentaiRecoveryManifest: manifestFetcher, requestNhentaiImage: imageRequester,
+    getJmComicRecoveryManifest: manifestFetcher, requestJmComicImage: imageRequester,
+    getGalleryPage: async ({ url }) => {
+      galleryRequests.push(url)
+      const start = Number(new URL(url).searchParams.get('p') || 0) * 20 + 1
+      const end = Math.min(sourceEnd, start + 19)
+      const links = Array.from({ length: Math.max(0, end - start + 1) }, (_value, index) => start + index)
+        .filter(page => !omittedSourcePages.includes(page))
+        .map(page => `<a href="/s/page${page}/1234567-${page}">${page}</a>`).join('')
+      return { status: 'available', html: `<p>Showing ${start} - ${end} of ${sourceEnd} images</p>${links}` }
+    },
+    requestText: async ({ url }) => ({ body: `<img id="img" src="https://images.example/${url.match(/-(\d+)$/)[1]}.png">` }),
+    requestBinary: imageRequester
+  }
+  const manager = new PageRecoveryManager(options)
+  return { root, filepath, book, report, manager, options, galleryRequests, imageRequests, imageForPage, localBuffer }
+}
+
+for (const source of ['ehentai', 'exhentai', 'nhentai', 'jmcomic']) {
+  for (const offset of [-2, 0, 2]) {
+    test(`${source} recovery offset ${offset} downloads the source page and writes the local page`, async t => {
+      const fixture = await createOffsetRecoveryFixture(t, { source, sourceEnd: 22 + offset, archive: source === 'nhentai' && offset === 2 })
+      const { manager, report, filepath } = fixture
+      const session = await manager.fetchSelectedPages({ report, anomalyId: 'offset-gap', sourceOffset: offset, pageNumbers: [19] })
+      assert.deepEqual(fixture.imageRequests, [19 + offset])
+      assert.equal(session.sourceOffset, offset)
+      assert.equal(session.online.pageCount, 22 + offset)
+      assert.equal(session.online.localPageCount, 22)
+      assert.deepEqual(session.availablePages, [19])
+      assert.deepEqual(session.trailingPages, [])
+      assert.equal(session.batchWriteBackSupported, true)
+      const candidate = session.candidates[0]
+      assert.equal(candidate.pageNumber, 19)
+      assert.equal(candidate.sourcePageNumber, 19 + offset)
+      assert.equal(candidate.targetPath, 'page-0019.png')
+      assert.equal(candidate.localContext.previous.pageNumber, 18)
+      assert.equal(candidate.localContext.next.pageNumber, 20)
+      if (offset === 2 && ['ehentai', 'exhentai'].includes(source)) {
+        assert.equal(fixture.galleryRequests.some(url => new URL(url).searchParams.get('p') === '1'), true)
+      }
+
+      const restarted = new PageRecoveryManager(fixture.options)
+      const restored = await restarted.getLatestSession({ reportId: report.reportId, anomalyId: 'offset-gap' })
+      assert.equal(restored.sourceOffset, offset)
+      assert.equal(restored.candidates[0].sourcePageNumber, 19 + offset)
+      assert.equal(restored.candidates[0].previewDataUrl, candidate.previewDataUrl)
+      assert.equal(restored.batchWriteBackSupported, true)
+      const summaries = await restarted.listLatestSessionSummaries({ reportId: report.reportId, anomalyIds: ['offset-gap'] })
+      assert.equal(summaries[0].sourceOffset, offset)
+      assert.deepEqual(summaries[0].candidatePages, [19])
+
+      const applied = await restarted.apply({ report, recoveryId: session.recoveryId, candidateIds: restored.candidates.map(item => item.id) })
+      assert.equal(applied.session.status, 'completed')
+      assert.deepEqual(applied.session.remainingMissingPages, [])
+      assert.equal(applied.health.pageCount, 22)
+      assert.equal(applied.health.imageSequence.gapCount, 0)
+      const readPage = name => fixture.book.type === 'zip' ? new AdmZip(filepath).getEntry(name).getData() : fs.promises.readFile(path.join(filepath, name))
+      assert.deepEqual(await readPage('page-0019.png'), await fixture.imageForPage(19 + offset))
+      assert.deepEqual(await readPage('page-0021.png'), fixture.localBuffer)
+      if (fixture.book.type === 'zip') {
+        assert.equal(new AdmZip(filepath).getEntry('notes.txt').getData().toString(), 'preserve local attachment')
+        assert.equal(fs.existsSync(path.join(restarted.getJobDir(session.recoveryId), 'backups', 'original.cbz')), true)
+      }
+    })
+  }
+}
+
+test('offset recovery rejects invalid and unavailable source pages before any image download', async t => {
+  const fixture = await createOffsetRecoveryFixture(t, { sourceEnd: 20, missing: [1, 19] })
+  for (const sourceOffset of [1.5, NaN, Infinity, 1001, -1001]) {
+    await assert.rejects(fixture.manager.fetchSelectedPages({ report: fixture.report, anomalyId: 'offset-gap', sourceOffset, pageNumbers: [19] }), /PAGE_RECOVERY_SOURCE_OFFSET_INVALID/)
+  }
+  await assert.rejects(fixture.manager.fetchSelectedPages({ report: fixture.report, anomalyId: 'offset-gap', sourceOffset: -2, pageNumbers: [1] }), /PAGE_RECOVERY_SOURCE_PAGE_INVALID:1:-1/)
+  await assert.rejects(fixture.manager.fetchSelectedPages({ report: fixture.report, anomalyId: 'offset-gap', sourceOffset: 2, pageNumbers: [19] }), /PAGE_RECOVERY_SOURCE_PAGE_UNAVAILABLE:19:21/)
+  assert.deepEqual(fixture.imageRequests, [])
+  const summaries = await fixture.manager.listLatestSessionSummaries({ anomalyIds: ['offset-gap'] })
+  assert.equal(summaries[0].status, 'failed')
+  assert.equal(summaries[0].candidateCount, 0)
+  assert.equal(summaries[0].sourceOffset, 2)
+  assert.equal((await inspectBookHealth(fixture.book)).pageCount, 20)
+
+  const incomplete = await createOffsetRecoveryFixture(t, { missing: [18, 19], omittedSourcePages: [21] })
+  await assert.rejects(incomplete.manager.fetchSelectedPages({ report: incomplete.report, anomalyId: 'offset-gap', sourceOffset: 2, pageNumbers: [18, 19] }), /PAGE_RECOVERY_SOURCE_PAGE_UNAVAILABLE:19:21/)
+  assert.deepEqual(incomplete.imageRequests, [])
+})
+
+test('offset recovery maps leading and trailing pages without changing local gap evidence', async t => {
+  const fixture = await createOffsetRecoveryFixture(t, { missing: [1, 19, 22] })
+  const before = await inspectBookHealth(fixture.book)
+  const session = await fixture.manager.fetchSelectedPages({ report: fixture.report, anomalyId: 'offset-gap', sourceOffset: 2, pageNumbers: [19], includeBoundaryPages: true })
+  assert.deepEqual(session.selectedPages, [1, 19, 22])
+  assert.deepEqual(session.leadingPages, [1])
+  assert.deepEqual(session.trailingPages, [22])
+  assert.deepEqual(session.candidates.map(item => item.sourcePageNumber), [3, 21, 24])
+  assert.equal(session.batchWriteBackSupported, false)
+  assert.deepEqual((await inspectBookHealth(fixture.book)).imageSequence, before.imageSequence)
+
+  const partial = await fixture.manager.apply({ report: fixture.report, recoveryId: session.recoveryId, candidateIds: [session.candidates.find(item => item.pageNumber === 19).id], confirmPageMapping: true })
+  assert.deepEqual(partial.session.remainingMissingPages, [1, 22])
+  const restarted = new PageRecoveryManager(fixture.options)
+  const restored = await restarted.getLatestSession({ reportId: fixture.report.reportId, anomalyId: 'offset-gap' })
+  assert.equal(restored.sourceOffset, 2)
+  assert.equal(restored.local.pageCount, 20)
+  assert.deepEqual(restored.availablePages, [1, 22])
+  assert.deepEqual(restored.trailingPages, [22])
+  const remaining = await restarted.fetchSelectedPages({ report: fixture.report, anomalyId: 'offset-gap', sourceOffset: restored.sourceOffset, pageNumbers: [1, 22] })
+  const completed = await restarted.apply({ report: fixture.report, recoveryId: remaining.recoveryId, candidateIds: remaining.candidates.map(item => item.id), confirmPageMapping: true })
+  assert.equal(completed.session.status, 'completed')
+  assert.deepEqual(completed.session.remainingMissingPages, [])
+})
+
+test('offset recovery keeps consecutive preview neighbors in local page order', async t => {
+  const fixture = await createOffsetRecoveryFixture(t, { missing: [19, 20] })
+  const session = await fixture.manager.fetchSelectedPages({ report: fixture.report, anomalyId: 'offset-gap', sourceOffset: 2, pageNumbers: [19, 20] })
+  const [first, second] = session.candidates
+  assert.deepEqual(session.candidates.map(item => item.sourcePageNumber), [21, 22])
+  assert.equal(first.localContext.previous.pageNumber, 18)
+  assert.equal(first.localContext.next.pageNumber, 20)
+  assert.equal(first.localContext.next.sourcePageNumber, 22)
+  assert.equal(first.localContext.next.previewDataUrl, second.previewDataUrl)
+  assert.equal(second.localContext.previous.pageNumber, 19)
+  assert.equal(second.localContext.previous.sourcePageNumber, 21)
+  assert.equal(second.localContext.previous.previewDataUrl, first.previewDataUrl)
+  assert.equal(second.localContext.next.pageNumber, 21)
+})
+
+test('negative offsets keep the mapped local tail pending until it is written back', async t => {
+  const fixture = await createOffsetRecoveryFixture(t, { sourceEnd: 20, missing: [19, 22] })
+  const session = await fixture.manager.fetchSelectedPages({ report: fixture.report, anomalyId: 'offset-gap', sourceOffset: -2, pageNumbers: [19], includeBoundaryPages: true })
+  assert.deepEqual(session.selectedPages, [19, 22])
+  assert.deepEqual(session.trailingPages, [22])
+  assert.deepEqual(session.candidates.map(item => item.sourcePageNumber), [17, 20])
+  const partial = await fixture.manager.apply({ report: fixture.report, recoveryId: session.recoveryId, candidateIds: [session.candidates[0].id] })
+  assert.deepEqual(partial.session.remainingMissingPages, [22])
+  const restarted = new PageRecoveryManager(fixture.options)
+  const restored = await restarted.getLatestSession({ reportId: fixture.report.reportId, anomalyId: 'offset-gap' })
+  assert.equal(restored.sourceOffset, -2)
+  assert.equal(restored.online.pageCount, 20)
+  assert.equal(restored.online.localPageCount, 22)
+  assert.deepEqual(restored.availablePages, [22])
+  assert.deepEqual(restored.trailingPages, [22])
+  const tail = await restarted.fetchSelectedPages({ report: fixture.report, anomalyId: 'offset-gap', sourceOffset: -2, pageNumbers: [22] })
+  const completed = await restarted.apply({ report: fixture.report, recoveryId: tail.recoveryId, candidateIds: [tail.candidates[0].id], confirmPageMapping: true })
+  assert.equal(completed.session.status, 'completed')
+  assert.deepEqual(completed.session.remainingMissingPages, [])
+  assert.deepEqual(await fs.promises.readFile(path.join(fixture.filepath, 'page-0022.png')), await fixture.imageForPage(20))
+})
+
+test('legacy recovery sessions without source offsets restore as zero', async t => {
+  const fixture = await createOffsetRecoveryFixture(t, { sourceEnd: 22 })
+  const session = await fixture.manager.fetchSelectedPages({ report: fixture.report, anomalyId: 'offset-gap', pageNumbers: [19] })
+  delete session.sourceOffset
+  delete session.online.sourceOffset
+  delete session.online.localPageCount
+  delete session.candidates[0].sourcePageNumber
+  await fs.promises.writeFile(path.join(fixture.manager.getJobDir(session.recoveryId), 'state.json'), JSON.stringify(session))
+  const restarted = new PageRecoveryManager(fixture.options)
+  assert.equal((await restarted.getSession(session.recoveryId)).sourceOffset, 0)
+  const restored = await restarted.getLatestSession({ reportId: fixture.report.reportId, anomalyId: 'offset-gap' })
+  assert.equal(restored.sourceOffset, 0)
+  assert.equal(restored.candidates[0].sourcePageNumber, 19)
+  assert.equal(restored.online.localPageCount, 22)
+})
