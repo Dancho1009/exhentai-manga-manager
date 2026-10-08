@@ -46,6 +46,7 @@ const { executeApprovedActions } = require('./modules/audit/action_executor.js')
 const { buildExecutionPreview } = require('./modules/audit/review_validator.js')
 const { isConclusiveSiteUnavailable, getGalleryVersionRelation } = require('./modules/audit/online_decision.js')
 const { buildManualSourceAction, verifyNhentaiSourceAction } = require('./modules/audit/manual_source_action.js')
+const { checkRepairCandidate, describeAvailabilityFailure } = require('./modules/audit/repair_availability.js')
 const { extractMetadataSourceIdentity } = require('./modules/audit/utils.js')
 const { getBookFileSnapshot } = require('./modules/audit/ehviewer_repair.js')
 const { PageRecoveryManager } = require('./modules/audit/page_recovery.js')
@@ -2296,15 +2297,9 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
         }
         const candidateIdentity = extractEhentaiIdentity(action.newUrl)
         if (!candidateIdentity) return { valid: false, error: 'INVALID_REPAIR_CANDIDATE_URL' }
-        const candidate = await checkGallerySites({
-          ...candidateIdentity,
-          preferredSite: getEhentaiSiteFromUrl(action.newUrl) || 'exhentai',
-          strategy: 'both',
-          force: true,
-          setting,
-          cache
-        })
-        if (!isIdentityWebAvailable(candidate)) return { valid: false, error: 'REPAIR_CANDIDATE_UNAVAILABLE' }
+        const candidateCheck = await checkRepairCandidate({ url: action.newUrl, setting, cache })
+        if (!candidateCheck.valid) return candidateCheck
+        const candidate = candidateCheck.candidate
         const currentIdentity = extractEhentaiIdentity(action.currentUrl)
         const identityChanged = currentIdentity && (
           currentIdentity.gid !== candidateIdentity.gid || currentIdentity.token !== candidateIdentity.token
@@ -2329,12 +2324,8 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
               detail: { currentSite, currentSiteStatus, targetSite, targetSiteStatus }
             }
           }
-          if (targetSiteStatus !== 'available') {
-            return {
-              valid: false,
-              error: 'REPAIR_CANDIDATE_UNAVAILABLE',
-              detail: { currentSite, currentSiteStatus, targetSite, targetSiteStatus }
-            }
+          if (action.repairKind !== 'manual-source-selection' && targetSiteStatus !== 'available') {
+            return describeAvailabilityFailure(candidate, [targetSite])
           }
         } else if (identityChanged && action.repairKind === 'gallery-version-upgrade') {
           const fetchVersionGdata = async identity => {

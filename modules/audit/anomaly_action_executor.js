@@ -58,6 +58,14 @@ const REPAIR_ERROR_MESSAGES = {
   GALLERY_VERSION_RELATION_CHANGED: 'Gallery 版本关系已经变化，原审批已失效',
   REPAIR_GDATA_UNAVAILABLE: '候选 Gallery 网页可访问，但 gdata 元数据获取失败，未修改 URL',
   REPAIR_CANDIDATE_UNAVAILABLE: '候选 Gallery 当前不可访问，原审批已失效',
+  REPAIR_CANDIDATE_NETWORK_ERROR: '候选 Gallery 网络请求失败，未修改元数据，可稍后重试',
+  REPAIR_CANDIDATE_SERVICE_UNAVAILABLE: '候选站点暂时不可用或请求受限，未修改元数据，可稍后重试',
+  REPAIR_CANDIDATE_STATUS_UNKNOWN: '候选 Gallery 返回页面无法识别，未修改元数据，不代表已下架',
+  REPAIR_CANDIDATE_AUTH_REQUIRED: '候选站点需要登录，请检查 Cookie，未修改元数据',
+  REPAIR_CANDIDATE_IP_BANNED: '候选站点限制了当前 IP，未修改元数据',
+  REPAIR_CANDIDATE_COPYRIGHT: '候选 Gallery 两站均提示版权下架，未执行换源',
+  REPAIR_CANDIDATE_GEO_BLOCKED: '候选 Gallery 存在地区限制，未执行换源',
+  REPAIR_CANDIDATE_NOT_FOUND: '候选 Gallery 两站均未找到，未执行换源',
   INVALID_REPAIR_CANDIDATE_URL: '候选 Gallery URL 无效',
   EHVIEWER_RECOVERY_GDATA_UNAVAILABLE: '当前 Gallery 的 gdata 元数据验证失败，未重写 .ehviewer',
   EHVIEWER_RECOVERY_IDENTITY_CHANGED: '当前元数据 URL 已变化，原 .ehviewer 修复审批已失效',
@@ -102,6 +110,10 @@ const createSkippedApproval = ({ anomaly, action, error, index, total }) => {
 
 const formatRepairDetail = detail => {
   if (!detail) return ''
+  if (detail.sites) return '；' + Object.entries(detail.sites).map(([site, value]) =>
+    `${site === 'ehentai' ? 'E-Hentai' : 'ExHentai'}=${value.status || 'unchecked'}${value.httpStatus ? ` (HTTP ${value.httpStatus})` : ''}${value.claimant ? `，版权方=${value.claimant}` : ''}${value.region ? `，地区=${value.region}` : ''}${value.error ? `，${value.error}` : ''}`
+  ).join('；')
+  if (detail.metadataError) return `；${detail.metadataError}`
   if (detail.gdataStatus) return `；gdata=${detail.gdataStatus}${detail.gdataError ? ` (${detail.gdataError})` : ''}`
   if (detail.currentSiteStatus) return `；${detail.currentSite}=${detail.currentSiteStatus}，${detail.targetSite}=${detail.targetSiteStatus}`
   if (detail.versionStatus) return `；version=${detail.versionStatus}`
