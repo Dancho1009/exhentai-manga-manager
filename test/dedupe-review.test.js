@@ -16,6 +16,7 @@ const { normalizeDedupeReview, buildExecutionPreview } = require('../modules/aud
 const { AuditReportRepository } = require('../modules/audit/report_repository.js')
 const { AuditWorkspaceManager } = require('../modules/audit/job_manager.js')
 const { LibraryTaskCoordinator } = require('../modules/audit/task_coordinator.js')
+const { DedupeReviewService } = require('../modules/audit/dedupe_review_service.js')
 const { executeApprovedDuplicates } = require('../modules/audit/dedupe_action_executor.js')
 const { verifyDedupeItem } = require('../modules/audit/dedupe_verification.js')
 const { snapshotMetadataRows, restoreMetadataRows } = require('../modules/audit/execution_common.js')
@@ -240,6 +241,31 @@ test('scoped group verification keeps other groups and their lazy evidence refer
   assert.deepEqual((await manager.getReport('dedupe')).groups, [unchanged])
 })
 
+test('lazy page previews extract selected neighbors, verify bytes, isolate owners and cancel rapid switches', async t => {
+  const image = await sharp({ create: { width: 24, height: 30, channels: 3, background: '#324a76' } }).png().toBuffer()
+  const entries = { '.ehviewer': marker, 'note.txt': 'notes', ...Object.fromEntries(Array.from({ length: 9 }, (_, index) => [String(index + 1).padStart(2, '0') + '.png', image])) }
+  const fixture = await fixtureFor(t, [{ id: 'a', entries }, { id: 'b', entries }])
+  const report = await scan(fixture)
+  const manager = { getReport: async () => report, repository: new AuditReportRepository(fixture.root) }
+  const service = new DedupeReviewService({ manager, previewRoot: path.join(fixture.root, 'preview') })
+  const request = { reportId: report.reportId, groupId: report.groups[0].id, leftId: 'a', rightId: 'b', leftIndex: 4, rightIndex: 4 }
+  const [first, other] = await Promise.all([service.preview(1, request), service.preview(2, request)])
+  assert.equal(first.length, 6)
+  assert.equal(first[1].width, 24)
+  assert.notEqual(first[1].path, other[1].path)
+  await service.cleanup(1)
+  assert.equal(fs.existsSync(first[1].path), false)
+  assert.equal(fs.existsSync(other[1].path), true)
+  const text = await service.preview(1, { ...request, textPath: 'note.txt' })
+  assert.deepEqual(text.map(item => item.text), ['notes', 'notes'])
+  const earlier = service.preview(1, request).catch(error => error)
+  const latest = service.preview(1, { ...request, leftIndex: 2, rightIndex: 2 })
+  assert.match((await earlier).message, /AUDIT_CANCELLED/)
+  assert.ok((await latest).some(item => item.key === 'left-2' && item.url))
+  await Promise.all([service.cleanup(1), service.cleanup(2)])
+  assert.equal(fs.existsSync(path.join(fixture.root, 'preview', '1')) ? (await fs.promises.readdir(path.join(fixture.root, 'preview', '1'))).length : 0, 0)
+})
+
 test('execution rechecks archive bytes even when size and mtime are unchanged, plus current metadata provenance', async t => {
   const fixture = await fixtureFor(t, [{ id: 'a', comment: 'one' }, { id: 'b', comment: 'one' }])
   const report = await scan(fixture)
@@ -281,6 +307,11 @@ test('new mapped approvals execute quarantine, merge user state and preserve bef
   const state = JSON.parse(await fs.promises.readFile(result.statePath, 'utf8'))
   assert.equal(state.before.mangas.length, 2)
   assert.equal(state.after.mangas.length, 1)
+  const service = new DedupeReviewService({ manager: { repository: new AuditReportRepository(fixture.root) } })
+  const history = await service.getHistory()
+  assert.equal(history.length, 1)
+  assert.equal(history[0].files[0].keepId, 'a')
+  assert.equal(history[0].backupDir, result.backupDir)
 })
 
 test('metadata rollback preserves structured tags without adding JSON encoding', async t => {

@@ -50,6 +50,7 @@ const {
 const { EhentaiAvailabilityCache } = require('./modules/ehentai_availability_cache.js')
 const { LibraryTaskCoordinator } = require('./modules/audit/task_coordinator.js')
 const { AuditWorkspaceManager } = require('./modules/audit/job_manager.js')
+const { DedupeReviewService } = require('./modules/audit/dedupe_review_service.js')
 const { executeApprovedActions } = require('./modules/audit/action_executor.js')
 const { buildExecutionPreview } = require('./modules/audit/review_validator.js')
 const { isConclusiveSiteUnavailable, getGalleryVersionRelation } = require('./modules/audit/online_decision.js')
@@ -118,6 +119,8 @@ let Metadata = prepareMetadataModel(metadataSqliteFile)
 const bookDetailService = createBookDetailService({ Manga, getMetadata: () => Metadata })
 const libraryTaskCoordinator = new LibraryTaskCoordinator()
 const auditWorkspaceManager = new AuditWorkspaceManager({ storePath: STORE_PATH, coordinator: libraryTaskCoordinator })
+const dedupeReviewService = new DedupeReviewService({ manager: auditWorkspaceManager,
+  previewRoot: path.join(TEMP_PATH, 'dedupe-preview'), sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe') })
 const pageRecoveryManager = new PageRecoveryManager({
   storePath: STORE_PATH,
   Manga,
@@ -2204,6 +2207,18 @@ ipcMain.handle('audit:start-dedupe', async (event, request = {}) => {
   })
 })
 
+const dedupePreviewOwners = new WeakSet()
+ipcMain.handle('audit:dedupe-comparison', async (_event, request) => await dedupeReviewService.getComparison(request || {}))
+ipcMain.handle('audit:dedupe-preview', async (event, request) => {
+  if (!dedupePreviewOwners.has(event.sender)) {
+    dedupePreviewOwners.add(event.sender)
+    event.sender.once('destroyed', () => { void dedupeReviewService.cleanup(event.sender.id).catch(console.error) })
+  }
+  return await dedupeReviewService.preview(event.sender.id, request || {})
+})
+ipcMain.handle('audit:dedupe-preview-cleanup', async event => await dedupeReviewService.cleanup(event.sender.id))
+ipcMain.handle('audit:dedupe-history', async () => await dedupeReviewService.getHistory())
+
 ipcMain.handle('audit:cancel-active', async () => await auditWorkspaceManager.cancelActive())
 ipcMain.handle('audit:clear-inspection-records', async () => await auditWorkspaceManager.clearInspectionRecords())
 ipcMain.handle('audit:save-review', async (event, { taskType, review } = {}) => {
@@ -2226,7 +2241,8 @@ ipcMain.handle('audit:get-execution-preview', async (event, request = {}) => {
     auditWorkspaceManager.getReview(taskType)
   ])
   if (request.reportId !== report?.reportId) throw new Error(`${taskType.toUpperCase()}_REVIEW_MISMATCH`)
-  return buildExecutionPreview({ taskType, report, review, library: setting.library })
+  const preview = buildExecutionPreview({ taskType, report, review, library: setting.library, collectionList })
+  return taskType === 'dedupe' ? await dedupeReviewService.enrichExecutionPreview(preview) : preview
 })
 
 ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
