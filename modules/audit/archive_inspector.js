@@ -2,9 +2,8 @@ const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
 const { createHash } = require('crypto')
-const yauzl = require('yauzl')
 const { openBufferedZip } = require('./buffered_zip_reader.js')
-const { readEhviewerBuffer } = require('../../fileLoader/ehviewer.js')
+const { readEhviewerBuffer, readEhviewerFields } = require('../../fileLoader/ehviewer.js')
 const { IMAGE_EXTENSIONS, stableId } = require('./utils.js')
 
 const naturalCompare = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
@@ -87,12 +86,18 @@ const analyzeImageSequence = imagePaths => {
   }
 }
 
-const digestStream = (stream, capture = false, maxCaptureBytes = 16 * 1024 * 1024) => new Promise((resolve, reject) => {
+const digestStream = (stream, capture = false, maxCaptureBytes = 16 * 1024 * 1024, isCancelled = () => false) => new Promise((resolve, reject) => {
   const hash = createHash('sha256')
   const chunks = []
   let size = 0
   let captureAllowed = capture
+  const timer = setInterval(() => { if (isCancelled()) stream.destroy(new Error('AUDIT_CANCELLED')) }, 100)
+  timer.unref()
+  stream.once('close', () => clearInterval(timer))
+  stream.once('end', () => clearInterval(timer))
+  stream.once('error', () => clearInterval(timer))
   stream.on('data', chunk => {
+    if (isCancelled()) { stream.destroy(new Error('AUDIT_CANCELLED')); return }
     hash.update(chunk)
     size += chunk.length
     if (captureAllowed) {
@@ -108,19 +113,12 @@ const digestStream = (stream, capture = false, maxCaptureBytes = 16 * 1024 * 102
   }))
 })
 
-const openZip = filepath => new Promise((resolve, reject) => {
-  yauzl.open(filepath, { lazyEntries: true, autoClose: true }, (error, zipfile) => {
-    if (error) reject(error)
-    else resolve(zipfile)
-  })
-})
-
 const openZipEntry = (zipfile, entry) => new Promise((resolve, reject) => {
   zipfile.openReadStream(entry, (error, stream) => error ? reject(error) : resolve(stream))
 })
 
-const inspectZip = async filepath => {
-  const zipfile = await openZip(filepath)
+const inspectZip = async (filepath, options = {}) => {
+  const zipfile = await openBufferedZip(filepath, options)
   const entries = []
 
   return await new Promise((resolve, reject) => {
@@ -143,7 +141,7 @@ const inspectZip = async filepath => {
         const extension = path.posix.extname(entryPath).toLowerCase()
         const isEhviewer = path.posix.basename(entryPath) === '.ehviewer'
         const stream = await openZipEntry(zipfile, entry)
-        const digest = await digestStream(stream, isEhviewer)
+        const digest = await digestStream(stream, isEhviewer, 16 * 1024 * 1024, options.isCancelled)
         entries.push({
           path: entryPath,
           size: digest.size,
@@ -165,14 +163,26 @@ const inspectZip = async filepath => {
   })
 }
 
-const run7z = (sevenZipPath, args, capture = false) => new Promise((resolve, reject) => {
+const run7z = (sevenZipPath, args, capture = false, options = {}) => new Promise((resolve, reject) => {
   const child = spawn(sevenZipPath, args, { windowsHide: true })
   const stdout = []
   const stderr = []
-  child.stdout.on('data', chunk => stdout.push(chunk))
+  let size = 0
+  let failure
+  const timer = setInterval(() => {
+    if (options.isCancelled?.()) { failure = new Error('AUDIT_CANCELLED'); child.kill() }
+  }, 100)
+  timer.unref()
+  child.stdout.on('data', chunk => {
+    size += chunk.length
+    if (options.maxBytes && size > options.maxBytes) { failure = new Error('PREVIEW_ENTRY_TOO_LARGE'); child.kill() }
+    else stdout.push(chunk)
+  })
   child.stderr.on('data', chunk => stderr.push(chunk))
-  child.on('error', reject)
+  child.on('error', error => { clearInterval(timer); reject(error) })
   child.on('close', code => {
+    clearInterval(timer)
+    if (failure) { reject(failure); return }
     if (code !== 0) {
       reject(new Error(`7z returned code ${code}: ${Buffer.concat(stderr).toString('utf8').trim()}`))
       return
@@ -194,40 +204,34 @@ const parse7zRecords = output => {
   }).filter(record => record.Path && record.Folder !== '+')
 }
 
-const inspect7zArchive = async (filepath, sevenZipPath) => {
+const inspect7zArchive = async (filepath, sevenZipPath, options = {}) => {
   if (!sevenZipPath) throw new Error('7z executable is unavailable')
-  const output = await run7z(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
+  const output = await run7z(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'], false, options)
   const entryPaths = parse7zRecords(output)
     .map(record => normalizeEntryPath(record.Path))
-    .filter(Boolean)
+    .filter(entryPath => entryPath && !entryPath.includes('__MACOSX'))
   const entries = []
   for (const entryPath of entryPaths) {
+    if (options.isCancelled?.()) throw new Error('AUDIT_CANCELLED')
     const extension = path.posix.extname(entryPath).toLowerCase()
-    const buffer = await run7z(sevenZipPath, ['x', '-so', '-p123456', '--', filepath, entryPath], true)
-    const sha256 = createHash('sha256').update(buffer).digest('hex')
+    const child = spawn(sevenZipPath, ['x', '-so', '-spd', '-p123456', '--', filepath, entryPath], { windowsHide: true })
+    const isEhviewer = path.posix.basename(entryPath) === '.ehviewer'
+    const completion = new Promise((resolve, reject) => {
+      child.on('error', reject)
+      child.on('close', code => code === 0 ? resolve() : reject(new Error(`7z returned code ${code}`)))
+    })
+    const digesting = digestStream(child.stdout, isEhviewer, 16 * 1024 * 1024, options.isCancelled)
+    const timer = setInterval(() => { if (options.isCancelled?.()) { child.stdout.destroy(new Error('AUDIT_CANCELLED')); child.kill() } }, 100)
+    timer.unref()
+    child.stdout.on('error', () => child.kill())
+    child.stderr.resume()
+    const settled = await Promise.allSettled([digesting, completion])
+    clearInterval(timer)
+    const failure = settled.find(result => result.status === 'rejected')
+    if (failure) throw failure.reason
+    const digest = settled[0].value
     entries.push({
       path: entryPath,
-      size: buffer.length,
-      sha256,
-      image: IMAGE_EXTENSIONS.has(extension),
-      ehviewerBuffer: path.posix.basename(entryPath) === '.ehviewer' ? buffer : null
-    })
-  }
-  return entries
-}
-
-const inspectFolder = async folderpath => {
-  const dirents = await fs.promises.readdir(folderpath, { withFileTypes: true })
-  const entries = []
-  for (const dirent of dirents) {
-    if (!dirent.isFile()) continue
-    const extension = path.extname(dirent.name).toLowerCase()
-    const isEhviewer = dirent.name === '.ehviewer'
-    const filepath = path.join(folderpath, dirent.name)
-    const stream = fs.createReadStream(filepath)
-    const digest = await digestStream(stream, isEhviewer)
-    entries.push({
-      path: dirent.name,
       size: digest.size,
       sha256: digest.sha256,
       image: IMAGE_EXTENSIONS.has(extension),
@@ -237,7 +241,28 @@ const inspectFolder = async folderpath => {
   return entries
 }
 
-const resolveEhviewer = entries => {
+const inspectFolder = async (folderpath, options = {}) => {
+  const { enumerateFolderEntries } = require('./dedupe_manifest.js')
+  const manifest = options.manifest?.entries || await enumerateFolderEntries(folderpath, options)
+  const entries = []
+  for (const entry of manifest) {
+    if (entry.unsupported) continue
+    const isEhviewer = path.posix.basename(entry.path) === '.ehviewer'
+    const filepath = path.join(folderpath, entry.path)
+    const stream = fs.createReadStream(filepath)
+    const digest = await digestStream(stream, isEhviewer, 16 * 1024 * 1024, options.isCancelled)
+    entries.push({
+      path: entry.path,
+      size: digest.size,
+      sha256: digest.sha256,
+      image: entry.image,
+      ehviewerBuffer: digest.buffer
+    })
+  }
+  return entries
+}
+
+const resolveEhviewer = (entries, includeFields = false) => {
   const candidates = entries
     .filter(entry => path.posix.basename(entry.path) === '.ehviewer')
     .sort((a, b) => {
@@ -256,27 +281,32 @@ const resolveEhviewer = entries => {
     entryPath: selected.path,
     candidateCount: candidates.length,
     gid: parsed?.gid ? String(parsed.gid) : null,
-    token: parsed?.token ? String(parsed.token) : null
+    token: parsed?.token ? String(parsed.token) : null,
+    ...(includeFields ? { fields: selected.ehviewerBuffer ? readEhviewerFields(selected.ehviewerBuffer) : null } : {})
   }
 }
 
 const inspectBookContent = async (book, options = {}) => {
   let entries
   const extension = path.extname(book.filepath).toLowerCase()
-  if (book.type === 'folder') entries = await inspectFolder(book.filepath)
-  else if (extension === '.zip' || extension === '.cbz') entries = await inspectZip(book.filepath)
-  else entries = await inspect7zArchive(book.filepath, options.sevenZipPath)
+  if (book.type === 'folder') entries = await inspectFolder(book.filepath, options)
+  else if (extension === '.zip' || extension === '.cbz') entries = await inspectZip(book.filepath, options)
+  else entries = await inspect7zArchive(book.filepath, options.sevenZipPath, options)
 
   const images = entries.filter(entry => entry.image).sort((a, b) => naturalCompare(a.path, b.path))
   const ancillary = entries.filter(entry => !entry.image).sort((a, b) => naturalCompare(a.path, b.path))
-  const ehviewer = resolveEhviewer(ancillary)
+  const ehviewer = resolveEhviewer(ancillary, true)
   const imageSignature = stableId(images.map(entry => entry.sha256))
   const ancillarySignature = stableId(ancillary.map(entry => [entry.path, entry.size, entry.sha256]))
   return {
+    formatVersion: 2,
     pageCount: images.length,
     imageSignature,
+    imageMultisetSignature: stableId(images.map(entry => entry.sha256).sort()),
     ancillarySignature,
-    images: images.map(({ path, size, sha256 }) => ({ path, size, sha256 })),
+    folderFingerprint: options.manifest?.folderFingerprint || null,
+    uncoveredEntries: options.manifest?.uncoveredEntries || [],
+    images: images.map(({ path: entryPath, size, sha256 }, index) => ({ entryId: stableId(entryPath), ordinal: index + 1, path: entryPath, size, sha256, format: path.extname(entryPath).slice(1).toLowerCase() })),
     ancillary: ancillary.map(({ path, size, sha256 }) => ({ path, size, sha256 })),
     ehviewer
   }
@@ -316,9 +346,9 @@ const inspectZipEhviewer = async (filepath, options) => {
   })
 }
 
-const inspect7zEhviewer = async (filepath, sevenZipPath) => {
+const inspect7zEhviewer = async (filepath, sevenZipPath, options = {}) => {
   if (!sevenZipPath) throw new Error('7z executable is unavailable')
-  const output = await run7z(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'])
+  const output = await run7z(sevenZipPath, ['l', filepath, '-slt', '-sccUTF-8', '-p123456'], false, options)
   const candidates = parse7zRecords(output)
     .map(record => normalizeEntryPath(record.Path))
     .filter(entryPath => !entryPath.includes('__MACOSX') && path.posix.basename(entryPath) === '.ehviewer')
@@ -326,7 +356,7 @@ const inspect7zEhviewer = async (filepath, sevenZipPath) => {
   for (const entryPath of candidates) {
     entries.push({
       path: entryPath,
-      ehviewerBuffer: await run7z(sevenZipPath, ['x', '-so', '-p123456', '--', filepath, entryPath], true)
+      ehviewerBuffer: await run7z(sevenZipPath, ['x', '-so', '-spd', '-p123456', '--', filepath, entryPath], true, { ...options, maxBytes: 16 * 1024 * 1024 })
     })
   }
   return resolveEhviewer(entries)
@@ -354,7 +384,7 @@ const inspectEhviewerIdentity = async (book, options = {}) => {
   const extension = path.extname(book.filepath).toLowerCase()
   if (book.type === 'folder') return await inspectFolderEhviewer(book.filepath)
   if (extension === '.zip' || extension === '.cbz') return await inspectZipEhviewer(book.filepath, options)
-  return await inspect7zEhviewer(book.filepath, options.sevenZipPath)
+  return await inspect7zEhviewer(book.filepath, options.sevenZipPath, options)
 }
 
 const inspectZipHealth = async (filepath, options) => {
@@ -445,4 +475,5 @@ const inspectBookHealth = async (book, options = {}) => {
   return await inspect7zHealth(book.filepath, options.sevenZipPath)
 }
 
-module.exports = { analyzeImageSequence, extractImageSequenceNumber, inspectBookContent, inspectEhviewerIdentity, inspectBookHealth }
+module.exports = { analyzeImageSequence, extractImageSequenceNumber, inspectBookContent, inspectEhviewerIdentity, inspectBookHealth,
+  run7z, parse7zRecords, openZipEntry, resolveEhviewer }

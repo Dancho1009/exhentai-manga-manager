@@ -239,7 +239,21 @@ const readEhviewerFile = async (filePath) => {
   }
 }
 
+const readEhviewerFields = buffer => {
+  try {
+    buffer = Buffer.from(buffer)
+    if (isVersion2Buffer(buffer)) {
+      const lines = stripBom(buffer).toString('utf8').split(/\r?\n/)
+      return { title: lines[1] || '', gid: lines[2] || '', token: lines[3] || '',
+        ...Object.fromEntries(lines.slice(4).filter(Boolean).map((value, index) => [`line_${index + 5}`, value])) }
+    }
+    const value = decodeCbor(buffer).value
+    return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : null
+  } catch { return null }
+}
+
 module.exports = {
   readEhviewerBuffer,
+  readEhviewerFields,
   readEhviewerFile
 }

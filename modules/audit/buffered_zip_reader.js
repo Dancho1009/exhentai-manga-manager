@@ -72,7 +72,9 @@ class BufferedZipReader extends yauzl.RandomAccessReader {
       autoClose: false,
       start,
       end: end - 1,
-      fs: { read: (fd, ...args) => this.readFile(...args) }
+      // yauzl destroys range streams after unref. The archive reader owns the
+      // shared handle; closing one range must not close the archive descriptor.
+      fs: { read: (fd, ...args) => this.readFile(...args), close: (_fd, callback) => callback(null) }
     })
   }
 

@@ -8,7 +8,7 @@ const ARCHIVE_HASH_VERSION = 1
 const HEALTH_INSPECTION_VERSION = 2
 const CONTENT_INSPECTION_VERSION = 1
 const EHVIEWER_INSPECTION_VERSION = 1
-const CACHE_TABLES = ['cache_entries', 'gallery_availability', 'gallery_gdata']
+const CACHE_TABLES = ['cache_entries', 'gallery_availability', 'gallery_gdata', 'dedupe_manifests']
 
 const parseJson = value => {
   if (!value) return null
@@ -26,6 +26,9 @@ class AuditCache {
       driver: sqlite3.Database
     })
     await db.exec(`
+      CREATE TABLE IF NOT EXISTS dedupe_manifests (
+        filepath TEXT PRIMARY KEY, size INTEGER NOT NULL, mtimeMs REAL NOT NULL, manifest TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS cache_entries (
         filepath TEXT PRIMARY KEY,
         size INTEGER NOT NULL,
@@ -67,6 +70,19 @@ class AuditCache {
         OR (ehviewerInspection IS NOT NULL AND ehviewerVersion IS NULL)
     `, [ARCHIVE_HASH_VERSION, CONTENT_INSPECTION_VERSION, EHVIEWER_INSPECTION_VERSION])
     return new AuditCache(db)
+  }
+
+  async getManifest(book, stat) {
+    if (book.type === 'folder') return null
+    const row = await this.db.get('SELECT * FROM dedupe_manifests WHERE filepath = ?', normalizePath(book.filepath))
+    if (!row || row.size !== stat.size || Math.abs(row.mtimeMs - stat.mtimeMs) > 1) return null
+    const manifest = parseJson(row.manifest)
+    return manifest?.version === 1 ? manifest : null
+  }
+
+  async updateManifest(book, stat, manifest) {
+    await this.db.run('INSERT OR REPLACE INTO dedupe_manifests(filepath,size,mtimeMs,manifest) VALUES(?,?,?,?)',
+      normalizePath(book.filepath), stat.size, stat.mtimeMs, JSON.stringify(manifest))
   }
 
   async get(book, stat) {

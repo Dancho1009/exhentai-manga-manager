@@ -48,10 +48,10 @@ const stableId = (...parts) => createHash('sha1')
   .update(parts.map(value => JSON.stringify(value)).join('\u0000'))
   .digest('hex')
 
-const hashFile = filepath => new Promise((resolve, reject) => {
+const hashFile = (filepath, isCancelled = () => false) => new Promise((resolve, reject) => {
   const hash = createHash('sha256')
   const stream = fs.createReadStream(filepath)
-  stream.on('data', chunk => hash.update(chunk))
+  stream.on('data', chunk => { if (isCancelled()) stream.destroy(new Error('AUDIT_CANCELLED')); else hash.update(chunk) })
   stream.on('error', reject)
   stream.on('end', () => resolve(hash.digest('hex')))
 })
