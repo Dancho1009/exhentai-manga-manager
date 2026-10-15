@@ -7,7 +7,8 @@ export default defineConfig({
   plugins: [vue()],
   base: './',
   server: {
-    port: 5374
+    // 5374 is reserved by Windows on some installations (EACCES on ::1/127.0.0.1).
+    port: 15374
   },
   build: {
     rollupOptions: {

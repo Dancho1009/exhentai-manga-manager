@@ -5,6 +5,8 @@ if (!app.requestSingleInstanceLock()) {
   return
 }
 
+const DEV_SERVER_URL = 'http://localhost:15374'
+
 const path = require('path')
 const fs = require('fs')
 const { brotliDecompress } = require('zlib')
@@ -314,7 +316,7 @@ const createWindow = () => {
   if (app.isPackaged) {
     win.loadFile('dist/index.html')
   } else {
-    win.loadURL('http://localhost:5374')
+    win.loadURL(DEV_SERVER_URL)
   }
   mainWindowState.manage(win)
   win.setMenuBarVisibility(false)
@@ -400,7 +402,7 @@ const createAuditWindow = () => {
   win.setMenuBarVisibility(false)
   win.setAutoHideMenuBar(true)
   if (app.isPackaged) win.loadFile('dist/audit.html')
-  else win.loadURL('http://localhost:5374/audit.html')
+  else win.loadURL(`${DEV_SERVER_URL}/audit.html`)
   win.once('ready-to-show', () => win.show())
   win.webContents.on('did-finish-load', () => {
     win.setTitle('exhentai-manga-manager | Library Audit')
@@ -523,7 +525,7 @@ const createBookDetailWindow = context => {
   win.setMenuBarVisibility(false)
   win.setAutoHideMenuBar(true)
   if (app.isPackaged) win.loadFile('dist/book-detail.html')
-  else win.loadURL('http://localhost:5374/book-detail.html')
+  else win.loadURL(`${DEV_SERVER_URL}/book-detail.html`)
   win.once('ready-to-show', () => win.show())
   win.webContents.on('did-finish-load', () => {
     win.setTitle('exhentai-manga-manager | Book Detail')

@@ -74,13 +74,13 @@ echo [4/5] Starting Vite dev server...
 if exist .vite-dev.pid del .vite-dev.pid >nul 2>nul
 if exist .vite-dev.log del .vite-dev.log >nul 2>nul
 if exist .vite-dev.err del .vite-dev.err >nul 2>nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $client = [Net.Sockets.TcpClient]::new('localhost', 5374); $client.Close(); exit 0 } catch { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $client = [Net.Sockets.TcpClient]::new('localhost', 15374); $client.Close(); exit 0 } catch { exit 1 }"
 if errorlevel 1 (
   powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/d /c npm run dev' -WorkingDirectory '%CD%' -WindowStyle Hidden -RedirectStandardOutput '.vite-dev.log' -RedirectStandardError '.vite-dev.err' -PassThru; Set-Content -Path '.vite-dev.pid' -Value $p.Id -Encoding ASCII"
 
-  echo Waiting for http://localhost:5374 ...
+  echo Waiting for http://localhost:15374 ...
   for /l %%i in (1,1,90) do (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $client = [Net.Sockets.TcpClient]::new('localhost', 5374); $client.Close(); exit 0 } catch { exit 1 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $client = [Net.Sockets.TcpClient]::new('localhost', 15374); $client.Close(); exit 0 } catch { exit 1 }"
     if not errorlevel 1 goto vite_ready
     if exist .vite-dev.pid (
       for /f %%p in (.vite-dev.pid) do powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Get-Process -Id %%p -ErrorAction SilentlyContinue; if ($p -and -not $p.HasExited) { exit 0 } else { exit 1 }"
@@ -89,12 +89,12 @@ if errorlevel 1 (
     timeout /t 1 /nobreak >nul
   )
 
-  echo Vite did not become ready on port 5374.
-  echo Close any process using port 5374, then try again.
+  echo Vite did not become ready on port 15374.
+  echo Close any process using port 15374, then try again.
   goto vite_failed_cleanup
 
   :vite_failed
-  echo Vite exited before port 5374 became ready.
+  echo Vite exited before port 15374 became ready.
   if exist .vite-dev.log (
     echo.
     echo ===== Vite stdout =====
@@ -114,7 +114,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 ) else (
-  echo Port 5374 is already open. Reusing the existing dev server.
+  echo Port 15374 is already open. Reusing the existing dev server.
 )
 
 :vite_ready
