@@ -5,7 +5,7 @@ const { DEDUPE_RULES_VERSION } = require('./dedupe_title.js')
 
 const REPORT_SCHEMA_VERSION = 4
 const WORKSPACE_SCHEMA_VERSION = 5
-const REVIEW_SCHEMA_VERSION = 1
+const REVIEW_SCHEMA_VERSION = 2
 const TASK_TYPES = ['anomaly', 'dedupe', 'execution']
 const REPORT_TASK_TYPES = ['anomaly', 'dedupe']
 
@@ -167,7 +167,8 @@ class AuditReportRepository {
     await Promise.all([
       fs.promises.rm(this.channelsPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
       fs.promises.rm(this.jobsPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
-      fs.promises.rm(path.join(this.storePath, 'audit-log.jsonl'), { force: true })
+      fs.promises.rm(path.join(this.storePath, 'audit-log.jsonl'), { force: true }),
+      fs.promises.rm(path.join(this.storePath, 'dedupe-review-history.json'), { force: true })
     ])
     await Promise.all([
       fs.promises.mkdir(this.channelsPath, { recursive: true }),
@@ -237,9 +238,16 @@ class AuditReportRepository {
     if (!state?.latestCompletedJobId || !state.latestReportId) return null
     const fallback = taskType === 'anomaly'
       ? { schemaVersion: REVIEW_SCHEMA_VERSION, taskType, reportId: state.latestReportId, actionIds: [], manualActions: {} }
-      : { schemaVersion: REVIEW_SCHEMA_VERSION, taskType, reportId: state.latestReportId, selections: {}, quarantineRoot: '' }
+      : { schemaVersion: REVIEW_SCHEMA_VERSION, taskType, reportId: state.latestReportId, selections: {}, decisions: {}, quarantineRoot: '' }
     const reviewPath = path.join(this.getJobDir(taskType, state.latestCompletedJobId), 'review.json')
-    const review = await readJson(reviewPath, fallback)
+    let review = await readJson(reviewPath)
+    if (!review) {
+      review = fallback
+      if (taskType === 'dedupe') {
+        const report = await this.getReport(taskType, state)
+        review.decisions = await require('./dedupe_review_repository.js').loadDedupeDecisions(this.storePath, report || {})
+      }
+    }
     return review?.reportId === state.latestReportId ? { ...fallback, ...review } : fallback
   }
 
@@ -260,10 +268,15 @@ class AuditReportRepository {
           taskType,
           reportId: state.latestReportId,
           selections: review?.selections && typeof review.selections === 'object' ? review.selections : {},
+          decisions: review?.decisions && typeof review.decisions === 'object' ? review.decisions : {},
           quarantineRoot: String(review?.quarantineRoot || ''),
           updatedAt: new Date().toISOString()
         }
     await atomicWriteJson(path.join(this.getJobDir(taskType, state.latestCompletedJobId), 'review.json'), value)
+    if (taskType === 'dedupe') {
+      const report = await this.getReport(taskType, state)
+      await require('./dedupe_review_repository.js').saveDedupeDecisions(this.storePath, value.decisions, (report?.groups || []).map(group => group.id))
+    }
     return value
   }
 

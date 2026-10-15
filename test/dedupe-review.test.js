@@ -152,6 +152,24 @@ test('content evidence is reused on warm scans and recomputed independently of f
   assert.ok(forced.groups[0].items.every(item => !item.contentFromCache))
 })
 
+test('negative decisions survive reopening, reset when evidence changes, and remain undone on subsequent scans', async t => {
+  const fixture = await fixtureFor(t, [{ id: 'a' }, { id: 'b', comment: 'repack' }])
+  const report = await scan(fixture, {}, 'history-first')
+  const repository = new AuditReportRepository(fixture.root)
+  const state = { latestCompletedJobId: report.jobId, latestReportId: report.reportId, latestReportPath: path.join(fixture.auditStorePath, 'jobs', 'dedupe', report.jobId, 'report.json') }
+  const group = report.groups[0]
+  await repository.saveReview('dedupe', state, { decisions: { [group.id]: { disposition: 'not-duplicate', evidenceRevision: group.evidenceRevision, reason: 'Keep both' } } })
+  const next = await scan(fixture, {}, 'history-second')
+  const nextState = { latestCompletedJobId: next.jobId, latestReportId: next.reportId, latestReportPath: path.join(fixture.auditStorePath, 'jobs', 'dedupe', next.jobId, 'report.json') }
+  assert.equal((await new AuditReportRepository(fixture.root).getReview('dedupe', nextState)).decisions[group.id].disposition, 'not-duplicate')
+  await repository.saveReview('dedupe', nextState, { decisions: {} })
+  const final = await scan(fixture, {}, 'history-third')
+  assert.deepEqual((await repository.getReview('dedupe', { latestCompletedJobId: final.jobId, latestReportId: final.reportId, latestReportPath: path.join(fixture.auditStorePath, 'jobs', 'dedupe', final.jobId, 'report.json') })).decisions, {})
+  await fs.promises.writeFile((await fixture.Manga.findByPk('b')).filepath, archive({ '01.jpg': 'changed', '.ehviewer': marker }))
+  const changed = await scan(fixture, {}, 'history-changed')
+  assert.notEqual(changed.groups[0].evidenceRevision, group.evidenceRevision)
+})
+
 test('scoped group verification keeps other groups and their lazy evidence references intact', async t => {
   const fixture = await fixtureFor(t, [{ id: 'a', title: 'A', tags: {} }, { id: 'b', title: 'B', tags: {} },
     { id: 'c', title: 'C', tags: {}, url: 'https://exhentai.org/g/654321/abcdef1234/', entries: { '01.jpg': 'other1', '02.jpg': 'other2', '.ehviewer': marker.replace('123456', '654321') } },
