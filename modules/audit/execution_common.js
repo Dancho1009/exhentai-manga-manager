@@ -146,7 +146,8 @@ const mergeRendererState = (rendererState, idMap) => {
 const snapshotMetadataRows = async (Metadata, hashes) => {
   const list = [...new Set([...hashes].filter(Boolean))]
   if (list.length === 0) return []
-  return await Metadata.findAll({ where: { hash: { [Op.in]: list } }, raw: true })
+  const rows = await Metadata.findAll({ where: { hash: { [Op.in]: list } } })
+  return rows.map(row => row.toJSON())
 }
 
 const restoreMetadataRows = async (Metadata, hashes, rows) => {

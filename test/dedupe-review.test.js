@@ -194,6 +194,15 @@ test('scoped group verification keeps other groups and their lazy evidence refer
   assert.deepEqual((await manager.getReport('dedupe')).groups, [unchanged])
 })
 
+test('metadata rollback preserves structured tags without adding JSON encoding', async t => {
+  const fixture = await fixtureFor(t, [{ id: 'a', tags: { artist: ['Original author'], language: ['chinese', 'translated'] } }])
+  const original = (await fixture.Metadata.findByPk('sample-a')).toJSON()
+  const rows = await snapshotMetadataRows(fixture.Metadata, ['sample-a'])
+  await fixture.Metadata.update({ tags: { artist: ['Changed author'] } }, { where: { hash: 'sample-a' } })
+  await restoreMetadataRows(fixture.Metadata, ['sample-a'], rows)
+  assert.deepEqual((await fixture.Metadata.findByPk('sample-a')).toJSON(), original)
+})
+
 test('dedupe workers cancel during manifest enumeration without publishing a completed report', async t => {
   const fixture = await fixtureFor(t, Array.from({ length: 8 }, (_, index) => ({ id: String(index) })))
   const jobDir = path.join(fixture.auditStorePath, 'jobs', 'dedupe', 'cancelled')
