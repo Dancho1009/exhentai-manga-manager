@@ -73,6 +73,32 @@ test('large compressed entry streams close without closing the shared ZIP handle
   assert.deepEqual(await readBookEntry(book, inspection.images[0], {}), payload)
 })
 
+test('full content scans bypass weak filters and distinguish repeated, reordered, inserted and missing pages', async t => {
+  const fixture = await fixtureFor(t, [
+    { id: 'a', title: 'Unrelated A', hash: null, tags: {}, url: '', entries: { '01.jpg': 'one', '02.jpg': 'repeat', '03.jpg': 'repeat', '04.jpg': 'last' } },
+    { id: 'b', title: 'Unrelated B', hash: null, tags: {}, url: '', entries: { '01.jpg': 'last', '02.jpg': 'repeat', '03.jpg': 'one', '04.jpg': 'repeat' } },
+    { id: 'c', title: 'Unrelated C', hash: null, tags: {}, url: '', entries: { '01.jpg': 'one', '02.jpg': 'repeat', '03.jpg': 'insert' } }
+  ])
+  const report = await scan(fixture, { scanMode: 'full' })
+  const items = report.groups[0].items
+  const [a, b] = await Promise.all(['a', 'b'].map(id => evidenceFor(fixture, items.find(item => item.id === id))))
+  const comparison = compareBookEvidence(a.inspection, b.inspection)
+  assert.equal(comparison.multisetEqual, true)
+  assert.equal(comparison.orderedEqual, false)
+  assert.equal(comparison.matchedCount, 4)
+  const cBook = await fixture.Manga.findByPk('c', { raw: true })
+  const c = await inspectBookContent(cBook)
+  const differences = compareBookEvidence(a.inspection, c)
+  assert.equal(differences.matchedCount, 2)
+  assert.equal(differences.onlyLeft.length, 2)
+  assert.equal(differences.onlyRight.length, 1)
+  assert.equal(differences.coverage.left, 0.5)
+  assert.equal(differences.coverage.right, 2 / 3)
+  const { pagePairs } = await import('../src/audit/dedupeReview.mjs')
+  assert.equal(pagePairs({ left: a.inspection, right: b.inspection, comparison }, 'hash').length, 4)
+  assert.equal(pagePairs({ left: a.inspection, right: b.inspection, comparison }, 'hash', true).length, 0)
+})
+
 test('page containment and same-source editions remain manual candidates, not automatic quarantine equivalents', async t => {
   const fixture = await fixtureFor(t, [
     { id: 'short', title: 'Short', entries: { '01.jpg': 'one', '02.jpg': 'two', '.ehviewer': marker } },
@@ -143,6 +169,22 @@ test('same pages with changed sidecars or one unknown source cannot become stric
   const repository = new AuditReportRepository(fixture.root)
   const details = await Promise.all(group.items.map(item => repository.getDedupeEvidence(item)))
   assert.ok(compareBookEvidence(details[0].inspection, details[1].inspection).ancillary.some(entry => entry.status !== 'same' && entry.path === 'note.txt'))
+})
+
+test('a review group contains independent content classes and never quarantines another language through transitivity', async t => {
+  const entries = { '01.jpg': 'jp1', '02.jpg': 'jp2', '.ehviewer': marker }
+  const fixture = await fixtureFor(t, [
+    { id: 'a', entries }, { id: 'b', entries, comment: 'repacked' },
+    { id: 'c', entries: { '01.jpg': 'cn1', '02.jpg': 'cn2', '.ehviewer': marker }, tags: { artist: ['fixture-artist'], language: ['chinese'] } }
+  ])
+  const report = await scan(fixture)
+  assert.equal(report.groups.length, 1)
+  assert.equal(report.groups[0].items.length, 3)
+  assert.deepEqual(report.groups[0].equivalenceClasses[0].memberIds.sort(), ['a', 'b'])
+  const { suggestedDecision, getDecisionFiles } = await import('../src/audit/dedupeReview.mjs')
+  const decision = suggestedDecision(report.groups[0])
+  assert.ok(decision.keepIds.includes('c'))
+  assert.equal(getDecisionFiles(report, { [report.groups[0].id]: decision }).length, 1)
 })
 
 test('folders retain direct-page reading semantics, disclose nested images and invalidate equal-length edits', async t => {
