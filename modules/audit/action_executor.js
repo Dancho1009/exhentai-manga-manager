@@ -4,7 +4,7 @@ const { executeApprovedDuplicates } = require('./dedupe_action_executor.js')
 const inferTaskType = options => {
   if (options.taskType) return options.taskType
   const hasAnomalyActions = (options.anomalyReview?.actionIds || []).length > 0
-  const hasDedupeActions = Object.keys(options.dedupeReview?.selections || {}).length > 0
+  const hasDedupeActions = Object.keys(options.dedupeReview?.selections || {}).length > 0 || Object.values(options.dedupeReview?.decisions || {}).some(decision => decision.disposition === 'duplicate')
   if (hasAnomalyActions && !hasDedupeActions) return 'anomaly'
   if (hasDedupeActions && !hasAnomalyActions) return 'dedupe'
   throw new Error('EXECUTION_TASK_TYPE_REQUIRED')

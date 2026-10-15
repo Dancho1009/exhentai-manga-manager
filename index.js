@@ -2444,7 +2444,9 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
     await auditWorkspaceManager.saveReview('anomaly', { reportId, actionIds: [] })
   } else {
     const dedupeReview = await auditWorkspaceManager.getReview('dedupe')
-    await auditWorkspaceManager.saveReview('dedupe', { reportId, selections: {}, quarantineRoot: dedupeReview?.quarantineRoot || '' })
+    await auditWorkspaceManager.saveReview('dedupe', { reportId, selections: {},
+      decisions: Object.fromEntries(Object.entries(dedupeReview?.decisions || {}).filter(([, decision]) => decision.disposition !== 'duplicate')),
+      quarantineRoot: dedupeReview?.quarantineRoot || '' })
   }
   if (libraryChanged) {
     await auditWorkspaceManager.markReportsStale(`${taskType}-execution:${result.taskType || taskType}`)

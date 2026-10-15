@@ -17,6 +17,7 @@ const { AuditReportRepository } = require('../modules/audit/report_repository.js
 const { AuditWorkspaceManager } = require('../modules/audit/job_manager.js')
 const { LibraryTaskCoordinator } = require('../modules/audit/task_coordinator.js')
 const { executeApprovedDuplicates } = require('../modules/audit/dedupe_action_executor.js')
+const { verifyDedupeItem } = require('../modules/audit/dedupe_verification.js')
 const { snapshotMetadataRows, restoreMetadataRows } = require('../modules/audit/execution_common.js')
 
 const fixtureFor = async (t, descriptors) => { const fixture = await createFixture(descriptors); t.after(fixture.cleanup); return fixture }
@@ -115,6 +116,19 @@ test('7z manifests, streaming page proofs and selected-entry extraction preserve
   assert.equal((await readBookEntry(book, inspection.ancillary.find(entry => entry.path === 'note[1].txt'), { sevenZipPath })).toString(), 'literal notes')
 })
 
+test('registered nested books invalidate the parent decision and prevent parent-folder isolation', async t => {
+  const entries = { '01.jpg': 'one', '02.jpg': 'two', 'nested/01.jpg': 'child', '.ehviewer': marker }
+  const fixture = await fixtureFor(t, [{ id: 'a', type: 'folder', entries }, { id: 'b', type: 'folder', entries }])
+  const before = await scan(fixture)
+  await fixture.Manga.create({ id: 'child', hash: null, filepath: path.join(fixture.library, 'a', 'nested'), type: 'folder', title: 'Child', url: '', tags: {} })
+  const after = await scan(fixture)
+  const group = after.groups.find(group => group.items.some(item => item.id === 'a'))
+  assert.ok(group.items.find(item => item.id === 'a').nestedBookIds.includes('child'))
+  assert.notEqual(group.evidenceRevision, before.groups[0].evidenceRevision)
+  assert.throws(() => normalizeDedupeReview(after, { reportId: after.reportId, decisions: { [group.id]: decisionFor(group, { a: 'b' }, true) } }), /FOLDER_CONTAINS_OTHER_BOOKS/)
+  assert.ok(fs.existsSync(path.join(fixture.library, 'a', 'nested', '01.jpg')))
+})
+
 test('same pages with changed sidecars or one unknown source cannot become strict-content', async t => {
   const fixture = await fixtureFor(t, [
     { id: 'a', entries: { '01.jpg': 'one', '02.jpg': 'two' } },
@@ -128,6 +142,23 @@ test('same pages with changed sidecars or one unknown source cannot become stric
   const repository = new AuditReportRepository(fixture.root)
   const details = await Promise.all(group.items.map(item => repository.getDedupeEvidence(item)))
   assert.ok(compareBookEvidence(details[0].inspection, details[1].inspection).ancillary.some(entry => entry.status !== 'same' && entry.path === 'note.txt'))
+})
+
+test('folders retain direct-page reading semantics, disclose nested images and invalidate equal-length edits', async t => {
+  const entries = { '01.jpg': 'one', '02.jpg': 'two', 'nested/01.jpg': 'nested', '.ehviewer': marker }
+  const fixture = await fixtureFor(t, [{ id: 'a', type: 'folder', entries }, { id: 'b', type: 'folder', entries }])
+  const report = await scan(fixture)
+  const group = report.groups[0]
+  assert.equal(group.items[0].actualPageCount, 2)
+  assert.deepEqual(group.items[0].uncoveredEntries, ['nested/01.jpg'])
+  assert.equal(group.eligible, false)
+  const item = group.items.find(item => item.id === 'a')
+  const directoryStamp = await fs.promises.stat(item.filepath)
+  await fs.promises.writeFile(path.join(item.filepath, '01.jpg'), 'new')
+  await fs.promises.utimes(item.filepath, directoryStamp.atime, directoryStamp.mtime)
+  await assert.rejects(verifyDedupeItem(item, { ...fixture, isCancelled: () => false }), /DEDUPE_CONTENT_CHANGED/)
+  const changed = await scan(fixture)
+  assert.notEqual(changed.groups[0].evidenceRevision, group.evidenceRevision)
 })
 
 test('unreadable identical containers and duplicate database paths never receive a batch suggestion', async t => {
@@ -150,6 +181,21 @@ test('content evidence is reused on warm scans and recomputed independently of f
   assert.ok(warm.groups[0].items.every(item => item.contentFromCache))
   const forced = await scan(fixture, { scanMode: 'full', forceRecompute: true })
   assert.ok(forced.groups[0].items.every(item => !item.contentFromCache))
+})
+
+test('decisions bind evidence revisions, validate explicit mappings and preview unique physical files', async t => {
+  const fixture = await fixtureFor(t, [{ id: 'a' }, { id: 'b', comment: 'repack' }, { id: 'c', entries: { '01.jpg': 'edition', '.ehviewer': marker } }])
+  const report = await scan(fixture)
+  const group = report.groups[0]
+  const review = { reportId: report.reportId, decisions: { [group.id]: decisionFor(group, { b: 'a' }) }, quarantineRoot: path.join(fixture.root, 'Quarantine') }
+  const preview = buildExecutionPreview({ taskType: 'dedupe', report, review, library: fixture.library })
+  assert.equal(preview.quarantineFileCount, 1)
+  assert.equal(preview.files[0].keepId, 'a')
+  assert.equal(preview.potentialBytes, group.items.find(item => item.id === 'b').size)
+  assert.throws(() => normalizeDedupeReview(report, { ...review, decisions: { [group.id]: { ...review.decisions[group.id], evidenceRevision: 'old' } } }), /EVIDENCE_CHANGED/)
+  assert.throws(() => normalizeDedupeReview(report, { ...review, decisions: { [group.id]: decisionFor(group, { c: 'a' }) } }), /DIFFERENCES_NOT_CONFIRMED/)
+  assert.doesNotThrow(() => normalizeDedupeReview(report, { ...review, decisions: { [group.id]: decisionFor(group, { c: 'a' }, true) } }))
+  assert.throws(() => normalizeDedupeReview(report, { ...review, decisions: { [group.id]: { ...decisionFor(group, { b: 'a', a: 'b' }), keepIds: ['a', 'b'] } } }), /INVALID_DUPLICATE_SELECTION/)
 })
 
 test('negative decisions survive reopening, reset when evidence changes, and remain undone on subsequent scans', async t => {
@@ -192,6 +238,49 @@ test('scoped group verification keeps other groups and their lazy evidence refer
   await manager.startDedupe({ library: fixture.library, databasePath: fixture.databasePath, metadataPath: fixture.metadataPath, auditStorePath: fixture.auditStorePath, reportId: after.reportId, groupIds: [changed.id] })
   await waitForDedupe(manager)
   assert.deepEqual((await manager.getReport('dedupe')).groups, [unchanged])
+})
+
+test('execution rechecks archive bytes even when size and mtime are unchanged, plus current metadata provenance', async t => {
+  const fixture = await fixtureFor(t, [{ id: 'a', comment: 'one' }, { id: 'b', comment: 'one' }])
+  const report = await scan(fixture)
+  const item = report.groups[0].items.find(item => item.id === 'b')
+  const stamp = await fs.promises.stat(item.filepath)
+  const buffer = await fs.promises.readFile(item.filepath)
+  buffer[buffer.length - 1] ^= 1
+  await fs.promises.writeFile(item.filepath, buffer)
+  await fs.promises.utimes(item.filepath, stamp.atime, stamp.mtime)
+  await assert.rejects(verifyDedupeItem(item, { ...fixture, isCancelled: () => false }), /DEDUPE_CONTENT_CHANGED/)
+  const keeper = report.groups[0].items.find(item => item.id === 'a')
+  await fixture.Metadata.update({ url: 'https://nhentai.net/g/123456/' }, { where: { hash: keeper.hash } })
+  await assert.rejects(verifyDedupeItem(keeper, { ...fixture, isCancelled: () => false }), /DEDUPE_METADATA_CHANGED/)
+})
+
+test('new mapped approvals execute quarantine, merge user state and preserve before/after snapshots and history', async t => {
+  const fixture = await fixtureFor(t, [{ id: 'a', readCount: 2, hiddenBook: true }, { id: 'b', readCount: 7, mark: true }])
+  await fixture.Metadata.update({ title: 'Effective keeper title' }, { where: { hash: 'sample-a' } })
+  const originalTags = (await fixture.Metadata.findByPk('sample-a')).tags
+  const report = await scan(fixture)
+  const group = report.groups[0]
+  const executionId = 'mapped-execution', executionDir = path.join(fixture.auditStorePath, 'executions', executionId)
+  await fs.promises.mkdir(executionDir, { recursive: true })
+  let collections
+  const result = await executeApprovedDuplicates({ ...fixture, dedupeReport: report,
+    dedupeReview: { reportId: report.reportId, decisions: { [group.id]: decisionFor(group, { b: 'a' }) }, quarantineRoot: path.join(fixture.root, 'Quarantine') }, executionId, executionDir,
+    collectionList: [{ id: 'collection', list: ['sample-b'] }], saveCollectionList: async value => { collections = value },
+    rendererState: { recentRead: [{ id: 'b' }], viewerReadingProgress: [{ bookId: 'b', pageId: '02.jpg' }] } })
+  assert.equal(result.movedCount, 1)
+  assert.equal(await fixture.Manga.count(), 1)
+  const keeper = await fixture.Manga.findByPk('a')
+  assert.equal(keeper.mark, true)
+  assert.equal(keeper.readCount, 7)
+  assert.equal((await fixture.Metadata.findByPk('sample-a')).title, 'Effective keeper title')
+  assert.deepEqual((await fixture.Metadata.findByPk('sample-a')).tags, originalTags)
+  const storedMetadata = await fixture.Metadata.findByPk('sample-a', { raw: true })
+  assert.deepEqual(JSON.parse(storedMetadata.tags), originalTags, 'Persisted tags must decode to an object after one JSON parse')
+  assert.deepEqual(collections[0].list, ['sample-a'])
+  const state = JSON.parse(await fs.promises.readFile(result.statePath, 'utf8'))
+  assert.equal(state.before.mangas.length, 2)
+  assert.equal(state.after.mangas.length, 1)
 })
 
 test('metadata rollback preserves structured tags without adding JSON encoding', async t => {

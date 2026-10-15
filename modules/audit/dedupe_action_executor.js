@@ -1,6 +1,9 @@
 const path = require('path')
 const { Op } = require('sequelize')
-const { normalizeDedupeReview, assertQuarantineRoot } = require('./review_validator.js')
+const { normalizeDedupeReview, assertQuarantineRoot, getDedupeActions } = require('./review_validator.js')
+const { verifyDedupeItem } = require('./dedupe_verification.js')
+const { atomicWriteJson, normalizePath } = require('./utils.js')
+const { mergeEffectiveBook } = require('../book_detail.js')
 const {
   backupExecutionState,
   ensureExpectedFile,
@@ -28,6 +31,7 @@ const executeApprovedDuplicates = async ({
   Metadata,
   databasePath,
   metadataPath,
+  sevenZipPath,
   collectionList,
   saveCollectionList,
   library,
@@ -41,19 +45,17 @@ const executeApprovedDuplicates = async ({
     quarantineRoot: dedupeReview?.quarantineRoot || fallbackQuarantineRoot
   })
   const quarantineRoot = assertQuarantineRoot(library, review.quarantineRoot)
-  const selectedGroups = Object.entries(review.selections)
-  if (selectedGroups.length === 0) throw new Error('NO_APPROVED_ACTIONS')
-
-  const groupMap = new Map((dedupeReport.groups || []).map(group => [String(group.id), group]))
-  const duplicateActions = selectedGroups.map(([groupId, selection]) => {
-    const group = groupMap.get(groupId)
-    const keep = group.items.find(item => String(item.id) === selection.keepId)
-    const quarantineIdSet = new Set(selection.quarantineIds)
-    const quarantineItems = group.items.filter(item => quarantineIdSet.has(String(item.id)))
-    return { group, keep, quarantineItems }
-  })
+  const duplicateActions = getDedupeActions(dedupeReport, review)
   const totalActions = duplicateActions.reduce((sum, action) => sum + action.quarantineItems.length, 0)
   if (totalActions === 0) throw new Error('NO_APPROVED_ACTIONS')
+  const removedFolders = duplicateActions.flatMap(action => action.quarantineItems).filter(item => item.type === 'folder')
+  if (removedFolders.length) {
+    const currentPaths = await Manga.findAll({ attributes: ['id', 'filepath'], raw: true })
+    for (const folder of removedFolders) {
+      const prefix = normalizePath(folder.filepath) + path.sep
+      if (currentPaths.some(book => book.filepath && normalizePath(book.filepath).startsWith(prefix))) throw new Error('DUPLICATE_FOLDER_CONTAINS_OTHER_BOOKS: ' + folder.id)
+    }
+  }
 
   const context = createExecutionContext({ executionDir, auditStorePath, executionId, isCancelled })
   const { backupDir, writeActionLog, assertNotCancelled } = context
@@ -64,6 +66,13 @@ const executeApprovedDuplicates = async ({
   let databaseCommitted = false
   let metadataCommitted = false
   let collectionWriteAttempted = false
+  const verifiedIds = new Set()
+  const verify = async item => {
+    if (verifiedIds.has(String(item.id))) return
+    if (dedupeReport.dedupeVersion >= 2) await verifyDedupeItem(item, { Manga, Metadata, sevenZipPath, isCancelled })
+    else await ensureExpectedFile(item)
+    verifiedIds.add(String(item.id))
+  }
 
   try {
     await setProgress({ phase: 'validating-approvals', completed: 0, total: totalActions, phaseCompleted: 0, phaseTotal: totalActions })
@@ -78,11 +87,11 @@ const executeApprovedDuplicates = async ({
         phaseTotal: totalActions,
         currentItem: { id: String(action.keep.id), title: action.keep.title || path.basename(action.keep.filepath), filepath: action.keep.filepath }
       })
-      await ensureExpectedFile(action.keep)
+      await verify(action.keep)
       for (const item of action.quarantineItems) {
         const currentItem = { id: String(item.id), title: item.title || path.basename(item.filepath), filepath: item.filepath }
         await setProgress({ phase: 'validating-approvals', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions, currentItem })
-        await ensureExpectedFile(item)
+        await verify(item)
         completed += 1
         await setProgress({ phase: 'validating-approvals', completed, total: totalActions, phaseCompleted: completed, phaseTotal: totalActions, currentItem })
       }
@@ -92,6 +101,11 @@ const executeApprovedDuplicates = async ({
     await setProgress({ phase: 'preparing-execution', completed: 0, total: totalActions, phaseCompleted: 0, phaseTotal: totalActions, currentItem: null })
     await backupExecutionState({ backupDir, databasePath, metadataPath, rendererState })
     const originalMetadataRows = await snapshotMetadataRows(Metadata, affectedHashes)
+    const participantIds = [...new Set(duplicateActions.flatMap(action => [action.keep.id, ...action.quarantineItems.map(item => item.id)]))]
+    const beforeState = { mangas: await Manga.findAll({ where: { id: { [Op.in]: participantIds } }, raw: true }), metadata: originalMetadataRows,
+      collections: collectionList, rendererState }
+    const statePath = path.join(executionDir, 'dedupe-state.json')
+    await atomicWriteJson(statePath, { executionId, reportId: dedupeReport.reportId, review, before: beforeState })
 
     completed = 0
     for (const action of duplicateActions) {
@@ -103,7 +117,8 @@ const executeApprovedDuplicates = async ({
         if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`FILE_OUTSIDE_LIBRARY: ${item.filepath}`)
         const requestedTarget = path.join(quarantineRoot, executionId, relative)
         const target = await uniqueTargetPath(requestedTarget, item.id)
-        await writeActionLog({ status: 'prepared', type: 'quarantine', groupId: action.group.id, source: item.filepath, target, keepId: action.keep.id })
+        await writeActionLog({ status: 'prepared', type: 'quarantine', groupId: action.group.id, evidenceRevision: action.group.evidenceRevision,
+          reason: review.decisions[action.group.id]?.reason || '', source: item.filepath, target, keepId: action.keep.id })
         await moveAndVerify(item.filepath, target)
         movedFiles.push({ source: item.filepath, target })
         idMap[item.id] = action.keep.id
@@ -128,6 +143,10 @@ const executeApprovedDuplicates = async ({
           mark: allBooks.some(book => Boolean(book.mark)),
           hiddenBook: allBooks.every(book => Boolean(book.hiddenBook))
         }, { transaction: mangaTransaction })
+        const keepMetadata = keepBook.hash ? await Metadata.findByPk(keepBook.hash, { transaction: metadataTransaction }) : null
+        const effectiveKeeper = mergeEffectiveBook({ manga: keepBook.toJSON(),
+          metadata: keepMetadata?.toJSON() || null,
+          hashPeers: keepBook.hash ? await Manga.findAll({ where: { hash: keepBook.hash }, raw: true, transaction: mangaTransaction }) : [] })
         await Manga.destroy({ where: { id: { [Op.in]: quarantineIds } }, transaction: mangaTransaction })
 
         const removedKeys = new Set(action.quarantineItems.flatMap(item => [item.id, item.hash]).filter(Boolean))
@@ -137,7 +156,7 @@ const executeApprovedDuplicates = async ({
         }))
 
         if (keepBook.hash && await Manga.count({ where: { hash: keepBook.hash }, transaction: mangaTransaction }) === 1) {
-          await Metadata.upsert(selectModelFields(Metadata, keepBook.toJSON()), { transaction: metadataTransaction })
+          await Metadata.upsert(selectModelFields(Metadata, { ...effectiveKeeper, mark: keepBook.mark }), { transaction: metadataTransaction })
         }
         for (const hash of new Set(action.quarantineItems.map(item => item.hash).filter(Boolean))) {
           if (await Manga.count({ where: { hash }, transaction: mangaTransaction }) === 0) {
@@ -187,6 +206,11 @@ const executeApprovedDuplicates = async ({
     }
 
     const nextRendererState = mergeRendererState(rendererState, idMap)
+    await atomicWriteJson(statePath, { executionId, reportId: dedupeReport.reportId, review, before: beforeState,
+      after: { mangas: await Manga.findAll({ where: { id: { [Op.in]: participantIds } }, raw: true }), metadata: await snapshotMetadataRows(Metadata, affectedHashes),
+        collections: nextCollections, rendererState: nextRendererState }, movedFiles }).catch(async error => {
+      await writeActionLog({ status: 'recovery-required', target: statePath, error: error.message }).catch(() => {})
+    })
     await setProgress({ phase: 'writing-metadata', completed: totalActions, total: totalActions, phaseCompleted: totalActions, phaseTotal: totalActions, currentItem: null })
     await setProgress({ phase: 'verified', completed: totalActions, total: totalActions, phaseCompleted: totalActions, phaseTotal: totalActions, currentItem: null })
     await writeActionLog({ status: 'verified', taskType: 'dedupe', movedCount: movedFiles.length, repairedCount: 0 }).catch(() => {})
@@ -194,6 +218,8 @@ const executeApprovedDuplicates = async ({
       success: true,
       taskType: 'dedupe',
       backupDir,
+      executionId,
+      statePath,
       rendererState: nextRendererState,
       collectionList: nextCollections,
       movedCount: movedFiles.length,

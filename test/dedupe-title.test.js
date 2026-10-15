@@ -93,6 +93,30 @@ test('daily worker verifies same-issue editions without artist overlap and exclu
   assert.ok(report.groups[0].items.every(item => item.contentProof))
 })
 
+test('old candidate reports are read-only and cannot be used as scoped verification bases', async t => {
+  const fixture = await createFixture([{ id: 'a' }, { id: 'b' }]); t.after(fixture.cleanup)
+  const repository = new AuditReportRepository(fixture.root)
+  await repository.initialize()
+  const report = await scan(fixture, {}, 'rules-current')
+  const reportPath = path.join(fixture.auditStorePath, 'jobs', 'dedupe', report.jobId, 'report.json')
+  const state = { latestCompletedJobId: report.jobId, latestReportId: report.reportId, latestReportPath: reportPath }
+  assert.equal((await repository.getReport('dedupe', state)).executable, true)
+  const oldRevision = require('../modules/audit/utils.js').stableId(report.groups[0].items.map(item => [item.id, item.filepath, item.archiveSha256, item.contentProof, item.folderFingerprint, item.size, item.mtimeMs, item.sourceEvidence.fingerprint, item.metadataFingerprint, item.nestedBookIds.slice().sort()]))
+  assert.notEqual(oldRevision, report.groups[0].evidenceRevision)
+  const oldReport = { ...report }; delete oldReport.dedupeRulesVersion
+  await fs.promises.writeFile(reportPath, JSON.stringify(oldReport))
+  const outdated = await new AuditReportRepository(fixture.root).getReport('dedupe', state)
+  assert.equal(outdated.outdatedRules, true)
+  assert.equal(outdated.executable, false)
+  const decision = { disposition: 'duplicate', evidenceRevision: report.groups[0].evidenceRevision,
+    keepIds: ['a'], quarantineToKeep: { b: 'a' }, reason: '', confirmedConflictCodes: [] }
+  assert.throws(() => require('../modules/audit/review_validator.js').normalizeDedupeReview(outdated,
+    { reportId: report.reportId, decisions: { [report.groups[0].id]: decision } }), /DEDUPE_REPORT_NOT_EXECUTABLE/)
+  const manager = new AuditWorkspaceManager({ storePath: fixture.root, coordinator: new LibraryTaskCoordinator() })
+  manager.getReport = async () => outdated
+  await assert.rejects(manager.startDedupe({ reportId: report.reportId, groupIds: [report.groups[0].id] }), /DEDUPE_REVIEW_MISMATCH/)
+})
+
 test('daily and full workers retain repacked byte copies with missing old hashes and differing title numbers', async t => {
   const fixture = await createFixture([
     { id: 'a', title: 'Title Ch.1', url: '', hash: null, entries: { '01.jpg': 'first page', '02.jpg': 'last page' } },
