@@ -74,7 +74,8 @@
             :busy="busy"
             :review-locked="reviewLocked"
             :selections="dedupeReview.selections"
-            :quarantine-root="dedupeReview.quarantineRoot"
+            :decisions="dedupeReview.decisions"
+            :commit-decisions="commitDedupeDecisions"
             :review-saving="reviewSaving.dedupe"
             :review-dirty="reviewDirty.dedupe"
             @start="startDedupe"
@@ -91,6 +92,7 @@
         v-model="executionDialogVisible"
         :preview="executionPreview"
         :submitting="executionSubmitting"
+        @select-quarantine="selectQuarantine"
         @confirm="confirmExecution"
       />
 
@@ -156,7 +158,7 @@ const workspace = ref(emptyWorkspace())
 const anomalyReport = ref(null)
 const dedupeReport = ref(null)
 const anomalyReview = ref({ reportId: null, actionIds: [] })
-const dedupeReview = ref({ reportId: null, selections: {} })
+const dedupeReview = ref({ reportId: null, selections: {}, decisions: {} })
 const logs = ref([])
 const activeTab = ref('anomaly')
 const actionPending = ref(false)
@@ -235,7 +237,7 @@ const normalizeWorkspace = value => ({
 
 const defaultReview = (taskType, report) => taskType === 'anomaly'
   ? { reportId: report?.reportId || null, actionIds: [], manualActions: {} }
-  : { reportId: report?.reportId || null, selections: {}, quarantineRoot: defaultQuarantineRoot }
+  : { reportId: report?.reportId || null, selections: {}, decisions: {}, quarantineRoot: defaultQuarantineRoot }
 
 const loadTaskData = async taskType => {
   const token = ++reportLoadTokens[taskType]
@@ -319,7 +321,10 @@ const verifyConflicts = bookIds => runAction(() => window.auditApi.startAnomaly(
   forceLocal: false,
   forceOnline: false
 }))
-const startDedupe = options => runAction(() => window.auditApi.startDedupe(options))
+const startDedupe = async options => {
+  if (reviewDirty.dedupe) { try { await persistReview('dedupe') } catch (error) { showError(error); return } }
+  return runAction(() => window.auditApi.startDedupe(options))
+}
 const cancelActive = () => runAction(() => window.auditApi.cancelActive())
 const confirmClearInspectionRecords = async () => {
   if (busy.value) return
@@ -380,6 +385,19 @@ const updateDedupeSelections = selections => {
   reviewRevision.dedupe += 1
   dedupeReview.value = { ...dedupeReview.value, selections }
   scheduleReviewSave('dedupe')
+}
+const commitDedupeDecisions = async changes => {
+  const decisions = { ...(dedupeReview.value.decisions || {}) }
+  const selections = { ...(dedupeReview.value.selections || {}) }
+  for (const [id, decision] of Object.entries(changes)) {
+    delete selections[id]
+    if (decision) decisions[id] = decision
+    else delete decisions[id]
+  }
+  reviewRevision.dedupe += 1
+  dedupeReview.value = { ...dedupeReview.value, selections, decisions }
+  reviewDirty.dedupe = true
+  return await persistReview('dedupe')
 }
 const updateQuarantineRoot = value => {
   reviewRevision.dedupe += 1
@@ -461,7 +479,13 @@ const confirmExecution = async () => {
 const selectQuarantine = async () => {
   try {
     const value = await window.auditApi.selectQuarantine(dedupeReview.value.quarantineRoot)
-    if (value) updateQuarantineRoot(value)
+    if (value) {
+      updateQuarantineRoot(value)
+      if (executionDialogVisible.value && executionPreview.value?.taskType === 'dedupe') {
+        await persistReview('dedupe')
+        executionPreview.value = await window.auditApi.getExecutionPreview({ taskType: 'dedupe', reportId: dedupeReport.value.reportId })
+      }
+    }
   } catch (error) {
     showError(error)
   }
@@ -514,8 +538,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  min-height: 82px;
-  padding: 12px 18px;
+  min-height: 50px;
+  padding: 10px 18px;
   border-bottom: 1px solid var(--el-border-color);
 }
 .audit-heading { min-width: 0; }
@@ -536,4 +560,5 @@ onBeforeUnmount(() => {
   .audit-toolbar { align-items: flex-start; }
   .audit-heading h1 { font-size: 21px; }
 }
+@media (max-width: 850px) { .audit-toolbar { min-height: 50px; padding-top: 8px; padding-bottom: 8px; }.audit-tabs :deep(.el-tabs__content) { height: calc(100% - 61px); } }
 </style>

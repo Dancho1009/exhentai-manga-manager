@@ -15,8 +15,10 @@ const anomalyStages = options => [
 const dedupeStages = () => [
   stage('prepare', 'audit.stage_prepare', ['starting']),
   stage('snapshot', 'audit.stage_librarySnapshot', ['enumerating-library', 'snapshot-files']),
+  stage('manifest', 'audit.stage_manifest', ['enumerating-manifests']),
   stage('archive-hash', 'audit.stage_archiveHash', ['hashing-archives']),
   stage('content-verification', 'audit.stage_contentVerification', ['inspecting-content']),
+  stage('relationships', 'audit.stage_relationships', ['classifying-relations']),
   stage('report', 'audit.stage_finalizeReport', ['finalizing-report', 'completed'])
 ]
 

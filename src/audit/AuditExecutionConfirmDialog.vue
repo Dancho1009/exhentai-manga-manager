@@ -2,7 +2,7 @@
   <el-dialog
     :model-value="modelValue"
     :title="dialogTitle"
-    width="620px"
+    :width="preview?.taskType === 'dedupe' ? '90%' : '620px'"
     :close-on-click-modal="false"
     :close-on-press-escape="!submitting"
     :show-close="!submitting"
@@ -30,13 +30,23 @@
         <el-descriptions-item :label="$t('audit.manualReviewGroups')">{{ preview.manualReviewGroupCount }}</el-descriptions-item>
       </template>
     </el-descriptions>
+    <template v-if="preview?.taskType === 'dedupe'">
+      <div class="quarantine-choice"><el-button :disabled="submitting" @click="$emit('select-quarantine')">{{ $t('audit.chooseFolder') }}</el-button><span>{{ $t('audit.dedupeReview.quarantineNote') }}</span></div>
+      <p>{{ $t('audit.dedupeReview.mergeRule') }}</p>
+      <el-table :data="preview.files || []" max-height="370" class="execution-files">
+        <el-table-column :label="$t('audit.dedupeReview.quarantineFile')" min-width="200"><template #default="{ row }"><strong>{{ row.title }}</strong><p>{{ row.source }}</p></template></el-table-column>
+        <el-table-column :label="$t('audit.dedupeReview.keeper')" min-width="180"><template #default="{ row }"><strong>{{ row.keepTitle }}</strong><p>{{ row.keepPath }}</p></template></el-table-column>
+        <el-table-column :label="$t('audit.dedupeReview.target')" min-width="210"><template #default="{ row }"><p>{{ row.target }}</p><span>{{ formatBytes(row.size) }}</span></template></el-table-column>
+        <el-table-column :label="$t('audit.dedupeReview.impact')" min-width="220"><template #default="{ row }"><p>{{ row.reason || $t('audit.useSuggestion') }}</p><p v-if="row.uniquePages">{{ $t('audit.dedupeReview.uniquePageImpact', { count: row.uniquePages }) }}</p><p v-for="entry in row.ancillaryLoss || []" :key="entry.path">{{ entry.path }} · {{ entry.status }}</p><p v-if="row.uncoveredEntries?.length">{{ $t('audit.dedupeReview.uncovered', { count: row.uncoveredEntries.length }) }}</p><p v-if="row.collectionTitles?.length">{{ row.collectionTitles.join('、') }}</p><p v-if="row.mergedReadCount !== undefined">{{ $t('audit.dedupeReview.reading') }}: {{ row.mergedReadCount }} · {{ $t('audit.dedupeReview.' + (row.mergedMark ? 'marked' : 'unmarked')) }}</p></template></el-table-column>
+      </el-table>
+    </template>
 
     <el-checkbox v-if="requiresRiskConfirmation" v-model="riskConfirmed" class="risk-confirmation">
       {{ riskConfirmationText }}
     </el-checkbox>
 
     <template #footer>
-      <el-button :disabled="submitting" @click="$emit('update:modelValue', false)">{{ $t('m.cancel') }}</el-button>
+      <el-button :disabled="submitting" @click="$emit('update:modelValue', false)">{{ $t('c.cancel') }}</el-button>
       <el-button type="danger" :loading="submitting" :disabled="requiresRiskConfirmation && !riskConfirmed" @click="$emit('confirm')">
         {{ confirmLabel }}
       </el-button>
@@ -53,7 +63,7 @@ const props = defineProps({
   preview: { type: Object, default: null },
   submitting: Boolean
 })
-defineEmits(['update:modelValue', 'confirm'])
+defineEmits(['update:modelValue', 'confirm', 'select-quarantine'])
 const { t } = useI18n()
 const riskConfirmed = ref(false)
 
@@ -93,4 +103,6 @@ const formatBytes = value => {
 .execution-preview { margin-top: 16px; }
 .execution-preview :deep(.el-descriptions__label) { width: 180px; }
 .risk-confirmation { height: auto; margin-top: 16px; white-space: normal; }
+.quarantine-choice { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 14px; font-size: 12px; color: var(--el-text-color-secondary); }
+.execution-files p { margin: 5px 0; overflow-wrap: anywhere; font-size: 12px; }
 </style>

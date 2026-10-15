@@ -157,7 +157,7 @@ const optionLabels = computed(() => {
     ].filter(Boolean)
   }
   if (props.activeTask?.type === 'dedupe') {
-    return [options.forceContent ? t('audit.forceContent') : t('audit.cacheAllowed')]
+    return [t('audit.dedupeReview.' + (options.scanMode === 'full' ? 'full' : 'daily')), options.forceRecompute ? t('audit.dedupeReview.recompute') : t('audit.cacheAllowed')]
   }
   if (props.activeTask?.type === 'execution') {
     return [options.sourceTaskType === 'dedupe' ? t('audit.dedupeTab') : t('audit.anomalyTab')]
