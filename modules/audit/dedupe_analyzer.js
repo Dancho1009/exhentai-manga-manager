@@ -1,13 +1,19 @@
 const path = require('path')
-const { normalizePath, stableId } = require('./utils.js')
+const { normalizePath, stableId, metadataFingerprint } = require('./utils.js')
+const { resolveBookIdentity } = require('./dedupe_identity.js')
 
 const summarizeBook = wrapped => ({
-  id: wrapped.raw.id,
+  id: String(wrapped.raw.id),
   filepath: wrapped.raw.filepath,
   type: wrapped.raw.type,
   size: wrapped.actual?.size ?? wrapped.raw.bundleSize,
+  transferBytes: wrapped.raw.type === 'folder' && wrapped.manifest ? wrapped.manifest.entries.reduce((sum, entry) => sum + Number(entry.size || 0), 0) : wrapped.actual?.size ?? wrapped.raw.bundleSize,
   mtimeMs: wrapped.actual?.mtimeMs ?? null,
   title: wrapped.effective.title || wrapped.raw.title || path.basename(wrapped.raw.filepath),
+  title_jpn: wrapped.effective.title_jpn || wrapped.raw.title_jpn || '',
+  coverPath: wrapped.effective.coverPath || wrapped.raw.coverPath || null,
+  tags: wrapped.effective.tags || wrapped.raw.tags || {},
+  rawUrl: wrapped.raw.url || null,
   url: wrapped.effective.url || null,
   status: wrapped.effective.status || wrapped.raw.status,
   readCount: Number(wrapped.raw.readCount || 0),
@@ -15,7 +21,21 @@ const summarizeBook = wrapped => ({
   hiddenBook: Boolean(wrapped.raw.hiddenBook),
   hash: wrapped.raw.hash,
   coverHash: wrapped.raw.coverHash,
-  pageCount: wrapped.raw.pageCount
+  pageCount: wrapped.raw.pageCount,
+  actualPageCount: wrapped.inspection?.pageCount ?? wrapped.manifest?.pageCount ?? null,
+  declaredPageCount: wrapped.effective.filecount ?? null,
+  archiveSha256: wrapped.archiveSha256 || null,
+  contentProof: wrapped.inspection ? require('./dedupe_comparison.js').contentProof(wrapped.inspection) : null,
+  sourceEvidence: resolveBookIdentity(wrapped, wrapped.inspection?.ehviewer || wrapped.manifest?.ehviewer),
+  folderFingerprint: wrapped.manifest?.folderFingerprint || null,
+  imageFormats: [...new Set((wrapped.manifest?.images || []).map(entry => path.extname(entry.path).toLowerCase()))],
+  uncoveredEntries: wrapped.manifest?.uncoveredEntries || [],
+  nestedBookIds: wrapped.nestedBookIds || [],
+  semantic: wrapped.semantic || null,
+  metadataFingerprint: metadataFingerprint(wrapped.effective),
+  contentFromCache: Boolean(wrapped.inspection?.fromCache),
+  contentVerification: wrapped.inspection ? { method: wrapped.inspection.verificationMethod, representativeBookId: wrapped.inspection.representativeBookId } : null,
+  ignoredEntries: wrapped.manifest?.ignoredEntries || []
 })
 
 const scoreKeeper = wrapped => {
@@ -94,5 +114,6 @@ module.exports = {
   groupBy,
   summarizeBook,
   createDuplicateGroup,
-  analyzeBookRelations
+  analyzeBookRelations,
+  scoreKeeper
 }

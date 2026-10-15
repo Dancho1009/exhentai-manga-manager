@@ -2197,7 +2197,10 @@ ipcMain.handle('audit:start-dedupe', async (event, request = {}) => {
   await databaseReady
   return await auditWorkspaceManager.startDedupe({
     ...getAuditWorkerOptions(),
-    forceContent: Boolean(request.forceContent)
+    scanMode: request.scanMode === 'full' ? 'full' : 'daily',
+    forceRecompute: Boolean(request.forceRecompute || request.forceContent),
+    groupIds: normalizeAuditBookIds(request.groupIds),
+    reportId: String(request.reportId || '')
   })
 })
 

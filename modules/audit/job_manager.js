@@ -26,7 +26,7 @@ const sanitizeOptions = (taskType, options = {}) => {
       forceOnline: Boolean(options.forceOnline)
     }
   }
-  if (taskType === 'dedupe') return { forceContent: Boolean(options.forceContent) }
+  if (taskType === 'dedupe') return { scanMode: options.scanMode === 'full' ? 'full' : 'daily', forceRecompute: Boolean(options.forceRecompute || options.forceContent), scope: options.baseReport ? 'groups' : options.scope || 'library' }
   if (taskType === 'execution') {
     return {
       sourceTaskType: REPORT_TASK_TYPES.includes(options.sourceTaskType) ? options.sourceTaskType : null,
@@ -198,6 +198,13 @@ class AuditWorkspaceManager extends EventEmitter {
   }
 
   async startDedupe(options) {
+    if (options.groupIds?.length) {
+      const baseReport = await this.getReport('dedupe')
+      if (baseReport?.reportId !== options.reportId || baseReport?.dedupeVersion !== 2 || baseReport.stale || baseReport.outdatedRules || baseReport.legacy) throw new Error('DEDUPE_REVIEW_MISMATCH')
+      const ids = new Set(options.groupIds.map(String))
+      if ([...ids].some(id => !baseReport.groups.some(group => group.id === id))) throw new Error('DUPLICATE_GROUP_MISSING')
+      options = { ...options, baseReport, groupIds: [...ids], scanMode: 'full' }
+    }
     return await this.startWorker('dedupe', 'dedupe_worker.js', options)
   }
 

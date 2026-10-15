@@ -1,8 +1,9 @@
 const fs = require('fs')
 const path = require('path')
 const { atomicWriteJson, readJson } = require('./utils.js')
+const { DEDUPE_RULES_VERSION } = require('./dedupe_title.js')
 
-const REPORT_SCHEMA_VERSION = 3
+const REPORT_SCHEMA_VERSION = 4
 const WORKSPACE_SCHEMA_VERSION = 5
 const REVIEW_SCHEMA_VERSION = 1
 const TASK_TYPES = ['anomaly', 'dedupe', 'execution']
@@ -222,6 +223,10 @@ class AuditReportRepository {
       : await readJson(reportPath)
     if (value !== cached?.value) this.reportCache.set(taskType, { path: reportPath, mtimeMs: stat.mtimeMs, size: stat.size, value })
     const visibleReport = applyResolvedAnomalies(value, state)
+    if (visibleReport?.reportType === 'dedupe' && visibleReport.schemaVersion < 4) return { ...visibleReport, legacy: true, executable: false }
+    if (visibleReport?.reportType === 'dedupe' && visibleReport.dedupeVersion >= 2 && visibleReport.dedupeRulesVersion !== DEDUPE_RULES_VERSION) {
+      return { ...visibleReport, outdatedRules: true, executable: false }
+    }
     return state?.staleAt
       ? { ...visibleReport, stale: true, staleAt: state.staleAt, staleReason: state.staleReason, executable: false }
       : visibleReport
@@ -260,6 +265,12 @@ class AuditReportRepository {
         }
     await atomicWriteJson(path.join(this.getJobDir(taskType, state.latestCompletedJobId), 'review.json'), value)
     return value
+  }
+
+  async getDedupeEvidence(item) {
+    const reference = item?.evidenceRef
+    if (!reference || !/^[a-f0-9]{40}\.json$/.test(reference.filename) || !/^[\w-][\w.-]*$/.test(reference.jobId)) return null
+    return await readJson(path.join(this.getJobDir('dedupe', reference.jobId), 'evidence', reference.filename))
   }
 
   async appendJobLog(taskType, jobId, entry) {
