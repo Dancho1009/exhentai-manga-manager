@@ -1,4 +1,10 @@
 const { app, BrowserWindow, ipcMain, session, dialog, shell, screen, Menu, clipboard, nativeImage, Tray } = require('electron')
+// Acquire the profile lock before opening databases, logs, caches or the LAN server.
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+  return
+}
+
 const path = require('path')
 const fs = require('fs')
 const { brotliDecompress } = require('zlib')
@@ -179,6 +185,18 @@ const sendMessageToWebContents = (message, targetWebContents = null) => {
 }
 
 let mainWindow
+let revealMainWindowOnReady = false
+const revealMainWindow = () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.setSkipTaskbar(false)
+  mainWindow.show()
+  mainWindow.focus()
+}
+app.on('second-instance', () => {
+  revealMainWindowOnReady = true
+  revealMainWindow()
+})
 let auditWindow
 let jmComicBrowserWindow
 let bookDetailWindowRegistry
@@ -309,7 +327,10 @@ const createWindow = () => {
     win.setTitle(name + ' ' + version)
   })
   win.once('ready-to-show', () => {
-    if (setting.minimizeOnStart) {
+    if (revealMainWindowOnReady) {
+      revealMainWindowOnReady = false
+      revealMainWindow()
+    } else if (setting.minimizeOnStart) {
       if (setting.minimizeToTray) {
         createTray()
         win.hide()
