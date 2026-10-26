@@ -74,18 +74,15 @@ echo [4/5] Starting Vite dev server...
 if exist .vite-dev.pid del .vite-dev.pid >nul 2>nul
 if exist .vite-dev.log del .vite-dev.log >nul 2>nul
 if exist .vite-dev.err del .vite-dev.err >nul 2>nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $client = [Net.Sockets.TcpClient]::new('localhost', 15374); $client.Close(); exit 0 } catch { exit 1 }"
+node scripts\check-dev-port.cjs
 if errorlevel 1 (
   powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/d /c npm run dev' -WorkingDirectory '%CD%' -WindowStyle Hidden -RedirectStandardOutput '.vite-dev.log' -RedirectStandardError '.vite-dev.err' -PassThru; Set-Content -Path '.vite-dev.pid' -Value $p.Id -Encoding ASCII"
 
-  echo Waiting for http://localhost:15374 ...
+  echo Waiting for http://127.0.0.1:15374 ...
   for /l %%i in (1,1,90) do (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $client = [Net.Sockets.TcpClient]::new('localhost', 15374); $client.Close(); exit 0 } catch { exit 1 }"
+    node scripts\check-dev-port.cjs --pid-file .vite-dev.pid
+    if errorlevel 2 goto vite_failed
     if not errorlevel 1 goto vite_ready
-    if exist .vite-dev.pid (
-      for /f %%p in (.vite-dev.pid) do powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Get-Process -Id %%p -ErrorAction SilentlyContinue; if ($p -and -not $p.HasExited) { exit 0 } else { exit 1 }"
-      if errorlevel 1 goto vite_failed
-    )
     timeout /t 1 /nobreak >nul
   )
 
