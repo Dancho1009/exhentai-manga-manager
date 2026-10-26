@@ -49,7 +49,7 @@
 <script setup>
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Search32Filled } from '@vicons/fluent'
+import Search32Filled from '@vicons/fluent/es/Search32Filled.js'
 import { Link } from '@element-plus/icons-vue'
 import he from 'he'
 

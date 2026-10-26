@@ -24,8 +24,9 @@
 <script setup>
 import { ref, watch, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { MdRefresh } from '@vicons/ionicons4'
-import { TagGroup, UserMultiple } from '@vicons/carbon'
+import MdRefresh from '@vicons/ionicons4/es/MdRefresh.js'
+import TagGroup from '@vicons/carbon/es/TagGroup.js'
+import UserMultiple from '@vicons/carbon/es/UserMultiple.js'
 import TagList from './TagList.vue'
 
 import { useAppStore } from '../pinia.js'

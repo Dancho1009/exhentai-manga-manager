@@ -146,11 +146,11 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, defineAsyncComponent } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
-import { IosRemoveCircleOutline } from '@vicons/ionicons4'
-import draggable from 'vuedraggable'
+import IosRemoveCircleOutline from '@vicons/ionicons4/es/IosRemoveCircleOutline.js'
+const draggable = defineAsyncComponent(() => import('vuedraggable'))
 import { nanoid } from 'nanoid'
 
 import { storeToRefs } from 'pinia'

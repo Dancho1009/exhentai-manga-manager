@@ -39,3 +39,4 @@ app.use(createI18n({
 
 installLazyDirective(app)
 app.mount('#app')
+window.dispatchEvent(new Event('app:mounted'))

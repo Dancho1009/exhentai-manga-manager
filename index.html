@@ -4,9 +4,57 @@
     <meta charset="UTF-8" />
     <link rel="icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite App</title>
+    <title>exhentai-manga-manager</title>
+    <style id="startup-style">
+      #startup-loading { position: fixed; inset: 0; z-index: 10000; display: grid; place-content: center; justify-items: center; gap: 16px; margin: 0; background: var(--startup-background, #141414); color: var(--startup-foreground, #eeeeee); font: 15px/1.6 system-ui, sans-serif; }
+      #startup-loading h1 { margin: 0; font-size: 22px; font-weight: 500; }
+      #startup-loading p { margin: 0; opacity: .75; }
+      #startup-spinner { width: 28px; height: 28px; border: 3px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: startup-spin 1s linear infinite; }
+      #startup-retry { padding: 7px 20px; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 5px; cursor: pointer; font: inherit; }
+      @keyframes startup-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { #startup-spinner { animation: none; } }
+    </style>
   </head>
   <body>
+    <div id="startup-loading" role="status" aria-live="polite">
+      <div id="startup-spinner" aria-hidden="true"></div>
+      <h1 id="startup-title">正在启动…</h1>
+      <p id="startup-message">正在准备界面，请稍候。</p>
+      <button id="startup-retry" hidden>重试</button>
+    </div>
+    <script>
+      (() => {
+        const query = new URLSearchParams(location.search)
+        const theme = new Set((query.get('theme') || 'light e-hentai').split(/\s+/))
+        document.documentElement.className = [...theme].filter(value => ['light', 'dark', 'e-hentai', 'exhentai', 'nhentai'].includes(value)).join(' ')
+        const background = theme.has('exhentai') ? '#34353b' : theme.has('e-hentai') ? '#e2e0d2' : theme.has('nhentai') ? '#0d0d0d' : theme.has('light') ? '#ffffff' : '#141414'
+        document.documentElement.style.setProperty('--startup-background', background)
+        document.documentElement.style.setProperty('--startup-foreground', theme.has('light') || theme.has('e-hentai') ? '#303133' : '#eeeeee')
+        const language = query.get('language') || navigator.language
+        document.documentElement.lang = language
+        const text = /^zh/i.test(language)
+          ? /TW|HK|Hant/i.test(language)
+            ? ['正在啟動…', '正在準備介面，請稍候。', '介面載入失敗', '請重試；若仍無法開啟，請重新啟動應用程式。', '重試']
+            : ['正在启动…', '正在准备界面，请稍候。', '界面加载失败', '请重试；若仍无法打开，请重新启动应用。', '重试']
+          : ['Starting…', 'Preparing the interface. Please wait.', 'Unable to load the interface', 'Please retry. If it still fails, restart the app.', 'Retry']
+        const title = document.getElementById('startup-title'), message = document.getElementById('startup-message'), retry = document.getElementById('startup-retry')
+        title.textContent = text[0]; message.textContent = text[1]; retry.textContent = text[4]
+        retry.onclick = () => location.reload()
+        const failed = event => {
+          if (event.type === 'error' && !event.error && event.target?.tagName !== 'SCRIPT') return
+          title.textContent = text[2]; message.textContent = text[3]; retry.hidden = false
+          document.getElementById('startup-spinner').hidden = true
+        }
+        window.addEventListener('error', failed, true)
+        window.addEventListener('unhandledrejection', failed)
+        window.addEventListener('app:mounted', () => {
+          document.getElementById('startup-loading').remove()
+          document.getElementById('startup-style').remove()
+          window.removeEventListener('error', failed, true)
+          window.removeEventListener('unhandledrejection', failed)
+        }, { once: true })
+      })()
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.js"></script>
   </body>

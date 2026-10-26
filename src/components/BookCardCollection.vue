@@ -12,7 +12,7 @@
 </template>
 
 <script setup>
-import { BookmarkTwotone } from '@vicons/material'
+import BookmarkTwotone from '@vicons/material/es/BookmarkTwotone.js'
 
 import { useAppStore } from '../pinia.js'
 const appStore = useAppStore()

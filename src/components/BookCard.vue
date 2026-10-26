@@ -57,7 +57,7 @@
 <script setup>
 import { ref, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { BookmarkTwotone } from '@vicons/material'
+import BookmarkTwotone from '@vicons/material/es/BookmarkTwotone.js'
 import ContextMenu from '@imengyu/vue3-context-menu'
 
 import { storeToRefs } from 'pinia'
