@@ -23,7 +23,8 @@ const verifyDedupeItem = async (item, { Manga, Metadata, sevenZipPath, isCancell
     const options = { sevenZipPath, isCancelled }
     const manifest = await enumerateBookEntries(item, options)
     const inspection = await inspectBookContent(item, { ...options, manifest })
-    if (!item.contentProof || contentProof(inspection) !== item.contentProof || manifest.folderFingerprint !== item.folderFingerprint) throw new Error('DEDUPE_CONTENT_CHANGED: ' + item.id)
+    if (item.contentProof && contentProof(inspection) !== item.contentProof ||
+        item.folderFingerprint && manifest.folderFingerprint !== item.folderFingerprint) throw new Error('DEDUPE_CONTENT_CHANGED: ' + item.id)
     ehviewer = inspection.ehviewer
   }
   if (item.sourceEvidence && resolveBookIdentity({ raw, effective }, ehviewer).fingerprint !== item.sourceEvidence.fingerprint) throw new Error('DEDUPE_SOURCE_CHANGED: ' + item.id)

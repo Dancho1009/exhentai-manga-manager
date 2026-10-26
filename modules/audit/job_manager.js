@@ -12,6 +12,7 @@ const {
 } = require('./report_repository.js')
 const { normalizeReview, buildSafeAnomalyReview } = require('./review_validator.js')
 const { clearAuditCacheDatabase } = require('./cache.js')
+const { beijingLogTimestamp } = require('../log_time.js')
 
 const ACTIVE_STATUSES = new Set(['running', 'cancelling'])
 const TERMINAL_PHASES = new Set(['idle', 'cancelling', 'cancelled', 'completed', 'failed', 'interrupted'])
@@ -26,7 +27,16 @@ const sanitizeOptions = (taskType, options = {}) => {
       forceOnline: Boolean(options.forceOnline)
     }
   }
-  if (taskType === 'dedupe') return { scanMode: options.scanMode === 'full' ? 'full' : 'daily', forceRecompute: Boolean(options.forceRecompute || options.forceContent), scope: options.baseReport ? 'groups' : options.scope || 'library' }
+  if (taskType === 'dedupe') return {
+    scanMode: options.scanMode === 'full' ? 'full' : 'daily',
+    forceRecompute: Boolean(options.forceRecompute || options.forceContent),
+    scope: options.baseReport ? 'groups' : options.scope || 'library',
+    aiRunId: options.aiRunId ? String(options.aiRunId) : null,
+    aiSource: options.aiSource ? String(options.aiSource) : null,
+    aiPartial: options.aiPartial === true,
+    semanticPairCount: Array.isArray(options.semanticPairs) ? options.semanticPairs.length : 0,
+    coveragePairCount: Array.isArray(options.coveragePairs) ? options.coveragePairs.length : 0
+  }
   if (taskType === 'execution') {
     return {
       sourceTaskType: REPORT_TASK_TYPES.includes(options.sourceTaskType) ? options.sourceTaskType : null,
@@ -165,7 +175,7 @@ class AuditWorkspaceManager extends EventEmitter {
   }
 
   async appendLog(taskType, jobId, message, level = 'info') {
-    const entry = { at: new Date().toISOString(), taskType, jobId, level, message }
+    const entry = { at: beijingLogTimestamp(), taskType, jobId, level, message }
     await this.repository.appendJobLog(taskType, jobId, entry)
     this.emit('log', entry)
   }
@@ -198,12 +208,31 @@ class AuditWorkspaceManager extends EventEmitter {
   }
 
   async startDedupe(options) {
+    if (options.candidatePairs?.length) {
+      const candidatePairs = options.candidatePairs.map(({ leftId, rightId }) => ({ leftId: String(leftId), rightId: String(rightId) }))
+      const bookIds = new Set(candidatePairs.flatMap(pair => [pair.leftId, pair.rightId]))
+      const previous = await this.getReport('dedupe')
+      const baseReport = previous && previous.dedupeVersion === 2 && !previous.stale && !previous.outdatedRules && !previous.legacy ? previous : null
+      // Recheck whole overlapping review groups so no member loses its old evidence.
+      for (const group of baseReport?.groups || []) if (group.items.some(item => bookIds.has(String(item.id)))) {
+        for (const item of group.items) bookIds.add(String(item.id))
+      }
+      options = previous?.outdatedRules && !previous.stale
+        ? { ...options, candidatePairs, bookIds: undefined, baseReport: null, aiCandidatePairs: previous.aiCandidatePairs, scanMode: 'full', scope: 'library' }
+        : { ...options, candidatePairs, bookIds: [...bookIds], baseReport, scanMode: 'full', scope: 'candidates' }
+    }
     if (options.groupIds?.length) {
       const baseReport = await this.getReport('dedupe')
       if (baseReport?.reportId !== options.reportId || baseReport?.dedupeVersion !== 2 || baseReport.stale || baseReport.outdatedRules || baseReport.legacy) throw new Error('DEDUPE_REVIEW_MISMATCH')
       const ids = new Set(options.groupIds.map(String))
       if ([...ids].some(id => !baseReport.groups.some(group => group.id === id))) throw new Error('DUPLICATE_GROUP_MISSING')
       options = { ...options, baseReport, groupIds: [...ids], scanMode: 'full' }
+    }
+    if (!options.baseReport && !options.semanticPairs?.length && !options.coveragePairs?.length) {
+      const previous = await this.getReport('dedupe')
+      if (previous && !previous.stale && !previous.legacy) {
+        options = { ...options, aiCandidatePairs: previous.aiCandidatePairs }
+      }
     }
     return await this.startWorker('dedupe', 'dedupe_worker.js', options)
   }
@@ -568,7 +597,7 @@ class AuditWorkspaceManager extends EventEmitter {
     }
     return (await Promise.all(requests))
       .flat()
-      .sort((left, right) => String(left.at || '').localeCompare(String(right.at || '')))
+      .sort((left, right) => (Date.parse(left.at) || 0) - (Date.parse(right.at) || 0))
       .slice(-perJobLimit)
   }
 }

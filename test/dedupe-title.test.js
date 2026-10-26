@@ -2,8 +2,8 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { parseTitleParts, parseBookSemantics, DEDUPE_RULES_VERSION } = require('../modules/audit/dedupe_title.js')
-const { buildDuplicateGroups } = require('../modules/audit/dedupe_candidates.js')
+const { parseTitleParts, parseBookSemantics, DEDUPE_REPORT_RULES_VERSION } = require('../modules/audit/dedupe_title.js')
+const { buildDuplicateGroups, buildDuplicateClassification } = require('../modules/audit/dedupe_candidates.js')
 const { AuditReportRepository } = require('../modules/audit/report_repository.js')
 const { AuditWorkspaceManager } = require('../modules/audit/job_manager.js')
 const { LibraryTaskCoordinator } = require('../modules/audit/task_coordinator.js')
@@ -36,6 +36,62 @@ test('chapter notation and zero padding normalize while real volumes, ranges and
   assert.deepEqual(parseTitleParts('Title Ch.1–3').chapter, { start: 1, end: 3 })
   assert.deepEqual(parseTitleParts('Title Vol.2').volume, { start: 2, end: null })
   assert.equal(parseTitleParts('Title 2023-08').chapter, null)
+})
+
+test('decimal ranges and enumerated chapters preserve their actual coverage', () => {
+  assert.deepEqual(parseTitleParts('Title #1-1.5').chapter, { start: 1, end: 1.5 })
+  assert.deepEqual(parseTitleParts('Title #1-1.5').chapterCoverage, { kind: 'range', start: 1, end: 1.5 })
+  assert.deepEqual(parseTitleParts('Title 1+2+3話').chapterCoverage, { kind: 'list', values: [1, 2, 3] })
+  assert.equal(parseTitleParts('Title 1+2+3話').chapter, null)
+  assert.notEqual(parseTitleParts('Title 1+2+3話').key, parseTitleParts('Title 1-3話').key)
+  assert.deepEqual(parseBookSemantics(book('list', 'Title 1+2+3話')).chapterCoverage, { kind: 'list', values: [1, 2, 3] })
+})
+
+test('a chapter collection enters the review group without becoming an equivalent copy', () => {
+  const classification = buildDuplicateClassification([
+    book('a', 'Title Ch.1-3'), book('b', 'Title Ch.2'), book('c', 'Title Ch.2 [Digital]')
+  ], { semanticPairs: [{ leftId: 'a', rightId: 'b' }, { leftId: 'b', rightId: 'c' }] })
+  assert.deepEqual(classification.groups.map(group => group.items.map(item => item.id)), [['a', 'b', 'c']])
+  assert.deepEqual(classification.coverageRelations.map(pair => [pair.leftId, pair.rightId, pair.relation]),
+    [['a', 'b', 'left_contains_right']])
+  assert.ok(classification.groups[0].equivalenceClasses.every(entry => !entry.memberIds.includes('a')))
+})
+
+test('an unnumbered middle book does not make incompatible chapters equivalent', () => {
+  const books = [book('a', 'Title Ch.1-3'), book('b', 'Title'), book('c', 'Title Ch.2')]
+  for (const item of books) item.raw.hash = 'shared-sample'
+  const classified = buildDuplicateClassification(books)
+  assert.ok(classified.groups.some(group => ['a', 'b', 'c'].every(id => group.items.some(item => item.id === id))))
+  assert.ok(classified.coverageRelations.some(pair => pair.leftId === 'a' && pair.rightId === 'c'))
+  assert.ok(classified.groups[0].equivalenceClasses.every(entry => !['a', 'c'].every(id => entry.memberIds.includes(id))))
+})
+
+test('bare magazine issue numbers remain publication sources rather than story numbers', () => {
+  const title = '[Napo] Koi no Rank Match - Make Love Rank match!! | 恋之排位决斗战 (COMIC ExE 60) [Chinese] [软蒲汉化组] [Digital]'
+  const parsed = parseTitleParts(title)
+  assert.equal(parsed.chapter, null)
+  assert.equal(parsed.volume, null)
+  assert.deepEqual(parsed.publications.map(({ kind, name, issue, date }) => ({ kind, name, issue, date })),
+    [{ kind: 'embedded', name: 'COMIC ExE', issue: '60', date: null }])
+  assert.deepEqual(parsed.qualifiers, [])
+  assert.equal(parsed.key, parseTitleParts(title.replace('COMIC ExE 60', 'COMIC ExE Vol.060')).key)
+  for (const value of ['COMIC ExE 60', 'COMIC ExE Vol.060', 'COMIC ExE 第60号', 'ＣＯＭＩＣ ＥｘＥ ６０']) {
+    const whole = parseTitleParts(value)
+    assert.equal(whole.publications[0].kind, 'whole-issue')
+    assert.equal(whole.publications[0].issue, '60')
+    assert.equal(whole.volume, null)
+  }
+  assert.equal(parseTitleParts('COMIC ExE 2023-09').publications[0].date, '2023-09', 'A marked month keeps date precedence')
+  for (const value of ['Story 60', 'Title (Obscure Press 60)', 'Title (COMIC ExE60)', 'Title 60 (COMIC ExE)']) {
+    assert.deepEqual(parseTitleParts(value).publications, [], 'Unsupported bare issue remains unknown: ' + value)
+  }
+})
+
+test('whole magazines with bare issues match same-issue editions and exclude other issues', () => {
+  const groups = buildDuplicateGroups([book('a', 'COMIC ExE 60'), book('b', 'COMIC ExE Vol.060'), book('c', 'COMIC ExE 61')])
+  assert.equal(groups.length, 1)
+  assert.deepEqual(groups[0].items.map(item => item.id), ['a', 'b'])
+  assert.ok(groups[0].reasons.some(reason => reason.code === 'publication-issue'))
 })
 
 test('unknown parenthetical context is preserved and cannot supply work ordinals', () => {
@@ -87,7 +143,7 @@ test('daily worker verifies same-issue editions without artist overlap and exclu
     entries: { '01.jpg': 'different'.repeat(index + 1) } })))
   t.after(fixture.cleanup)
   const report = await scan(fixture)
-  assert.equal(report.dedupeRulesVersion, DEDUPE_RULES_VERSION)
+  assert.equal(report.dedupeRulesVersion, DEDUPE_REPORT_RULES_VERSION)
   assert.equal(report.groups.length, 1)
   assert.deepEqual(report.groups[0].items.map(item => item.id), ['0', '1'])
   assert.ok(report.groups[0].items.every(item => item.contentProof))

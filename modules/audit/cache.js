@@ -8,7 +8,7 @@ const ARCHIVE_HASH_VERSION = 1
 const HEALTH_INSPECTION_VERSION = 2
 const CONTENT_INSPECTION_VERSION = 1
 const EHVIEWER_INSPECTION_VERSION = 1
-const CACHE_TABLES = ['cache_entries', 'gallery_availability', 'gallery_gdata', 'dedupe_manifests']
+const CACHE_TABLES = ['cache_entries', 'gallery_availability', 'gallery_gdata', 'dedupe_manifests', 'ai_results']
 
 const parseJson = value => {
   if (!value) return null
@@ -26,6 +26,9 @@ class AuditCache {
       driver: sqlite3.Database
     })
     await db.exec(`
+      CREATE TABLE IF NOT EXISTS ai_results (
+        fingerprint TEXT PRIMARY KEY, result TEXT NOT NULL, createdAt TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS dedupe_manifests (
         filepath TEXT PRIMARY KEY, size INTEGER NOT NULL, mtimeMs REAL NOT NULL, manifest TEXT NOT NULL
       );
@@ -70,6 +73,16 @@ class AuditCache {
         OR (ehviewerInspection IS NOT NULL AND ehviewerVersion IS NULL)
     `, [ARCHIVE_HASH_VERSION, CONTENT_INSPECTION_VERSION, EHVIEWER_INSPECTION_VERSION])
     return new AuditCache(db)
+  }
+
+  async getAiResult(fingerprint) {
+    const row = await this.db.get('SELECT result FROM ai_results WHERE fingerprint = ?', fingerprint)
+    return parseJson(row?.result)
+  }
+
+  async putAiResult(fingerprint, result) {
+    await this.db.run('INSERT OR REPLACE INTO ai_results(fingerprint,result,createdAt) VALUES(?,?,?)',
+      fingerprint, JSON.stringify(result), new Date().toISOString())
   }
 
   async getManifest(book, stat) {

@@ -1,4 +1,5 @@
 const path = require('path')
+const { safeSend } = require('./electron_window_messenger.js')
 
 const MAX_BOOK_ID_LENGTH = 128
 const MAX_NAVIGATION_ITEMS = 20000
@@ -93,7 +94,7 @@ const createBookDetailWindowRegistry = ({ isWindowAvailable = win => Boolean(win
 
   const broadcast = (channel, payload, { excludeSender = null } = {}) => {
     forEachWindow(win => {
-      if (win.webContents !== excludeSender) win.webContents.send(channel, payload)
+      if (win.webContents !== excludeSender) safeSend(win, channel, payload)
     })
   }
 

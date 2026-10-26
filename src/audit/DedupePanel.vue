@@ -3,10 +3,10 @@
     <div class="task-toolbar">
       <div class="scan-controls">
         <el-select v-model="scanMode" :disabled="busy" class="scan-mode" :aria-label="label('scanMode')">
-          <el-option :label="label('daily')" value="daily" /><el-option :label="label('full')" value="full" />
+          <el-option :label="label('daily')" value="daily" /><el-option :label="label('full')" value="full" /><el-option v-if="aiAvailable" :label="label('ai')" value="ai" />
         </el-select>
         <el-checkbox v-model="forceRecompute" :disabled="busy">{{ label('recompute') }}</el-checkbox>
-        <el-button type="primary" :disabled="busy" @click="$emit('start', { scanMode, forceRecompute })">{{ $t('audit.startDedupe') }}</el-button>
+        <el-button type="primary" :disabled="busy" @click="$emit('start', { scanMode, forceRecompute })">{{ scanMode === 'ai' ? label('startAi') : $t('audit.startDedupe') }}</el-button>
         <el-button @click="openHistory">{{ label('history') }}</el-button>
       </div>
       <span class="last-run">{{ lastRunText }}</span>
@@ -18,6 +18,7 @@
       <div class="summary-band">
         <span>{{ label('scope', { registered: report.summary.mangaRows, checked: report.summary.checkedItems ?? report.summary.mangaRows }) }}</span>
         <span>{{ label('groups', { count: report.groups.length }) }} · {{ label('suggested', { count: report.summary.eligibleDuplicateGroups }) }}</span>
+        <button v-if="coverageGroupCount" class="text-button" @click="relationFilter = 'coverage'">{{ label('coverageQueueSection', { count: coverageGroupCount }) }}</button>
         <span v-if="report.summary.unregisteredItems">{{ label('unregistered', { count: report.summary.unregisteredItems }) }}</span>
         <button v-if="report.excludedItems?.length" class="text-button" @click="errorsVisible = !errorsVisible">{{ label('readErrors', { count: report.excludedItems.length }) }}</button>
       </div>
@@ -25,6 +26,7 @@
       <div class="filters">
         <el-input v-model="search" clearable :placeholder="label('search')" />
         <el-select v-model="kindFilter" clearable :placeholder="$t('audit.type')"><el-option v-for="kind in kinds" :key="kind" :label="kindLabel(kind)" :value="kind" /></el-select>
+        <el-select v-model="relationFilter" :aria-label="label('relationFilter')"><el-option :label="label('relation_all')" value="all" /><el-option :label="label('relation_coverage')" value="coverage" /><el-option :label="label('relation_contains')" value="contains" /><el-option :label="label('relation_overlap')" value="overlap" /></el-select>
         <el-select v-model="statusFilter" :aria-label="label('reviewState')"><el-option v-for="state in statusOptions" :key="state" :label="label('state_' + state)" :value="state" /></el-select>
         <el-checkbox v-model="needsEvidence">{{ label('needsEvidence') }}</el-checkbox>
         <el-button :disabled="locked || saving || !suggestible.length" @click="adoptVisible">{{ label('adoptVisible', { count: suggestible.length }) }}</el-button>
@@ -49,15 +51,24 @@
             <div class="group-navigation"><el-button size="small" :disabled="selectedIndex <= 0" @click="navigate(-1)">{{ label('previous') }}</el-button><span>{{ selectedIndex + 1 }}/{{ filteredGroups.length }}</span><el-button size="small" :disabled="selectedIndex < 0 || selectedIndex >= filteredGroups.length - 1" @click="navigate(1)">{{ label('next') }}</el-button></div>
           </header>
           <details class="group-reasons"><summary>{{ label('matchingReasons', { count: selectedGroup.reasons?.length || 0 }) }}</summary><div class="reason-chips"><el-tag v-for="reason in selectedGroup.reasons || []" :key="reason.code + reason.memberIds.join(',')" size="small" effect="plain">{{ label('reason_' + reason.code) }}</el-tag></div></details>
+          <ai-analysis-panel task="dedupe" compact :report-id="report.reportId" :group-id="selectedGroup.id" :evidence-revision="selectedGroup.evidenceRevision" :busy="busy" :disabled="Boolean(report.stale || report.legacy || report.outdatedRules)" />
           <div v-if="view !== 'overview'" class="member-strip"><el-select v-model="leftId" :aria-label="label('baseline')"><el-option v-for="book in selectedGroup.items" :key="book.id" :value="book.id" :label="book.title" /></el-select><span>↔</span><el-select v-model="rightId" :aria-label="label('compared')"><el-option v-for="book in selectedGroup.items" :key="book.id" :value="book.id" :label="book.title" :disabled="book.id === leftId" /></el-select></div>
             <el-tabs v-model="view">
               <el-tab-pane :label="label('overview')" name="overview">
                 <div class="member-summary-bar"><span>{{ label('keepSummary', { total: selectedGroup.items.length, kept: keepDraft.keepIds.length, removed: selectedGroup.items.length - keepDraft.keepIds.length }) }}</span><span v-if="draftIsDirty(selectedGroup.id)" class="draft-state">{{ label('draftUnsaved') }}</span><el-button size="small" :disabled="editingLocked" @click="keepAll">{{ label('keepAll') }}</el-button><el-button size="small" :disabled="editingLocked || !draftIsDirty(selectedGroup.id)" @click="resetDraft">{{ label('restoreSelection') }}</el-button></div>
-                <div class="member-grid" :style="{ '--member-columns': Math.min(3, selectedGroup.items.length), '--member-columns-medium': Math.min(2, selectedGroup.items.length) }"><dedupe-member-card v-for="(book, index) in selectedGroup.items" :key="book.id" :book="book" :number="index + 1" :other="book.id === leftId ? null : leftBook"
-                  :retained="keepDraft.keepIds.includes(book.id)" :baseline="book.id === leftId" :selection-disabled="editingLocked || selectedGroup.actionable === false || Boolean(book.nestedBookIds?.length) || (keepDraft.keepIds.length === 1 && keepDraft.keepIds.includes(book.id))"
-                  :can-retain-only="Boolean(selectedGroup.equivalenceClasses?.some(entry => entry.eligible && entry.memberIds.includes(book.id)))" :target-id="mapping[book.id] || ''" :target-options="keepOptions"
-                  @retain="setRetained(book.id, $event)" @target="setTarget(book.id, $event)" @retain-only="keepOnly(book.id)" @baseline="setBaseline(book.id)" @compare="compareBook(book.id)"
+                <div class="member-grid" :style="{ '--member-columns': Math.min(3, selectedGroup.items.length), '--member-columns-medium': Math.min(2, selectedGroup.items.length) }"><dedupe-member-card v-for="(book, index) in selectedGroup.items" :key="book.id" :book="datedBook(book)" :number="index + 1" :other="book.id === leftId ? null : datedBook(leftBook)"
+                  :retained="keepDraft.keepIds.includes(book.id)" :baseline="book.id === leftId" :selection-disabled="editingLocked || (keepDraft.keepIds.length === 1 && keepDraft.keepIds.includes(book.id))"
+                  :can-retain-only="Boolean(selectedGroup.equivalenceClasses?.some(entry => entry.eligible && entry.memberIds.includes(book.id)))"
+                  @retain="setRetained(book.id, $event)" @retain-only="keepOnly(book.id)" @baseline="setBaseline(book.id)" @compare="compareBook(book.id)"
                   @detail="openDetail" @locate="locate" @url="openUrl" /></div>
+                <div v-if="selectedGroup.relations?.length" class="relations-list"><strong>{{ label('directRelations') }}</strong>
+                  <button v-for="relation in selectedGroup.relations" :key="relation.leftId + ':' + relation.rightId" class="relation-row" @click="compareRelation(relation)">
+                    <span>{{ memberTitle(relation.leftId) }} ↔ {{ memberTitle(relation.rightId) }}</span>
+                    <small>{{ label('coverage_' + relation.declaredRelation) }} · {{ label('contentRelation_' + relation.contentRelation) }}</small>
+                    <small v-if="relation.verified">{{ label('coveragePages', { matched: relation.matchedPages, left: relation.leftPages, right: relation.rightPages }) }} · {{ label('relationUnique', { left: relation.leftUniquePages, right: relation.rightUniquePages }) }}</small>
+                    <small v-if="relation.metadataConflict">{{ label('coverageMetadataConflict') }}</small>
+                  </button>
+                </div>
                 <div class="equivalence-list" v-if="selectedGroup.equivalenceClasses?.length"><div v-for="equivalence in selectedGroup.equivalenceClasses" :key="equivalence.id">
                   <strong>{{ kindLabel(equivalence.kind) }}</strong> · {{ equivalence.memberIds.map(id => memberTitle(id)).join(' ↔ ') }}
                   <p>{{ label('keeper') }}: {{ memberTitle(equivalence.suggestedKeepId) }} · {{ equivalence.keepReasons.map(reason => label('keeper_' + reason)).join('、') }}</p>
@@ -95,10 +106,7 @@
           </div>
           <section class="decision-editor">
             <div class="decision-heading"><strong>{{ label('decision') }}</strong><el-checkbox v-model="autoNext">{{ label('autoNext') }}</el-checkbox><el-button size="small" :disabled="busy || report.stale || report.legacy || report.outdatedRules" @click="$emit('start', { groupIds: [selectedGroup.id], reportId: report.reportId, scanMode: 'full', forceRecompute })">{{ label('verifyGroup') }}</el-button><el-button size="small" :disabled="editingLocked || !selectedGroup.eligible" @click="useSuggestion">{{ $t('audit.useSuggestion') }}</el-button></div>
-            <span v-if="keepDraft.unresolvedIds.length" class="mapping-incomplete">{{ label('unresolvedTargets', { count: keepDraft.unresolvedIds.length }) }}</span>
-            <el-input v-if="manualMapping" v-model="reason" :disabled="editingLocked" :placeholder="label('decisionReason')" />
-            <details v-else class="optional-reason"><summary>{{ label('optionalReason') }}</summary><el-input v-model="reason" :disabled="editingLocked" :placeholder="label('decisionReason')" /></details>
-            <el-checkbox v-if="manualMapping" v-model="differencesConfirmed" :disabled="editingLocked" class="differences-confirmed">{{ label('confirmDifferences') }}</el-checkbox>
+            <details class="optional-reason"><summary>{{ label('optionalReason') }}</summary><el-input v-model="reason" :disabled="editingLocked" :placeholder="label('decisionReason')" /></details>
             <div class="decision-actions"><el-button type="primary" :loading="saving" :disabled="editingLocked || !canApprove" @click="saveDecision('duplicate')">{{ label('duplicate') }}</el-button><el-button :disabled="editingLocked" @click="saveDecision('different-version')">{{ label('differentVersion') }}</el-button>
               <span class="full-decision-actions"><el-button :disabled="editingLocked" @click="saveDecision('not-duplicate')">{{ label('notDuplicate') }}</el-button><el-button :disabled="editingLocked" @click="saveDecision('deferred')">{{ label('defer') }}</el-button><el-button :disabled="editingLocked || !decisions[selectedGroup.id]" @click="undoDecision">{{ label('undo') }}</el-button></span>
               <el-dropdown class="compact-decision-actions" trigger="click" :disabled="editingLocked" @command="command => command === 'undo' ? undoDecision() : saveDecision(command)"><el-button :disabled="editingLocked">{{ label('otherDecisions') }} ▾</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="not-duplicate">{{ label('notDuplicate') }}</el-dropdown-item><el-dropdown-item command="deferred">{{ label('defer') }}</el-dropdown-item><el-dropdown-item command="undo" :disabled="!decisions[selectedGroup.id]">{{ label('undo') }}</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
@@ -107,11 +115,11 @@
         </section>
         <el-empty v-else class="comparison-area" :description="label('chooseGroup')" />
       </div>
-      <footer class="review-action-bar"><span>{{ label('pendingExecution', { groups: approvedGroups, files: pendingFiles.length }) }} · {{ label('transferBytes') }} {{ formatBytes(pendingBytes) }} · {{ reviewSaving ? $t('audit.reviewSaving') : reviewDirty ? $t('audit.reviewUnsaved') : $t('audit.reviewAutoSaved') }}</span><button v-if="dirtyGroups.length" class="text-button draft-state" @click="selectGroup(dirtyGroups[0].id)">{{ label('unsavedGroups', { count: dirtyGroups.length }) }}</button><el-button type="danger" :disabled="editingLocked || reviewDirty || dirtyGroups.length > 0 || !pendingFiles.length" @click="$emit('execute')">{{ label('executionList') }}</el-button></footer>
+      <footer class="review-action-bar"><span>{{ label('pendingExecution', { groups: approvedGroups, files: pendingFiles.length }) }} · {{ reviewSaving ? $t('audit.reviewSaving') : reviewDirty ? $t('audit.reviewUnsaved') : $t('audit.reviewAutoSaved') }}</span><button v-if="dirtyGroups.length" class="text-button draft-state" @click="selectGroup(dirtyGroups[0].id)">{{ label('unsavedGroups', { count: dirtyGroups.length }) }}</button><el-button type="danger" :disabled="busy || editingLocked || reviewDirty || dirtyGroups.length > 0 || !pendingFiles.length" @click="$emit('execute')">{{ label('executionList') }}</el-button></footer>
     </template>
     <el-empty v-else :description="$t('audit.noDedupeReport')" />
     <el-dialog v-model="textVisible" :title="textPath" width="90%" class="text-comparison-dialog"><div class="text-pair" v-loading="textLoading"><pre v-for="side in ['left', 'right']" :key="side">{{ textResults.find(item => item.key === side)?.text || textResults.find(item => item.key === side)?.error || label('missing') }}</pre></div></el-dialog>
-    <el-dialog v-model="historyVisible" :title="label('history')" width="90%"><el-empty v-if="!history.length" :description="label('noHistory')" /><div v-for="entry in history" :key="entry.executionId" class="history-entry"><strong>{{ entry.at ? new Date(entry.at).toLocaleString() : entry.executionId }} · {{ entry.movedCount }} {{ label('files') }}</strong><el-button size="small" @click="locate(entry.backupDir)">{{ label('openBackup') }}</el-button><div v-for="file in entry.files" :key="file.source"><p>{{ file.source }} → {{ file.target }}</p><el-button size="small" @click="locate(file.target)">{{ label('openQuarantine') }}</el-button></div></div></el-dialog>
+    <el-dialog v-model="historyVisible" :title="label('history')" width="90%"><el-empty v-if="!history.length" :description="label('noHistory')" /><div v-for="entry in history" :key="entry.executionId" class="history-entry"><strong>{{ entry.at ? new Date(entry.at).toLocaleString() : entry.executionId }} · {{ entry.movedCount }} {{ label('files') }} · {{ entry.recordOnlyCount || 0 }} {{ label('records') }}</strong><el-button size="small" @click="locate(entry.backupDir)">{{ label('openBackup') }}</el-button><div v-for="file in entry.files" :key="file.source"><p>{{ file.source }} → {{ file.target }}</p><el-button size="small" @click="locate(file.target)">{{ label('openQuarantine') }}</el-button></div></div></el-dialog>
   </section>
 </template>
 
@@ -120,22 +128,25 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import DedupeMemberCard from './DedupeMemberCard.vue'
-import { createKeepDraft, getDecisionFiles, isPendingDecision, keepDraftFingerprint, pagePairs, retainOnlyEquivalent, setKeepTarget, suggestedDecision, toggleKeep } from './dedupeReview.mjs'
+import AiAnalysisPanel from './AiAnalysisPanel.vue'
+import { createKeepDraft, getDecisionFiles, isPendingDecision, keepDraftFingerprint, pagePairs, retainOnlyEquivalent, suggestedDecision, toggleKeep } from './dedupeReview.mjs'
 
 const props = defineProps({
-  report: { type: Object, default: null }, state: { type: Object, required: true }, busy: Boolean, reviewLocked: Boolean,
-  selections: { type: Object, default: () => ({}) }, decisions: { type: Object, default: () => ({}) },
+  active: Boolean, report: { type: Object, default: null }, reviewReportId: { type: String, default: null },
+  state: { type: Object, required: true }, busy: Boolean, reviewLocked: Boolean,
+  selections: { type: Object, default: () => ({}) }, decisions: { type: Object, default: () => ({}) }, aiAvailable: Boolean,
   commitDecisions: { type: Function, required: true }, reviewSaving: Boolean, reviewDirty: Boolean
 })
 defineEmits(['start', 'execute'])
 const { t, te } = useI18n()
 const label = (key, values = {}) => t('audit.dedupeReview.' + key, values)
 const kindLabel = kind => te('audit.type_' + kind) ? t('audit.type_' + kind) : label('kind_' + kind)
-const scanMode = ref('daily'), forceRecompute = ref(false), search = ref(''), kindFilter = ref(''), statusFilter = ref('all'), needsEvidence = ref(false)
+const scanMode = ref('daily'), forceRecompute = ref(false), search = ref(''), kindFilter = ref(''), relationFilter = ref('all'), statusFilter = ref('all'), needsEvidence = ref(false)
 const selectedId = ref(null), leftId = ref(null), rightId = ref(null), queuePage = ref(1), queueSize = 30
 const view = ref('overview'), evidence = ref(null), evidenceLoading = ref(false), pagePosition = ref(1), alignment = ref('ordinal'), differencesOnly = ref(false)
 const previews = ref([]), previewLoading = ref(false), ancillaryDifferencesOnly = ref(true), errorsVisible = ref(false)
 const drafts = ref({}), autoNext = ref(true), saving = ref(false), comparisonScroll = ref(null)
+const memberDates = ref({})
 const textVisible = ref(false), textLoading = ref(false), textPath = ref(''), textResults = ref([])
 const historyVisible = ref(false), history = ref([])
 let evidenceToken = 0, previewToken = 0, textToken = 0
@@ -144,17 +155,21 @@ const running = computed(() => ['running', 'cancelling'].includes(props.state.st
 const locked = computed(() => props.reviewLocked || props.report?.executable === false)
 const editingLocked = computed(() => locked.value || saving.value || props.reviewSaving)
 const currentDraft = computed(() => drafts.value[selectedId.value])
-const keepDraft = computed(() => currentDraft.value?.selection || { keepIds: [], quarantineToKeep: {}, unresolvedIds: [] })
+const keepDraft = computed(() => currentDraft.value?.selection || { keepIds: [] })
 const updateDraft = values => { if (currentDraft.value) drafts.value[selectedId.value] = { ...currentDraft.value, ...values } }
 const reason = computed({ get: () => currentDraft.value?.reason || '', set: value => updateDraft({ reason: value }) })
-const differencesConfirmed = computed({ get: () => currentDraft.value?.differencesConfirmed || false, set: value => updateDraft({ differencesConfirmed: value }) })
-const draftIsDirty = id => { const draft = drafts.value[id]; return Boolean(draft && draft.baseline !== keepDraftFingerprint(draft.selection, draft.reason, draft.differencesConfirmed)) }
+const draftIsDirty = id => { const draft = drafts.value[id]; return Boolean(draft && draft.baseline !== keepDraftFingerprint(draft.selection, draft.reason)) }
 const dirtyGroups = computed(() => (props.report?.groups || []).filter(group => drafts.value[group.id]?.selection.evidenceRevision === group.evidenceRevision && draftIsDirty(group.id)))
 const lastRunText = computed(() => props.state.completedAt ? t('audit.lastCheckedAt', { time: new Date(props.state.completedAt).toLocaleString() }) : t('audit.neverChecked'))
 const kinds = computed(() => [...new Set((props.report?.groups || []).map(group => group.kind))])
+const coverageGroupCount = computed(() => (props.report?.groups || []).filter(group => group.relations?.some(pair => pair.category === 'coverage')).length)
 const filteredGroups = computed(() => (props.report?.groups || []).filter(group => {
   const decision = props.decisions[group.id]
+  const relations = group.relations || []
   return (!kindFilter.value || group.kind === kindFilter.value)
+    && (relationFilter.value === 'all' || relationFilter.value === 'coverage' && relations.some(pair => pair.category === 'coverage') ||
+      relationFilter.value === 'contains' && relations.some(pair => pair.category === 'coverage' && ['left_contains_right', 'right_contains_left'].includes(pair.declaredRelation)) ||
+      relationFilter.value === 'overlap' && relations.some(pair => pair.category === 'coverage' && (pair.declaredRelation === 'overlap' || pair.contentRelation === 'overlap')))
     && (statusFilter.value === 'all' || (statusFilter.value === 'pending' ? isPendingDecision(decision) : decision?.disposition === statusFilter.value))
     && (!needsEvidence.value || group.verification?.status !== 'verified')
     && (!search.value.trim() || JSON.stringify([group.items.map(item => [item.title, item.title_jpn, item.filepath, item.sourceEvidence?.sources, item.semantic]), group.kind]).toLowerCase().includes(search.value.trim().toLowerCase()))
@@ -164,9 +179,13 @@ const selectedGroup = computed(() => props.report?.groups?.find(group => group.i
 const selectedIndex = computed(() => filteredGroups.value.findIndex(group => group.id === selectedId.value))
 const leftBook = computed(() => selectedGroup.value?.items.find(item => item.id === leftId.value))
 const rightBook = computed(() => selectedGroup.value?.items.find(item => item.id === rightId.value))
+const datedBook = book => {
+  if (!book) return null
+  const dates = memberDates.value[book.id]
+  return dates ? { ...book, posted: book.posted || dates.posted, mtime: book.mtime || dates.mtime } : book
+}
 const pendingFiles = computed(() => getDecisionFiles(props.report, props.decisions, props.selections))
 const approvedGroups = computed(() => new Set(pendingFiles.value.map(item => item.groupId)).size)
-const pendingBytes = computed(() => pendingFiles.value.reduce((sum, item) => sum + Number(item.transferBytes ?? item.size ?? 0), 0))
 const suggestible = computed(() => filteredGroups.value.filter(group => group.eligible && isPendingDecision(props.decisions[group.id]) && !draftIsDirty(group.id)))
 const pairs = computed(() => pagePairs(evidence.value, alignment.value, differencesOnly.value))
 const currentPair = computed(() => pairs.value[pagePosition.value - 1] || null)
@@ -177,14 +196,7 @@ const ehviewerFields = computed(() => {
   const a = evidence.value?.left?.ehviewer?.fields || {}, b = evidence.value?.right?.ehviewer?.fields || {}
   return [...new Set([...Object.keys(a), ...Object.keys(b)])].map(key => ({ key, left: JSON.stringify(a[key] ?? null), right: JSON.stringify(b[key] ?? null) })).filter(item => !ancillaryDifferencesOnly.value || item.left !== item.right)
 })
-const mapping = computed(() => keepDraft.value.quarantineToKeep)
-const keepOptions = computed(() => (selectedGroup.value?.items || []).map((item, index) => ({ ...item, number: index + 1 })).filter(item => keepDraft.value.keepIds.includes(item.id)))
-const manualMapping = computed(() => Object.entries(mapping.value).some(([id, keep]) => !(selectedGroup.value?.equivalenceClasses || []).some(group => group.eligible && group.memberIds.includes(id) && group.memberIds.includes(keep))))
-const canApprove = computed(() => {
-  const group = selectedGroup.value
-  return group?.actionable !== false && keepDraft.value.unresolvedIds.length === 0 && Object.keys(mapping.value).length && Object.entries(mapping.value).every(([id, keep]) => !mapping.value[keep] && group.items.filter(item => [id, keep].includes(item.id)).every(item => item.contentProof || item.archiveSha256))
-    && (!manualMapping.value || differencesConfirmed.value && reason.value.trim())
-})
+const canApprove = computed(() => keepDraft.value.keepIds.length > 0 && keepDraft.value.keepIds.length < (selectedGroup.value?.items.length || 0))
 const formatBytes = value => { let size = Number(value || 0), index = 0; const units = ['B', 'KB', 'MB', 'GB', 'TB']; while (size >= 1024 && index < units.length - 1) { size /= 1024; index++ } return size.toFixed(index ? 1 : 0) + ' ' + units[index] }
 const memberTitle = id => selectedGroup.value?.items.find(item => item.id === id)?.title || id
 const request = () => ({ reportId: props.report.reportId, groupId: selectedId.value, leftId: leftId.value, rightId: rightId.value })
@@ -194,23 +206,30 @@ const openUrl = async url => { try { await window.auditApi.openUrl(url) } catch 
 const openDetail = async bookId => { try { await window.auditApi.openBookDetail({ bookId, navigationIds: selectedGroup.value.items.map(item => item.id) }) } catch (error) { showError(error) } }
 const selectGroup = id => { selectedId.value = id; const index = filteredGroups.value.findIndex(group => group.id === id); if (index >= 0) queuePage.value = Math.floor(index / queueSize) + 1 }
 const navigate = offset => { const group = filteredGroups.value[selectedIndex.value + offset]; if (group) selectGroup(group.id) }
+let focusPendingOnEntry = false
+const focusFirstPendingOnEntry = () => {
+  if (!focusPendingOnEntry || !props.active || !props.report?.reportId || props.reviewReportId !== props.report.reportId) return
+  focusPendingOnEntry = false
+  const firstPending = filteredGroups.value.find(group => isPendingDecision(props.decisions[group.id]))
+  if (firstPending) selectGroup(firstPending.id)
+}
 const resetGroupDraft = group => {
   const decision = props.decisions[group.id], selection = createKeepDraft(group, decision)
-  const reason = decision?.reason || '', differencesConfirmed = decision?.confirmedConflictCodes?.includes('manual-differences') || false
-  drafts.value[group.id] = { selection, reason, differencesConfirmed, baseline: keepDraftFingerprint(selection, reason, differencesConfirmed) }
+  const reason = decision?.reason || ''
+  drafts.value[group.id] = { selection, reason, baseline: keepDraftFingerprint(selection, reason) }
 }
 const resetDraft = () => { if (selectedGroup.value) resetGroupDraft(selectedGroup.value) }
-const useSuggestion = () => { if (!editingLocked.value) updateDraft({ selection: createKeepDraft(selectedGroup.value, suggestedDecision(selectedGroup.value)), differencesConfirmed: false }) }
-const keepAll = () => { if (!editingLocked.value) updateDraft({ selection: createKeepDraft(selectedGroup.value), differencesConfirmed: false }) }
+const useSuggestion = () => { if (!editingLocked.value) updateDraft({ selection: createKeepDraft(selectedGroup.value, suggestedDecision(selectedGroup.value)) }) }
+const keepAll = () => { if (!editingLocked.value) updateDraft({ selection: createKeepDraft(selectedGroup.value) }) }
 const setRetained = (id, checked) => {
   if (editingLocked.value) return
   if (!checked && keepDraft.value.keepIds.length === 1) { ElMessage.info(label('oneKeeperRequired')); return }
-  updateDraft({ selection: toggleKeep(selectedGroup.value, keepDraft.value, id, checked), differencesConfirmed: false })
+  updateDraft({ selection: toggleKeep(selectedGroup.value, keepDraft.value, id, checked) })
 }
-const setTarget = (id, keepId) => { if (!editingLocked.value) updateDraft({ selection: setKeepTarget(selectedGroup.value, keepDraft.value, id, keepId), differencesConfirmed: false }) }
-const keepOnly = id => { if (!editingLocked.value) updateDraft({ selection: retainOnlyEquivalent(selectedGroup.value, keepDraft.value, id), differencesConfirmed: false }) }
+const keepOnly = id => { if (!editingLocked.value) updateDraft({ selection: retainOnlyEquivalent(selectedGroup.value, keepDraft.value, id) }) }
 const setBaseline = id => { leftId.value = id }
 const compareBook = id => { rightId.value = id; view.value = 'pages' }
+const compareRelation = relation => { leftId.value = relation.leftId; rightId.value = relation.rightId; view.value = 'pages' }
 const loadEvidence = async () => {
   const token = ++evidenceToken
   evidence.value = null; previews.value = []; evidenceLoading.value = true; ++previewToken; ++textToken; textVisible.value = false
@@ -245,10 +264,9 @@ const saveDecision = async disposition => {
   const position = previousOrder.findIndex(item => item.id === group.id)
   saving.value = true
   try {
-    await props.commitDecisions({ [group.id]: { disposition, evidenceRevision: group.evidenceRevision,
+    await props.commitDecisions({ [group.id]: { disposition, selectionMode: disposition === 'duplicate' ? 'checkbox' : undefined, evidenceRevision: group.evidenceRevision,
       keepIds: disposition === 'duplicate' ? keepDraft.value.keepIds : group.items.map(item => item.id),
-      quarantineToKeep: disposition === 'duplicate' ? mapping.value : {}, reason: reason.value,
-      confirmedConflictCodes: disposition === 'duplicate' && manualMapping.value ? ['manual-differences'] : [] } })
+      reason: reason.value } })
     resetGroupDraft(group)
     ElMessage.success(t('audit.reviewSaved'))
     if (autoNext.value && selectedId.value === group.id) {
@@ -268,6 +286,7 @@ const openHistory = async () => { try { history.value = await window.auditApi.ge
 
 watch(() => props.report, (report, previous) => {
   if (report?.reportId === previous?.reportId) return
+  memberDates.value = {}
   if (report?.options?.scope === 'groups' && previous) {
     const previousIndex = previous.groups.findIndex(group => group.id === selectedId.value)
     const memberIds = new Set(previous.groups[previousIndex]?.items.map(item => item.id) || [])
@@ -279,6 +298,26 @@ watch(() => props.report, (report, previous) => {
     selectedId.value = report?.groups?.[0]?.id || null
     queuePage.value = 1
   }
+}, { immediate: true })
+watch(() => props.active, active => {
+  focusPendingOnEntry = active
+  if (active) focusFirstPendingOnEntry()
+}, { immediate: true, flush: 'post' })
+watch([() => props.report?.reportId, () => props.reviewReportId, filteredGroups], focusFirstPendingOnEntry, { flush: 'post' })
+let dateRequestToken = 0
+watch([selectedGroup, () => props.report?.reportId], async ([group]) => {
+  const token = ++dateRequestToken
+  const missing = (group?.items || []).filter(book => (!Number(book.posted) || (!book.mtime && book.mtimeMs == null)) && !memberDates.value[book.id])
+  if (!missing.length || !window.auditApi.getBookPreview) return
+  const results = await Promise.allSettled(missing.map(book => window.auditApi.getBookPreview(book.id)))
+  if (token !== dateRequestToken) return
+  const dates = { ...memberDates.value }
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') dates[missing[index].id] = { posted: result.value?.posted ?? null, mtime: result.value?.mtime ?? null }
+  })
+  memberDates.value = dates
+  const failure = results.find(result => result.status === 'rejected')
+  if (failure) showError(failure.reason)
 }, { immediate: true })
 watch(selectedGroup, group => {
   if (group) {
@@ -314,10 +353,13 @@ onBeforeUnmount(() => { ++evidenceToken; ++previewToken; ++textToken; void windo
 .member-grid { display: grid; grid-template-columns: repeat(var(--member-columns), minmax(0,1fr)); gap: 10px; align-items: start; }
 .member-summary-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; font-size: 12px; }
 .member-summary-bar .el-button { margin: 0; }
-.draft-state,.mapping-incomplete { color: var(--el-color-warning); font-size: 12px; }
-.mapping-incomplete { display: block; margin: 4px 0; }
+.draft-state { color: var(--el-color-warning); font-size: 12px; }
 .group-reasons { font-size: 12px; margin: 6px 0; }
 .group-reasons summary { cursor: pointer; color: var(--el-text-color-secondary); }
+.relations-list { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; padding: 10px; background: var(--el-fill-color-light); border-radius: 5px; font-size: 12px; }
+.relation-row { display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 7px; text-align: left; color: inherit; background: var(--el-bg-color); border: 1px solid var(--el-border-color-light); border-radius: 4px; cursor: pointer; overflow-wrap: anywhere; }
+.relation-row:hover { border-color: var(--el-color-primary); }
+.relation-row small { color: var(--el-text-color-secondary); }
 .decision-heading .el-checkbox { height: 24px; margin-right: 0; }
 .decision-editor > .el-input { margin-top: 6px; }
 .decision-editor { max-height: 45%; overflow-y: auto; }

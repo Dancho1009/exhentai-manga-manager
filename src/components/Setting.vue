@@ -118,6 +118,9 @@
           </el-col>
         </el-row>
       </el-tab-pane>
+      <el-tab-pane :label="$t('ai.settings')" name="ai" lazy>
+        <ai-settings v-if="activeSettingPanel === 'ai'" />
+      </el-tab-pane>
       <el-tab-pane :label="$t('m.internalViewer')" name="internalViewer">
         <el-row :gutter="8">
           <el-col :span="24">
@@ -184,7 +187,7 @@
           </el-col>
         </el-row>
       </el-tab-pane>
-      <el-tab-pane :label="$t('m.collectTag')" name="collectTag">
+      <el-tab-pane :label="$t('m.collectTag')" name="collectTag" lazy>
         <el-row :gutter="8">
           <el-col :span="24" class="setting-line collect-tag">
             <draggable
@@ -538,11 +541,10 @@
 </template>
 
 <script setup>
-import { ref, onMounted, h, computed } from 'vue'
+import { ref, onMounted, h, computed, defineAsyncComponent } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
-import draggable from 'vuedraggable'
-import { MdRefresh } from '@vicons/ionicons4'
+import MdRefresh from '@vicons/ionicons4/es/MdRefresh.js'
 
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import zhTw  from 'element-plus/dist/locale/zh-tw.mjs'
@@ -552,6 +554,8 @@ import { version } from '../../package.json'
 import { gh_token } from '../../secret_key.json'
 import { acceleratorInfo } from '../utils.js'
 import NameFormItem from './NameFormItem.vue'
+const draggable = defineAsyncComponent(() => import('vuedraggable'))
+const AiSettings = defineAsyncComponent(() => import('./AiSettings.vue'))
 
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '../pinia.js'

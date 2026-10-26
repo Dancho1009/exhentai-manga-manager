@@ -9,6 +9,8 @@ const summarizeBook = wrapped => ({
   size: wrapped.actual?.size ?? wrapped.raw.bundleSize,
   transferBytes: wrapped.raw.type === 'folder' && wrapped.manifest ? wrapped.manifest.entries.reduce((sum, entry) => sum + Number(entry.size || 0), 0) : wrapped.actual?.size ?? wrapped.raw.bundleSize,
   mtimeMs: wrapped.actual?.mtimeMs ?? null,
+  mtime: wrapped.actual?.mtime ?? wrapped.raw.mtime ?? null,
+  posted: wrapped.effective.posted ?? wrapped.raw.posted ?? null,
   title: wrapped.effective.title || wrapped.raw.title || path.basename(wrapped.raw.filepath),
   title_jpn: wrapped.effective.title_jpn || wrapped.raw.title_jpn || '',
   coverPath: wrapped.effective.coverPath || wrapped.raw.coverPath || null,

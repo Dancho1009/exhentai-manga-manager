@@ -157,4 +157,4 @@ const buildSnapshot = async ({ library, databasePath, metadataPath, excludeFile,
   }
 }
 
-module.exports = { buildSnapshot }
+module.exports = { buildSnapshot, loadDatabaseSnapshot }

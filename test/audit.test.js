@@ -2057,6 +2057,7 @@ test('approved duplicate execution quarantines one file and preserves merged use
     reportId, executable: true,
     groups: [{
       id: 'group-1', kind: 'exact-archive', eligible: true, actionable: true,
+      equivalenceClasses: [{ eligible: true, memberIds: ['keep', 'remove'] }],
       items: [
         { id: 'keep', filepath: first, hash: 'hash-keep', size: firstStat.size, mtimeMs: firstStat.mtimeMs },
         { id: 'remove', filepath: second, hash: 'hash-remove', size: secondStat.size, mtimeMs: secondStat.mtimeMs }

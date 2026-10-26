@@ -4,6 +4,9 @@ const { Worker } = require('worker_threads')
 const { randomUUID } = require('crypto')
 const { pathToFileURL } = require('url')
 const { compareBookEvidence } = require('./dedupe_comparison.js')
+const { enumerateBookEntries } = require('./dedupe_manifest.js')
+const { inspectBookContent } = require('./archive_inspector.js')
+const { ensureExpectedFile } = require('./execution_common.js')
 const { readJson } = require('./utils.js')
 
 class DedupeReviewService {
@@ -20,20 +23,34 @@ class DedupeReviewService {
     if (!group) throw new Error('DUPLICATE_GROUP_MISSING')
     return group
   }
+  async getBookEvidence(item) {
+    const saved = await this.manager.repository.getDedupeEvidence(item)
+    if (saved?.inspection) return saved
+    await ensureExpectedFile(item)
+    const options = { sevenZipPath: this.sevenZipPath }
+    const manifest = await enumerateBookEntries(item, options)
+    const inspection = await inspectBookContent(item, { ...options, manifest })
+    await ensureExpectedFile(item)
+    return { inspection, manifest }
+  }
   async getComparison(request) {
     const group = await this.getGroup(request)
     const members = [request.leftId, request.rightId].map(id => group.items.find(item => String(item.id) === String(id)))
     if (members.some(item => !item)) throw new Error('DUPLICATE_MEMBER_MISSING')
-    const evidence = await Promise.all(members.map(item => this.manager.repository.getDedupeEvidence(item)))
+    const evidence = await Promise.all(members.map(item => this.getBookEvidence(item)))
     return { groupId: group.id, left: evidence[0]?.inspection || null, right: evidence[1]?.inspection || null,
       comparison: compareBookEvidence(evidence[0]?.inspection, evidence[1]?.inspection) }
   }
   async enrichExecutionPreview(preview) {
     preview.files = await Promise.all(preview.files.map(async file => {
       const group = await this.getGroup({ reportId: preview.reportId, groupId: file.groupId })
-      const removed = group.items.find(item => item.filepath === file.source)
-      const detail = await this.getComparison({ reportId: preview.reportId, groupId: file.groupId, leftId: file.keepId, rightId: removed.id })
-      return { ...file, uniquePages: detail.comparison.onlyRight.length,
+      const removed = group.items.find(item => String(item.id) === String(file.bookId))
+      if (!file.referenceId) return { ...file, verified: false, matchedPages: null, keepPages: null,
+        removedPages: null, uniquePages: null, keepUniquePages: null, ancillaryLoss: [] }
+      const detail = await this.getComparison({ reportId: preview.reportId, groupId: file.groupId, leftId: file.referenceId, rightId: removed.id })
+      return { ...file, matchedPages: detail.comparison.matchedCount, keepPages: detail.comparison.leftPageCount,
+        removedPages: detail.comparison.rightPageCount, verified: detail.comparison.verified,
+        uniquePages: detail.comparison.onlyRight.length, keepUniquePages: detail.comparison.onlyLeft.length,
         ancillaryLoss: detail.comparison.ancillary.filter(entry => entry.right && entry.status !== 'same').map(entry => ({ path: entry.path, status: entry.status })) }
     }))
     return preview
@@ -66,7 +83,7 @@ class DedupeReviewService {
       for (const [side, id, index] of [['left', request.leftId, request.leftIndex], ['right', request.rightId, request.rightIndex]]) {
         const book = group.items.find(item => String(item.id) === String(id))
         if (!book) throw new Error('DUPLICATE_MEMBER_MISSING')
-        const evidence = await this.manager.repository.getDedupeEvidence(book)
+        const evidence = await this.getBookEvidence(book)
         if (request.textPath) {
           const entry = evidence?.inspection?.ancillary?.find(item => item.path === request.textPath)
           if (entry && /(?:\.ehviewer|\.(txt|json|xml|ya?ml|ini|nfo|md))$/i.test(entry.path)) entries.push({ key: side, book, entry })
@@ -104,9 +121,10 @@ class DedupeReviewService {
       const completed = [...log].reverse().find(item => item.status === 'verified' && item.taskType === 'dedupe')
       if (!completed) return null
       const files = log.filter(item => item.status === 'file-verified' && item.type === 'quarantine')
+      const recordOnlyCount = log.filter(item => item.status === 'record-verified' && item.type === 'quarantine').length
       const statePath = path.join(root, entry.name, 'dedupe-state.json')
       const state = await readJson(statePath)
-      return { executionId: entry.name, at: completed.at, movedCount: files.length, files,
+      return { executionId: entry.name, at: completed.at, movedCount: files.length, recordOnlyCount, files,
         backupDir: path.join(this.manager.repository.storePath, 'backups', entry.name), statePath: state ? statePath : null }
     }))
     return history.filter(Boolean).sort((a, b) => b.executionId.localeCompare(a.executionId))

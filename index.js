@@ -1,10 +1,11 @@
-const { app, BrowserWindow, ipcMain, session, dialog, shell, screen, Menu, clipboard, nativeImage, Tray } = require('electron')
+const { app, BrowserWindow, ipcMain, session, safeStorage, dialog, shell, screen, Menu, clipboard, nativeImage, Tray } = require('electron')
 // Acquire the profile lock before opening databases, logs, caches or the LAN server.
 if (!app.requestSingleInstanceLock()) {
   app.quit()
   return
 }
 
+// Keep this origin stable: reading progress and UI preferences live in localStorage.
 const DEV_SERVER_URL = 'http://localhost:15374'
 
 const path = require('path')
@@ -51,12 +52,21 @@ const { EhentaiAvailabilityCache } = require('./modules/ehentai_availability_cac
 const { LibraryTaskCoordinator } = require('./modules/audit/task_coordinator.js')
 const { AuditWorkspaceManager } = require('./modules/audit/job_manager.js')
 const { DedupeReviewService } = require('./modules/audit/dedupe_review_service.js')
+const { createAiService, normalizeAiConfig, resolveAiConfig } = require('./modules/ai_service.js')
+const { AiCredentialStore } = require('./modules/ai_credentials.js')
+const { AiOAuthManager } = require('./modules/ai_oauth.js')
+const { AiReviewService } = require('./modules/audit/ai_review_service.js')
+const { AiTraceStore } = require('./modules/ai_trace_store.js')
+const { createAiLogger } = require('./modules/ai_logger.js')
+const { createWindowMessenger, safeSend } = require('./modules/electron_window_messenger.js')
+const { discoverAndQueue } = require('./modules/audit/ai_auto_queue.js')
+const { loadAiBooks } = require('./modules/audit/ai_snapshot.js')
 const { executeApprovedActions } = require('./modules/audit/action_executor.js')
 const { buildExecutionPreview } = require('./modules/audit/review_validator.js')
 const { isConclusiveSiteUnavailable, getGalleryVersionRelation } = require('./modules/audit/online_decision.js')
 const { buildManualSourceAction, verifyNhentaiSourceAction } = require('./modules/audit/manual_source_action.js')
 const { checkRepairCandidate, describeAvailabilityFailure } = require('./modules/audit/repair_availability.js')
-const { extractMetadataSourceIdentity } = require('./modules/audit/utils.js')
+const { extractMetadataSourceIdentity, atomicWriteJson } = require('./modules/audit/utils.js')
 const { getBookFileSnapshot } = require('./modules/audit/ehviewer_repair.js')
 const { PageRecoveryManager } = require('./modules/audit/page_recovery.js')
 const { invalidateAuditCacheEntries } = require('./modules/audit/cache.js')
@@ -96,6 +106,13 @@ const normalizeScanConcurrency = (value) => {
 
 preparePath()
 let setting = prepareSetting()
+setting.ai = normalizeAiConfig(setting.ai)
+let settingsWriteQueue = Promise.resolve()
+const persistSetting = () => {
+  const operation = settingsWriteQueue.then(() => atomicWriteJson(path.join(STORE_PATH, 'setting.json'), setting))
+  settingsWriteQueue = operation.catch(() => {})
+  return operation
+}
 let collectionList = prepareCollectionList()
 let tagTranslation
 
@@ -121,6 +138,30 @@ const libraryTaskCoordinator = new LibraryTaskCoordinator()
 const auditWorkspaceManager = new AuditWorkspaceManager({ storePath: STORE_PATH, coordinator: libraryTaskCoordinator })
 const dedupeReviewService = new DedupeReviewService({ manager: auditWorkspaceManager,
   previewRoot: path.join(TEMP_PATH, 'dedupe-preview'), sevenZipPath: path.join(getRootPath(), 'resources/extraResources/7z.exe') })
+const aiCredentials = new AiCredentialStore({ storePath: STORE_PATH, safeStorage })
+let aiNetworkSession, aiNetworkProxy
+const aiFetch = async (url, options) => {
+  aiNetworkSession ||= session.fromPartition('ai-service')
+  const proxy = setting.proxy || ''
+  if (aiNetworkProxy !== proxy) {
+    await aiNetworkSession.setProxy(proxy ? { mode: 'fixed_servers', proxyRules: proxy } : { mode: 'direct' })
+    aiNetworkProxy = proxy
+  }
+  return aiNetworkSession.fetch(url, { ...options, credentials: 'omit' })
+}
+const aiOAuth = new AiOAuthManager({ storePath: STORE_PATH, safeStorage, fetchImpl: aiFetch,
+  openExternal: url => shell.openExternal(url), appName: app.getName() })
+const aiTraceStore = new AiTraceStore({ storePath: STORE_PATH })
+const aiVerificationObserved = new Map()
+const aiLogger = createAiLogger({ write: line => { console.info(line); logFile.write(line + '\n') } })
+const aiService = createAiService({ getConfig: () => setting.ai, getApiKey: () => aiCredentials.get(),
+  getOAuthCredential: (provider, options) => aiOAuth.getCredential(provider, options), fetchImpl: aiFetch, traceStore: aiTraceStore, logger: aiLogger
+})
+const aiReviewService = new AiReviewService({ storePath: STORE_PATH, coordinator: libraryTaskCoordinator,
+  aiService, getConfig: () => normalizeAiConfig(setting.ai), traceStore: aiTraceStore, logger: aiLogger,
+  loadBooks: async () => { await databaseReady; return loadAiBooks({ databasePath: path.join(STORE_PATH, 'database.sqlite'), metadataPath: metadataSqliteFile }) },
+  getDedupeReport: () => auditWorkspaceManager.getReport('dedupe')
+})
 const pageRecoveryManager = new PageRecoveryManager({
   storePath: STORE_PATH,
   Manga,
@@ -133,14 +174,41 @@ const isPageRecoveryResolved = result => {
   return Number(result?.health?.imageSequence?.gapCount || 0) === 0
 }
 const sendAuditState = state => {
-  if (auditWindow && !auditWindow.isDestroyed()) auditWindow.webContents.send('audit:state', state)
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('audit:lock-state', state.lock)
+  auditMessenger?.send('audit:state', state)
+  safeSend(mainWindow, 'audit:lock-state', state.lock)
   bookDetailWindowRegistry?.broadcast('book-detail:lock-state', state.lock)
+  const channel = state.channels?.dedupe
+  const runId = channel?.options?.aiRunId
+  if (runId && aiTraceStore.runs.has(runId)) {
+    const signature = [channel.activeJobId, channel.latestJobId, channel.status, channel.phase, channel.completed, channel.total].join(':')
+    if (aiVerificationObserved.get(runId) === signature) return
+    aiVerificationObserved.set(runId, signature)
+    const previous = aiTraceStore.runs.get(runId)
+    const active = ['running', 'cancelling'].includes(channel.status)
+    aiTraceStore.run(runId, { status: active ? 'running' : channel.status,
+      phase: active ? 'verifying' : channel.status === 'completed' ? 'queue_ready' : 'verifying',
+      verificationPhase: channel.phase, verifiedCount: channel.completed, verificationTotal: channel.total,
+      localCacheHits: channel.performance?.cacheHits, error: channel.status === 'failed' ? channel.error : null })
+    if (!active && channel.status === 'completed' && previous.verificationReportId !== channel.latestJobId) {
+      aiTraceStore.run(runId, { verificationReportId: channel.latestJobId })
+      void auditWorkspaceManager.getReport('dedupe').then(report => {
+        if (report?.options?.aiRunId === runId) aiTraceStore.run(runId, { queueGroups: report.summary?.duplicateGroups || 0,
+          queueEligible: report.summary?.eligibleDuplicateGroups || 0, excludedItems: report.summary?.excludedItems || 0 })
+      }).catch(error => console.error('AI queue detail:', error.code || 'AI_TRACE_REPORT_FAILED'))
+    }
+  }
 }
 auditWorkspaceManager.on('state', sendAuditState)
-auditWorkspaceManager.on('log', entry => {
-  if (auditWindow && !auditWindow.isDestroyed()) auditWindow.webContents.send('audit:log', entry)
+aiReviewService.on('state', state => {
+  safeSend(mainWindow, 'ai:state', state)
+  auditMessenger?.send('ai:state', state)
+  sendAuditState(auditWorkspaceManager.getState())
 })
+aiOAuth.on('state', state => {
+  safeSend(mainWindow, 'ai:auth-state', state)
+  auditMessenger?.send('ai:auth-state', state)
+})
+auditWorkspaceManager.on('log', entry => auditMessenger?.send('audit:log', entry))
 const getColumns = async (sequelize, tableName) => {
   const query = `PRAGMA table_info(${tableName})`
   const [results] = await sequelize.query(query)
@@ -203,6 +271,30 @@ app.on('second-instance', () => {
   revealMainWindow()
 })
 let auditWindow
+let aiInspectorWindow
+let aiInspectorSelection = {}
+let auditMessenger
+auditMessenger = createWindowMessenger({ getWindow: () => auditWindow })
+const traceUpdates = new Map()
+let traceUpdateTimer
+aiTraceStore.on('event', event => {
+  traceUpdates.set(`${event.runId}/${event.batch?.batchId || 'run'}`, event)
+  if (traceUpdateTimer) return
+  traceUpdateTimer = setTimeout(() => {
+    traceUpdateTimer = null
+    const updates = [...traceUpdates.values()].sort((left, right) => left.seq - right.seq)
+    traceUpdates.clear()
+    safeSend(mainWindow, 'ai-trace:events', updates)
+    auditMessenger?.send('ai-trace:events', updates)
+    safeSend(aiInspectorWindow, 'ai-trace:events', updates)
+  }, 250)
+  traceUpdateTimer.unref()
+})
+aiTraceStore.on('storage-error', code => {
+  safeSend(mainWindow, 'ai-trace:events', [{ error: code }])
+  auditMessenger?.send('ai-trace:events', [{ error: code }])
+  safeSend(aiInspectorWindow, 'ai-trace:events', [{ error: code }])
+})
 let jmComicBrowserWindow
 let bookDetailWindowRegistry
 let tray
@@ -220,7 +312,7 @@ const notifyBookChanged = async ({ bookId, type = 'updated', sourceWebContents =
   const payload = { type: book ? 'updated' : 'deleted', bookId: normalizedBookId, book }
 
   if (isWindowAvailable(mainWindow) && mainWindow.webContents !== sourceWebContents) {
-    mainWindow.webContents.send('book-detail:book-changed', payload)
+    safeSend(mainWindow, 'book-detail:book-changed', payload)
   }
   bookDetailWindowRegistry.broadcast('book-detail:book-changed', payload, { excludeSender: sourceWebContents })
   return payload
@@ -229,7 +321,7 @@ const notifyBookChanged = async ({ bookId, type = 'updated', sourceWebContents =
 const notifyLibraryChanged = ({ sourceWebContents = null } = {}) => {
   const payload = { changedAt: Date.now() }
   if (isWindowAvailable(mainWindow) && mainWindow.webContents !== sourceWebContents) {
-    mainWindow.webContents.send('book-detail:library-changed', payload)
+    safeSend(mainWindow, 'book-detail:library-changed', payload)
   }
   bookDetailWindowRegistry.broadcast('book-detail:library-changed', payload)
 }
@@ -288,9 +380,11 @@ const createTray = () => {
       label: 'exit',
       click: async () => {
         appIsQuitting = true
-        await auditWorkspaceManager.interruptForExit()
+        await Promise.allSettled([auditWorkspaceManager.interruptForExit(), aiReviewService.interruptForExit()])
+        await aiTraceStore.close()
         closeJmComicBrowserWindow()
         if (auditWindow && !auditWindow.isDestroyed()) auditWindow.destroy()
+        if (aiInspectorWindow && !aiInspectorWindow.isDestroyed()) aiInspectorWindow.destroy()
         bookDetailWindowRegistry.destroyAll()
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy()
         app.quit()
@@ -310,16 +404,22 @@ const createWindow = () => {
     'y': mainWindowState.y,
     'width': mainWindowState.width,
     'height': mainWindowState.height,
+    title: `${require('./package.json').name} ${require('./package.json').version}`,
+    backgroundColor: getThemeBackgroundColor(setting.theme),
     webPreferences: {
       webSecurity: app.isPackaged ? true : false,
       preload: path.join(__dirname, 'preload.js')
     },
     show: false
   })
+  const startupQuery = {
+    theme: setting.theme || 'light e-hentai',
+    language: !setting.language || setting.language === 'default' ? app.getLocale() : setting.language
+  }
   if (app.isPackaged) {
-    win.loadFile('dist/index.html')
+    win.loadFile('dist/index.html', { query: startupQuery })
   } else {
-    win.loadURL(DEV_SERVER_URL)
+    win.loadURL(`${DEV_SERVER_URL}/?${new URLSearchParams(startupQuery)}`)
   }
   mainWindowState.manage(win)
   win.setMenuBarVisibility(false)
@@ -343,16 +443,17 @@ const createWindow = () => {
       } else {
         win.minimize()
       }
-    } else {
-      win.show()
     }
   })
-  win.on('close', (event) => {
+  win.on('close', event => {
+    if (appIsQuitting) return
+    event.preventDefault()
     if (setting.closeToTray) {
-      event.preventDefault()
       createTray()
       win.hide()
       win.setSkipTaskbar(true)
+    } else {
+      app.quit()
     }
   })
   win.on('minimize', (event) => {
@@ -373,6 +474,9 @@ const createWindow = () => {
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
   })
+  // The HTML loading screen can paint while the renderer's modules are loading.
+  // Keep the user's minimized/tray startup preference, but do not hide normal starts.
+  if (!setting.minimizeOnStart || revealMainWindowOnReady) win.show()
   return win
 }
 
@@ -401,15 +505,20 @@ const createAuditWindow = () => {
     show: false
   })
   auditWindow = win
+  auditMessenger.markLoading()
   auditWindowState.manage(win)
   win.setMenuBarVisibility(false)
   win.setAutoHideMenuBar(true)
   if (app.isPackaged) win.loadFile('dist/audit.html')
   else win.loadURL(`${DEV_SERVER_URL}/audit.html`)
   win.once('ready-to-show', () => win.show())
+  win.webContents.on('did-start-loading', () => auditMessenger.markLoading())
+  win.webContents.on('render-process-gone', () => auditMessenger.markLoading())
+  win.webContents.on('destroyed', () => auditMessenger.markLoading())
   win.webContents.on('did-finish-load', () => {
     win.setTitle('exhentai-manga-manager | Library Audit')
-    win.webContents.send('audit:state', auditWorkspaceManager.getState())
+    auditMessenger.markReady()
+    auditMessenger.send('audit:state', auditWorkspaceManager.getState())
   })
   let closePromptOpen = false
   win.on('close', event => {
@@ -433,8 +542,29 @@ const createAuditWindow = () => {
   })
   win.on('closed', () => {
     if (auditWindow === win) auditWindow = null
+    auditMessenger.dispose()
   })
   return win
+}
+
+const createAiInspectorWindow = selection => {
+  aiInspectorSelection = selection || {}
+  if (aiInspectorWindow && !aiInspectorWindow.isDestroyed()) {
+    aiInspectorWindow.show()
+    aiInspectorWindow.focus()
+    safeSend(aiInspectorWindow, 'ai-trace:select', aiInspectorSelection)
+    return
+  }
+  const state = windowStateKeeper({ defaultWidth: 1380, defaultHeight: 900, file: 'ai-inspector-window-state.json' })
+  const win = new BrowserWindow({ x: state.x, y: state.y, width: state.width, height: state.height, minWidth: 800, minHeight: 600,
+    show: false, webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'ai-inspector-preload.js') } })
+  aiInspectorWindow = win
+  state.manage(win)
+  win.setMenuBarVisibility(false)
+  if (app.isPackaged) win.loadFile('dist/ai-inspector.html')
+  else win.loadURL(`${DEV_SERVER_URL}/ai-inspector.html`)
+  win.once('ready-to-show', () => win.show())
+  win.on('closed', () => { if (aiInspectorWindow === win) aiInspectorWindow = null })
 }
 
 const focusBookDetailWindow = win => {
@@ -447,9 +577,8 @@ const focusBookDetailWindow = win => {
 
 const sendBookDetailContext = win => {
   const entry = bookDetailWindowRegistry.getByWindow(win)
-  if (!entry || win.webContents.isLoadingMainFrame()) return false
-  win.webContents.send('book-detail:open', entry.context)
-  return true
+  if (!entry) return false
+  return safeSend(win, 'book-detail:open', entry.context)
 }
 
 const bookDetailOpenRequests = new Map()
@@ -533,7 +662,7 @@ const createBookDetailWindow = context => {
   win.webContents.on('did-finish-load', () => {
     win.setTitle('exhentai-manga-manager | Book Detail')
     sendBookDetailContext(win)
-    win.webContents.send('book-detail:lock-state', libraryTaskCoordinator.getState())
+    safeSend(win, 'book-detail:lock-state', libraryTaskCoordinator.getState())
   })
   win.on('closed', () => {
     bookDetailWindowRegistry.unregister(win)
@@ -545,6 +674,7 @@ app.commandLine.appendSwitch('js-flags', '--max-old-space-size=65536')
 // app.disableHardwareAcceleration()
 app.whenReady().then(async () => {
   await auditWorkspaceManager.initialize()
+  await aiReviewService.initialize()
   await clearFolder(VIEWER_PATH)
   const primaryDisplay = screen.getPrimaryDisplay()
   screenWidth = Math.floor(primaryDisplay.workAreaSize.width * primaryDisplay.scaleFactor)
@@ -573,13 +703,14 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', event => {
-  if (appIsQuitting || !auditWorkspaceManager.getState().activeTask) {
+  aiOAuth.dispose()
+  if (appIsQuitting) {
     closeJmComicBrowserWindow()
     return
   }
   event.preventDefault()
   appIsQuitting = true
-  auditWorkspaceManager.interruptForExit().finally(() => {
+  Promise.allSettled([auditWorkspaceManager.interruptForExit(), aiReviewService.interruptForExit()]).then(() => aiTraceStore.close()).finally(() => {
     closeJmComicBrowserWindow()
     app.quit()
   })
@@ -946,7 +1077,7 @@ const runImportSqliteWorkers = async ({ sqlitePath, bookList }) => {
 const setProgressBar = (progress, targetWindow = mainWindow) => {
   if (!isWindowAvailable(targetWindow)) return
   targetWindow.setProgressBar(progress)
-  targetWindow.webContents.send('send-action', {
+  safeSend(targetWindow, 'send-action', {
     action: 'send-progress',
     progress
   })
@@ -1814,6 +1945,8 @@ ipcMain.handle('load-setting', async (event, arg) => {
 
 ipcMain.handle('save-setting', async (event, receiveSetting) => {
   return await libraryTaskCoordinator.runMutation('save-setting', async () => {
+  // AI settings have their own save endpoint; a stale general-settings form must not overwrite them.
+  receiveSetting.ai = normalizeAiConfig(setting.ai)
   receiveSetting.matchConcurrency = normalizeMatchConcurrency(receiveSetting.matchConcurrency)
   receiveSetting.scanConcurrency = normalizeScanConcurrency(receiveSetting.scanConcurrency)
   if (receiveSetting.proxy) {
@@ -1851,11 +1984,118 @@ ipcMain.handle('save-setting', async (event, receiveSetting) => {
     tray.destroy()
     tray = null
   }
-  const targetPath = path.join(STORE_PATH, 'setting.json')
-  const tempPath = path.join(STORE_PATH, 'setting.json.tmp')
-  await fs.promises.writeFile(tempPath, JSON.stringify(setting, null, '  '), { encoding: 'utf-8' })
-    return await fs.promises.rename(tempPath, targetPath)
+    return await persistSetting()
   })
+})
+
+// The AI API accepts app windows only, and never returns the saved credential.
+const handleAi = (channel, handler) => ipcMain.handle(channel, async (event, request = {}) => {
+  if (![mainWindow, auditWindow].some(win => win && !win.isDestroyed() && win.webContents === event.sender) || event.senderFrame !== event.sender.mainFrame) {
+    throw new Error('AI_INVALID_SENDER')
+  }
+  try {
+    return await handler(request && typeof request === 'object' ? request : {})
+  } catch (error) {
+    // Electron preserves only Error.message across invoke; retain safe AI codes for the renderer.
+    if (/^AI_[A-Z_]+$/.test(error?.code || '')) throw new Error(`${error.code}: ${error.message}`)
+    throw error
+  }
+})
+const getAiConfig = async () => {
+  const config = normalizeAiConfig(setting.ai)
+  const resolved = resolveAiConfig(config)
+  const hasApiKey = await aiCredentials.has()
+  const auth = config.provider === 'compatible' ? null : await aiOAuth.getState(config.provider)
+  const missing = []
+  if (!resolved.baseUrl) missing.push('baseUrl')
+  if (!resolved.model) missing.push('model')
+  if (auth && (!auth.usable || auth.loginPending)) missing.push('credential')
+  return { config, hasApiKey, ready: missing.length === 0, missing, auth }
+}
+handleAi('ai:get-config', getAiConfig)
+handleAi('ai:save-config', request => libraryTaskCoordinator.runMutation('save-ai-setting', async () => {
+  const config = normalizeAiConfig(request.config)
+  if (request.clearKey === true) await aiCredentials.clear()
+  else if (typeof request.apiKey === 'string' && request.apiKey.trim()) await aiCredentials.set(request.apiKey)
+  setting.ai = config
+  await persistSetting()
+  return getAiConfig()
+}))
+handleAi('ai:test-connection', async request => {
+  const response = await aiService.testConnection({ config: normalizeAiConfig(request.config || setting.ai),
+    ...(typeof request.apiKey === 'string' && request.apiKey.trim() ? { apiKey: request.apiKey } : {}) })
+  return { ok: true, model: response.model }
+})
+handleAi('ai:list-models', request => aiService.listModels({
+  config: normalizeAiConfig(request.config || setting.ai),
+  ...(typeof request.apiKey === 'string' && request.apiKey.trim() ? { apiKey: request.apiKey } : {})
+}))
+handleAi('ai:get-auth-state', request => aiOAuth.getState(request.provider || normalizeAiConfig(setting.ai).provider))
+handleAi('ai:refresh-usage', request => aiOAuth.refreshUsage(request.provider || normalizeAiConfig(setting.ai).provider))
+handleAi('ai:open-usage-page', async request => {
+  const provider = request.provider || normalizeAiConfig(setting.ai).provider
+  if (!['chatgpt-json', 'chatgpt-account'].includes(provider)) throw Object.assign(new Error('请先选择 ChatGPT 登录方式。'), { code: 'AI_INVALID_PROVIDER' })
+  await shell.openExternal('https://chatgpt.com/settings/usage')
+  return { ok: true }
+})
+handleAi('ai:import-oauth-json', request => libraryTaskCoordinator.runMutation('import-ai-credential', () => aiOAuth.importJson(request.json)))
+handleAi('ai:start-login', async request => {
+  await aiReviewService.interruptForExit()
+  return libraryTaskCoordinator.runMutation('start-ai-login', () => aiOAuth.startLogin(request))
+})
+handleAi('ai:reopen-login', () => aiOAuth.reopenLogin())
+handleAi('ai:cancel-login', () => aiOAuth.cancelLogin())
+handleAi('ai:logout', request => libraryTaskCoordinator.runMutation('logout-ai', () => aiOAuth.logout(request.provider || normalizeAiConfig(setting.ai).provider)))
+handleAi('ai:get-state', () => aiReviewService.getState())
+const handleAiTrace = (channel, handler, inspector = true) => ipcMain.handle(channel, async (event, request = {}) => {
+  const allowed = inspector ? [mainWindow, auditWindow, aiInspectorWindow] : [mainWindow, auditWindow]
+  if (!allowed.some(win => win && !win.isDestroyed() && win.webContents === event.sender) || event.senderFrame !== event.sender.mainFrame) throw new Error('AI_INVALID_SENDER')
+  return handler(request && typeof request === 'object' ? request : {})
+})
+handleAiTrace('ai-trace:open', request => { createAiInspectorWindow({ runId: request.runId, batchId: request.batchId }); return { ok: true } }, false)
+handleAiTrace('ai-trace:bootstrap', () => ({ selection: aiInspectorSelection, locale: app.getLocale(), setting: { language: setting.language, theme: setting.theme } }))
+handleAiTrace('ai-trace:snapshot', request => aiTraceStore.snapshot(request))
+handleAiTrace('ai-trace:read-text', request => aiTraceStore.readText(request))
+handleAiTrace('ai-trace:export', async request => {
+  await aiTraceStore.readText({ ...request, limit: 1 }) // Validate IDs and artifact kind before constructing a path.
+  const result = await dialog.showSaveDialog(aiInspectorWindow, { defaultPath: `ai-${request.batchId}-${request.attempt}-${request.kind}.txt` })
+  if (result.canceled || !result.filePath) return { cancelled: true }
+  await fs.promises.copyFile(path.join(aiTraceStore.root, request.runId, request.batchId, `${request.requestId}-${request.attempt}`, `${request.kind}.txt`), result.filePath)
+  return { ok: true }
+})
+handleAi('ai:get-results', request => aiReviewService.getResults({ task: request.task, reportId: request.reportId }))
+handleAi('ai:start', async request => {
+  const config = normalizeAiConfig(setting.ai)
+  if (config.provider === 'chatgpt-account' && (await aiOAuth.getState(config.provider)).loginPending) {
+    throw Object.assign(new Error('请先完成或取消 ChatGPT 网页登录。'), { code: 'AI_LOGIN_PENDING' })
+  }
+  return aiReviewService.start({ task: request.task, reportId: String(request.reportId || ''),
+    groupIds: normalizeAuditBookIds(request.groupIds), force: request.force === true })
+})
+handleAi('ai:discover-and-queue', async request => {
+  await databaseReady
+  const config = normalizeAiConfig(setting.ai)
+  if (config.provider === 'chatgpt-account' && (await aiOAuth.getState(config.provider)).loginPending) {
+    throw Object.assign(new Error('请先完成或取消 ChatGPT 网页登录。'), { code: 'AI_LOGIN_PENDING' })
+  }
+  return await discoverAndQueue({
+    force: request?.force === true,
+    startDiscovery: options => aiReviewService.start(options),
+    waitForIdle: () => aiReviewService.waitForIdle(),
+    getState: () => aiReviewService.getState(),
+    getValidCandidatePairs: options => aiReviewService.getValidCandidatePairs(options),
+    getValidCoveragePairs: options => aiReviewService.getValidCoveragePairs(options),
+    startDedupe: async options => {
+      aiTraceStore.run(options.aiRunId, { status: 'running', phase: 'verifying', semanticPairCount: options.semanticPairs.length })
+      try { return await auditWorkspaceManager.startDedupe({ ...getAuditWorkerOptions(), ...options }) }
+      catch (error) { aiTraceStore.run(options.aiRunId, { status: 'failed', phase: 'verifying', error: error.code || 'AI_LOCAL_VERIFY_FAILED' }); throw error }
+    }
+  })
+})
+handleAi('ai:cancel', () => aiReviewService.cancel())
+handleAi('ai:verify-candidates', async request => {
+  const candidatePairs = await aiReviewService.getCandidatePairs(normalizeAuditBookIds(request.resultIds))
+  return auditWorkspaceManager.startDedupe({ ...getAuditWorkerOptions(), candidatePairs, scanMode: 'full' })
 })
 
 ipcMain.handle('export-database', async (event, folder) => {
@@ -1970,7 +2210,9 @@ ipcMain.handle('audit:get-book-preview', async (event, bookId) => {
     searchTitle: returnTrimFileName({ filepath: effective.filepath, type: effective.type }, setting),
     filecount: Number.isFinite(Number(effective.filecount)) ? Number(effective.filecount) : null,
     coverPath: effective.coverPath || null,
-    url: effective.url || ''
+    url: effective.url || '',
+    posted: effective.posted ?? null,
+    mtime: effective.mtime || null
   }
 })
 
@@ -2198,10 +2440,24 @@ ipcMain.handle('audit:start-anomaly', async (event, request = {}) => {
 
 ipcMain.handle('audit:start-dedupe', async (event, request = {}) => {
   await databaseReady
+  const requestedPairs = Array.isArray(request.semanticPairs)
+    ? request.semanticPairs
+      .filter(pair => pair && pair.leftId != null && pair.rightId != null && String(pair.leftId) !== String(pair.rightId))
+      .map(pair => ({ leftId: String(pair.leftId), rightId: String(pair.rightId) }))
+    : request.aiRunId ? await aiReviewService.getValidCandidatePairs({ runId: String(request.aiRunId) }) : []
+  const coveragePairs = Array.isArray(request.coveragePairs)
+    ? request.coveragePairs.filter(pair => pair && pair.leftId != null && pair.rightId != null && String(pair.leftId) !== String(pair.rightId))
+      .map(pair => ({ leftId: String(pair.leftId), rightId: String(pair.rightId), relation: String(pair.relation || '') }))
+    : request.aiRunId ? await aiReviewService.getValidCoveragePairs({ runId: String(request.aiRunId) }) : []
   return await auditWorkspaceManager.startDedupe({
     ...getAuditWorkerOptions(),
     scanMode: request.scanMode === 'full' ? 'full' : 'daily',
     forceRecompute: Boolean(request.forceRecompute || request.forceContent),
+    semanticPairs: requestedPairs,
+    coveragePairs,
+    aiRunId: request.aiRunId ? String(request.aiRunId) : null,
+    aiSource: request.aiSource || (request.aiRunId ? 'ai-discovery' : null),
+    aiPartial: request.aiPartial === true,
     groupIds: normalizeAuditBookIds(request.groupIds),
     reportId: String(request.reportId || '')
   })
@@ -2220,7 +2476,12 @@ ipcMain.handle('audit:dedupe-preview-cleanup', async event => await dedupeReview
 ipcMain.handle('audit:dedupe-history', async () => await dedupeReviewService.getHistory())
 
 ipcMain.handle('audit:cancel-active', async () => await auditWorkspaceManager.cancelActive())
-ipcMain.handle('audit:clear-inspection-records', async () => await auditWorkspaceManager.clearInspectionRecords())
+ipcMain.handle('audit:clear-inspection-records', async () => {
+  if (aiReviewService.running) throw new Error('AI_ALREADY_RUNNING')
+  const state = await auditWorkspaceManager.clearInspectionRecords()
+  await aiReviewService.clear()
+  return state
+})
 ipcMain.handle('audit:save-review', async (event, { taskType, review } = {}) => {
   return await auditWorkspaceManager.saveReview(taskType, review || {})
 })
@@ -2241,7 +2502,8 @@ ipcMain.handle('audit:get-execution-preview', async (event, request = {}) => {
     auditWorkspaceManager.getReview(taskType)
   ])
   if (request.reportId !== report?.reportId) throw new Error(`${taskType.toUpperCase()}_REVIEW_MISMATCH`)
-  const preview = buildExecutionPreview({ taskType, report, review, library: setting.library, collectionList })
+  const registeredBooks = taskType === 'dedupe' ? await Manga.findAll({ attributes: ['id', 'filepath'], raw: true }) : []
+  const preview = buildExecutionPreview({ taskType, report, review, library: setting.library, collectionList, registeredBooks })
   return taskType === 'dedupe' ? await dedupeReviewService.enrichExecutionPreview(preview) : preview
 })
 
@@ -2466,9 +2728,7 @@ ipcMain.handle('audit:execute-approved', async (event, request = {}) => {
   }
   if (libraryChanged) {
     await auditWorkspaceManager.markReportsStale(`${taskType}-execution:${result.taskType || taskType}`)
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('audit:library-changed', { rendererState: result.rendererState })
-    }
+    safeSend(mainWindow, 'audit:library-changed', { rendererState: result.rendererState })
     bookDetailService.invalidateTagCatalog()
     notifyLibraryChanged({ sourceWebContents: mainWindow?.webContents })
   }

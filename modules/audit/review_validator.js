@@ -2,6 +2,7 @@ const path = require('path')
 const { extractMetadataSourceIdentity, isSameMetadataSource, normalizePath } = require('./utils.js')
 const { MANUAL_SOURCE_ANOMALY_TYPES } = require('./manual_source_action.js')
 const { getBatchSafeActionIds } = require('./action_policy.js')
+const { isEligiblePair, findEquivalentKeeperId, planDedupeOperations } = require('./dedupe_execution_plan.js')
 
 const SUPPORTED_ANOMALY_ACTIONS = new Set(['repair-url', 'repair-ehviewer', 'repair-local-scan', 'delete-orphan-metadata'])
 
@@ -102,26 +103,14 @@ const normalizeDedupeReview = (report, review = {}) => {
   const selections = {}
   const decisions = {}
   const participants = new Map()
-  const paths = new Map()
-  const membersById = new Map((report.groups || []).flatMap(group => group.items.map(item => [normalizeId(item.id), item])))
   const register = (group, keepId, quarantineIds) => {
-    if (group.actionable === false) throw new Error('DUPLICATE_GROUP_NOT_ACTIONABLE: ' + group.id)
     if (report.executable === false) throw new Error('DEDUPE_REPORT_NOT_EXECUTABLE')
     const itemIds = new Set(group.items.map(item => normalizeId(item.id)))
-    if (!itemIds.has(keepId) || !quarantineIds.length || quarantineIds.includes(keepId) || quarantineIds.some(id => !itemIds.has(id))) throw new Error('INVALID_DUPLICATE_SELECTION: ' + group.id)
-    for (const bookId of [keepId, ...quarantineIds]) {
+    if ((keepId && !itemIds.has(keepId)) || !quarantineIds.length || quarantineIds.includes(keepId) || quarantineIds.some(id => !itemIds.has(id))) throw new Error('INVALID_DUPLICATE_SELECTION: ' + group.id)
+    for (const bookId of [keepId, ...quarantineIds].filter(Boolean)) {
       const previous = participants.get(bookId)
       if (previous && previous !== group.id) throw new Error('OVERLAPPING_DUPLICATE_SELECTION: ' + bookId)
-      const item = group.items.find(item => normalizeId(item.id) === bookId)
-      const filepath = item.filepath ? normalizePath(item.filepath) : null
-      if (filepath && paths.has(filepath) && paths.get(filepath) !== bookId) throw new Error('OVERLAPPING_DUPLICATE_PATH: ' + filepath)
-      if (filepath) for (const [otherPath, otherId] of paths) {
-        if ((item.type === 'folder' && otherPath.startsWith(filepath + path.sep)) ||
-          (membersById.get(otherId)?.type === 'folder' && filepath.startsWith(otherPath + path.sep))) throw new Error('OVERLAPPING_DUPLICATE_PATH: ' + filepath)
-      }
       participants.set(bookId, group.id)
-      if (filepath) paths.set(filepath, bookId)
-      if (report.dedupeVersion >= 2 && !item.archiveSha256 && !item.contentProof) throw new Error('DUPLICATE_CONTENT_NOT_VERIFIED: ' + bookId)
     }
   }
   for (const [rawGroupId, value] of Object.entries(review.decisions || {})) {
@@ -133,17 +122,32 @@ const normalizeDedupeReview = (report, review = {}) => {
     const keepIds = [...new Set((value.keepIds || []).map(normalizeId))]
     const itemIds = new Set(group.items.map(item => normalizeId(item.id)))
     if (keepIds.some(id => !itemIds.has(id))) throw new Error('INVALID_DUPLICATE_SELECTION: ' + groupId)
-    const quarantineToKeep = value.disposition === 'duplicate' ? Object.fromEntries(Object.entries(value.quarantineToKeep || {}).map(([id, keep]) => [normalizeId(id), normalizeId(keep)])) : {}
-    if (value.disposition === 'duplicate' && !Object.keys(quarantineToKeep).length) throw new Error('INVALID_DUPLICATE_SELECTION: ' + groupId)
-    for (const [id, keepId] of Object.entries(quarantineToKeep)) {
-      if (keepIds.includes(id) || !keepIds.includes(keepId) || !itemIds.has(id)) throw new Error('INVALID_DUPLICATE_SELECTION: ' + groupId)
-      if (group.items.find(item => normalizeId(item.id) === id)?.nestedBookIds?.length) throw new Error('DUPLICATE_FOLDER_CONTAINS_OTHER_BOOKS: ' + id)
+    const checkboxSelection = value.disposition === 'duplicate' && value.selectionMode === 'checkbox'
+    const quarantineIds = checkboxSelection
+      ? group.items.map(item => normalizeId(item.id)).filter(id => !keepIds.includes(id))
+      : value.disposition === 'duplicate' ? Object.keys(value.quarantineToKeep || {}).map(normalizeId) : []
+    if (value.disposition === 'duplicate' && (!quarantineIds.length || checkboxSelection && !keepIds.length)) throw new Error('INVALID_DUPLICATE_SELECTION: ' + groupId)
+    const quarantineToKeep = checkboxSelection
+      ? Object.fromEntries(quarantineIds.flatMap(id => {
+          const keeper = findEquivalentKeeperId(group, id, keepIds)
+          return keeper ? [[id, keeper]] : []
+        }))
+      : value.disposition === 'duplicate' ? Object.fromEntries(Object.entries(value.quarantineToKeep || {}).map(([id, keep]) => [normalizeId(id), normalizeId(keep)])) : {}
+    if (checkboxSelection) for (const keepId of keepIds) {
+      const previous = participants.get(keepId)
+      if (previous && previous !== group.id) throw new Error('OVERLAPPING_DUPLICATE_SELECTION: ' + keepId)
+      participants.set(keepId, group.id)
+    }
+    for (const id of quarantineIds) {
+      const keepId = quarantineToKeep[id] || null
+      if (keepIds.includes(id) || !itemIds.has(id) || keepId && !keepIds.includes(keepId) || !checkboxSelection && !keepId) throw new Error('INVALID_DUPLICATE_SELECTION: ' + groupId)
       register(group, keepId, [id])
-      if (report.dedupeVersion >= 2 && !(group.equivalenceClasses || []).some(equivalence => equivalence.eligible && equivalence.memberIds.includes(id) && equivalence.memberIds.includes(keepId))) {
+      if (!checkboxSelection && report.dedupeVersion >= 2 && !isEligiblePair(group, id, keepId)) {
         if (!String(value.reason || '').trim() || !value.confirmedConflictCodes?.includes('manual-differences')) throw new Error('DUPLICATE_DIFFERENCES_NOT_CONFIRMED: ' + groupId)
       }
     }
-    decisions[groupId] = { disposition: value.disposition, evidenceRevision: group.evidenceRevision || null, keepIds, quarantineToKeep,
+    decisions[groupId] = { disposition: value.disposition, selectionMode: checkboxSelection ? 'checkbox' : undefined,
+      evidenceRevision: group.evidenceRevision || null, keepIds, quarantineIds, quarantineToKeep,
       reason: String(value.reason || '').trim(), confirmedConflictCodes: [...new Set((value.confirmedConflictCodes || []).map(String))], updatedAt: value.updatedAt || new Date().toISOString() }
   }
   for (const [rawGroupId, value] of Object.entries(review.selections || {})) {
@@ -164,7 +168,8 @@ const getDedupeActions = (report, review) => {
   const actions = Object.entries(review.selections || {}).map(([groupId, value]) => ({ groupId, ...value }))
   for (const [groupId, decision] of Object.entries(review.decisions || {})) {
     const byKeeper = new Map()
-    for (const [id, keepId] of Object.entries(decision.quarantineToKeep || {})) {
+    for (const id of decision.quarantineIds || Object.keys(decision.quarantineToKeep || {})) {
+      const keepId = decision.quarantineToKeep?.[id] || null
       if (!byKeeper.has(keepId)) byKeeper.set(keepId, [])
       byKeeper.get(keepId).push(id)
     }
@@ -172,9 +177,24 @@ const getDedupeActions = (report, review) => {
   }
   return actions.map(action => {
     const group = report.groups.find(group => String(group.id) === action.groupId)
-    return { ...action, group, keep: group.items.find(item => String(item.id) === action.keepId),
+    return { ...action, group, keep: group.items.find(item => String(item.id) === action.keepId) || null,
       quarantineItems: group.items.filter(item => action.quarantineIds.includes(String(item.id))) }
   })
+}
+
+const getComparisonReference = (group, item, keep, decision) => {
+  if (keep) return keep
+  const retained = group.items.filter(book => decision?.keepIds?.includes(normalizeId(book.id)))
+  if (retained.length === 1) return retained[0]
+  const related = (group.relations || []).filter(relation => relation.verified && Number(relation.matchedPages || 0) > 0 &&
+    (normalizeId(relation.leftId) === normalizeId(item.id) || normalizeId(relation.rightId) === normalizeId(item.id)))
+    .sort((left, right) => Number(right.matchedPages || 0) - Number(left.matchedPages || 0))
+  for (const relation of related) {
+    const otherId = normalizeId(relation.leftId) === normalizeId(item.id) ? normalizeId(relation.rightId) : normalizeId(relation.leftId)
+    const reference = retained.find(book => normalizeId(book.id) === otherId)
+    if (reference) return reference
+  }
+  return null
 }
 
 const normalizeReview = (taskType, report, review) => {
@@ -193,7 +213,7 @@ const assertQuarantineRoot = (library, quarantineRoot) => {
   return path.resolve(quarantineRoot)
 }
 
-const buildExecutionPreview = ({ taskType, report, review, library, collectionList = [] }) => {
+const buildExecutionPreview = ({ taskType, report, review, library, collectionList = [], registeredBooks = [] }) => {
   const normalizedReview = normalizeReview(taskType, report, review)
   if (taskType === 'anomaly') {
     const selected = new Set(normalizedReview.actionIds)
@@ -226,37 +246,43 @@ const buildExecutionPreview = ({ taskType, report, review, library, collectionLi
   }
 
   const actions = getDedupeActions(report, normalizedReview)
+  const planned = planDedupeOperations(actions, registeredBooks)
   const selectedGroups = [...new Set(actions.map(action => action.groupId))]
   if (selectedGroups.length === 0) throw new Error('NO_APPROVED_ACTIONS')
   const quarantineRoot = assertQuarantineRoot(library, normalizedReview.quarantineRoot)
-  let quarantineFileCount = 0
-  let potentialBytes = 0
-  let manualReviewGroupCount = 0
-  for (const { group, quarantineIds: ids } of actions) {
-    const quarantineIds = new Set(ids)
-    quarantineFileCount += quarantineIds.size
-    potentialBytes += (group.items || [])
-      .filter(item => quarantineIds.has(normalizeId(item.id)))
-      .reduce((sum, item) => sum + Number(item.transferBytes ?? item.size ?? 0), 0)
-    if (!group.eligible) manualReviewGroupCount += 1
-  }
+  const quarantineFileCount = planned.filter(row => ['move', 'split-folder'].includes(row.mode)).length
+  const recordOnlyCount = planned.length - quarantineFileCount
+  const potentialBytes = planned.filter(row => ['move', 'split-folder'].includes(row.mode))
+    .reduce((sum, row) => sum + Number(row.item.transferBytes ?? row.item.size ?? 0), 0)
   return {
     valid: true,
     taskType,
     reportId: report.reportId,
     selectedGroupCount: selectedGroups.length,
     quarantineFileCount,
+    recordOnlyCount,
     potentialBytes,
-    manualReviewGroupCount: new Set(actions.filter(action => !action.group.eligible || normalizedReview.decisions[action.groupId]?.confirmedConflictCodes?.includes('manual-differences')).map(action => action.groupId)).size,
+    manualReviewGroupCount: new Set(planned.filter(row => !row.equivalent).map(row => row.groupId)).size,
     quarantineRoot,
-    files: actions.flatMap(action => action.quarantineItems.map(item => ({ groupId: action.groupId, keepId: action.keep.id,
-      keepTitle: action.keep.title, keepPath: action.keep.filepath, title: item.title, source: item.filepath,
-      relativeTarget: path.relative(library, item.filepath), target: path.join(quarantineRoot, '{executionId}', path.relative(library, item.filepath)), size: item.transferBytes ?? item.size, kind: action.group.kind,
-      reason: normalizedReview.decisions[action.groupId]?.reason || '', uncoveredEntries: item.uncoveredEntries || [],
-      collectionTitles: collectionList.filter(collection => (collection.list || []).some(value => [item.id, item.hash].includes(value))).map(collection => collection.title || collection.id),
-      mergedReadCount: Math.max(...[action.keep, ...action.quarantineItems].map(book => Number(book.readCount || 0))),
-      mergedMark: [action.keep, ...action.quarantineItems].some(book => book.mark),
-      mergedHidden: [action.keep, ...action.quarantineItems].every(book => book.hiddenBook) })))
+    files: planned.map(({ groupId, item, keep, group, mode, equivalent, nestedPaths = [], physicalOwnerId }) => {
+      const reference = getComparisonReference(group, item, keep, normalizedReview.decisions[groupId])
+      return {
+        groupId, bookId: item.id, keepId: keep?.id || null, keepTitle: keep?.title || null, keepPath: keep?.filepath || null,
+        referenceId: reference?.id || null, referenceTitle: reference?.title || null,
+        title: item.title, source: item.filepath, mode, equivalent, physicalOwnerId: physicalOwnerId || null, nestedPaths,
+        relativeTarget: path.relative(library, item.filepath),
+        target: ['record-only', 'shared-move'].includes(mode) ? null : path.join(quarantineRoot, '{executionId}', path.relative(library, item.filepath)),
+        size: item.transferBytes ?? item.size, kind: group.kind,
+        reason: normalizedReview.decisions[groupId]?.reason || '', uncoveredEntries: item.uncoveredEntries || [],
+        collectionTitles: collectionList.filter(collection => (collection.list || []).some(value => [item.id, item.hash].includes(value))).map(collection => collection.title || collection.id),
+        collectionAction: equivalent ? 'remap' : 'remove',
+        ...(keep ? {
+          mergedReadCount: equivalent ? Math.max(Number(keep.readCount || 0), Number(item.readCount || 0)) : Number(keep.readCount || 0),
+          mergedMark: equivalent ? Boolean(keep.mark || item.mark) : Boolean(keep.mark),
+          mergedHidden: equivalent ? Boolean(keep.hiddenBook && item.hiddenBook) : Boolean(keep.hiddenBook)
+        } : {})
+      }
+    })
   }
 }
 

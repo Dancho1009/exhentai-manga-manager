@@ -15,7 +15,7 @@
               :icon="Delete"
               :title="$t('audit.clearInspectionRecords')"
               :aria-label="$t('audit.clearInspectionRecords')"
-              :disabled="busy"
+              :disabled="busy || aiRunning"
               @click="confirmClearInspectionRecords"
             />
           </el-tooltip>
@@ -46,12 +46,19 @@
         <el-alert v-if="activeState.error" type="error" :closable="false" :title="activeState.error" show-icon />
       </section>
 
+      <section v-if="aiRunning || aiIncomplete" class="ai-task-band" aria-live="polite">
+        <span>{{ aiTaskLabel }} · {{ $t('ai.status_' + (aiState.status === 'completed' && aiState.partial ? 'partial' : aiState.status)) }} · {{ $t('ai.phase_' + (aiState.phase || 'classifying')) }} · {{ aiState.completed || 0 }}/{{ aiState.total || 0 }}</span>
+        <small v-if="aiState.phase === 'normalizing'">{{ $t('audit.aiLiveNormalization', { cached: aiState.normalizationCached || 0, failed: aiState.normalizationFailed || 0 }) }}</small>
+        <small v-else-if="aiState.phase === 'classifying'">{{ $t('audit.aiLiveClassification', { candidates: aiState.candidateCount || aiState.total || 0, cached: aiState.classificationCached || 0 }) }}</small>
+        <el-button v-if="aiRunning" size="small" :disabled="aiState.status === 'cancelling'" @click="cancelAi">{{ $t('ai.cancel') }}</el-button>
+        <el-button v-else size="small" :disabled="busy" @click="startDedupe({ scanMode: 'ai', forceRecompute: false })">{{ $t('ai.continueAnalysis') }}</el-button>
+      </section>
       <el-tabs v-model="activeTab" class="audit-tabs">
         <el-tab-pane :label="$t('audit.anomalyTab')" name="anomaly">
           <anomaly-panel
             :report="anomalyReport"
             :state="anomalyState"
-            :busy="busy"
+            :busy="busy || aiRunning"
             :review-locked="reviewLocked"
             :action-ids="anomalyReview.actionIds"
             :manual-actions="anomalyReview.manualActions"
@@ -69,15 +76,18 @@
         </el-tab-pane>
         <el-tab-pane :label="$t('audit.dedupTab')" name="dedupe">
           <dedupe-panel
+            :active="activeTab === 'dedupe'"
             :report="dedupeReport"
+            :review-report-id="dedupeReview.reportId"
             :state="dedupeState"
-            :busy="busy"
+            :busy="busy || aiRunning"
             :review-locked="reviewLocked"
             :selections="dedupeReview.selections"
             :decisions="dedupeReview.decisions"
             :commit-decisions="commitDedupeDecisions"
             :review-saving="reviewSaving.dedupe"
             :review-dirty="reviewDirty.dedupe"
+            :ai-available="aiAvailable"
             @start="startDedupe"
             @update:selections="updateDedupeSelections"
             @update:quarantine-root="updateQuarantineRoot"
@@ -85,6 +95,9 @@
             @save-review="saveDedupeReview"
             @execute="prepareExecution('dedupe')"
           />
+        </el-tab-pane>
+        <el-tab-pane v-if="aiAvailable" :label="$t('ai.task_series')" name="ai-series" lazy>
+          <ai-analysis-panel task="series" :busy="busy" />
         </el-tab-pane>
       </el-tabs>
 
@@ -98,6 +111,8 @@
 
       <audit-log-panel
         :logs="logs"
+        :ai-logs="aiLogs"
+        :ai-state="aiState"
         :active-task="activeTask"
         :active-state="activeState"
         :timing="activeTiming"
@@ -117,11 +132,13 @@ import zhTwElement from 'element-plus/dist/locale/zh-tw.mjs'
 import enElement from 'element-plus/dist/locale/en.mjs'
 import AnomalyPanel from './audit/AnomalyPanel.vue'
 import DedupePanel from './audit/DedupePanel.vue'
+import AiAnalysisPanel from './audit/AiAnalysisPanel.vue'
 import AuditExecutionConfirmDialog from './audit/AuditExecutionConfirmDialog.vue'
 import AuditLogPanel from './audit/AuditLogPanel.vue'
 import AuditTaskStages from './audit/AuditTaskStages.vue'
 import { calculateTaskTiming, formatTaskDuration } from './audit/taskTiming.mjs'
 import { calculateTaskStages } from './audit/taskStages.mjs'
+import { compareLogTimes, formatBeijingLogTime } from './audit/logTime.mjs'
 
 const props = defineProps({ initialSetting: { type: Object, required: true } })
 const { t, te, locale } = useI18n()
@@ -160,6 +177,7 @@ const dedupeReport = ref(null)
 const anomalyReview = ref({ reportId: null, actionIds: [] })
 const dedupeReview = ref({ reportId: null, selections: {}, decisions: {} })
 const logs = ref([])
+const aiLogs = ref([])
 const activeTab = ref('anomaly')
 const actionPending = ref(false)
 const dataLoadCount = ref(0)
@@ -176,6 +194,16 @@ const reviewSaveQueues = { anomaly: Promise.resolve(), dedupe: Promise.resolve()
 const reviewSaveTimers = { anomaly: null, dedupe: null }
 let removeStateListener
 let removeLogListener
+let removeAiStateListener
+const aiAvailable = Boolean(window.auditApi?.ai)
+const aiState = ref({ status: 'idle' })
+const aiRunning = computed(() => ['running', 'cancelling'].includes(aiState.value.status))
+const aiIncomplete = computed(() => aiState.value.task === 'discovery' && !aiRunning.value &&
+  (aiState.value.partial || ['failed', 'cancelled', 'interrupted'].includes(aiState.value.status)))
+const aiTaskLabel = computed(() => aiState.value.task === 'discovery'
+  ? t('audit.aiFullLibrary')
+  : te(`ai.task_${aiState.value.task}`) ? t(`ai.task_${aiState.value.task}`) : t('audit.aiFullLibrary'))
+const cancelAi = async () => { try { aiState.value = await window.auditApi.ai.cancel() } catch (error) { showError(error) } }
 let clockTimer
 const now = ref(Date.now())
 
@@ -221,7 +249,7 @@ const activeTiming = computed(() => {
   return {
     elapsedText: formatTaskDuration(timing.elapsedSeconds),
     remainingText: timing.remainingSeconds === null ? t('audit.estimatingTime') : formatTaskDuration(timing.remainingSeconds),
-    finishText: timing.finishAt === null ? t('audit.estimatingTime') : new Date(timing.finishAt).toLocaleString()
+    finishText: timing.finishAt === null ? t('audit.estimatingTime') : formatBeijingLogTime(timing.finishAt)
   }
 })
 
@@ -277,11 +305,12 @@ const showError = error => {
   console.error(error)
   const message = String(error?.message || error || '')
     .replace(/^Error invoking remote method '[^']+': Error:\s*/, '')
-  ElMessage.error(message || t('m.error'))
+  const code = error?.code || message.match(/AI_[A-Z_]+/)?.[0]
+  ElMessage.error(code && te(`ai.error_${code}`) ? t(`ai.error_${code}`) : message || t('m.error'))
 }
 
 const appendLog = entry => {
-  logs.value = [...logs.value, entry].sort((left, right) => String(left.at).localeCompare(String(right.at))).slice(-400)
+  logs.value = [...logs.value, entry].sort(compareLogTimes).slice(-400)
 }
 
 const runAction = async action => {
@@ -323,6 +352,21 @@ const verifyConflicts = bookIds => runAction(() => window.auditApi.startAnomaly(
 }))
 const startDedupe = async options => {
   if (reviewDirty.dedupe) { try { await persistReview('dedupe') } catch (error) { showError(error); return } }
+  if (options?.scanMode === 'ai') {
+    return runAction(async () => {
+      if (!aiAvailable) throw new Error(t('ai.unavailable'))
+      const settings = await window.auditApi.ai.getConfig()
+      const config = settings?.config || {}
+      const ready = typeof settings?.ready === 'boolean' ? settings.ready : Boolean(config.baseUrl && config.model)
+      if (!config.enabled || !ready || !config.dedupeEnabled) {
+        throw new Error(t('ai.configurationNeeded'))
+      }
+      const result = await window.auditApi.ai.discoverAndQueue({ force: options.forceRecompute === true })
+      if (result?.dedupeState?.channels) await applyWorkspaceState(result.dedupeState)
+      else await reloadAllData()
+      return result
+    })
+  }
   return runAction(() => window.auditApi.startDedupe(options))
 }
 const cancelActive = () => runAction(() => window.auditApi.cancelActive())
@@ -355,6 +399,7 @@ const confirmClearInspectionRecords = async () => {
     anomalyReview.value = defaultReview('anomaly', null)
     dedupeReview.value = defaultReview('dedupe', null)
     logs.value = []
+    aiLogs.value = []
     reviewDirty.anomaly = false
     reviewDirty.dedupe = false
     executionDialogVisible.value = false
@@ -438,6 +483,7 @@ const saveAnomalyReview = () => persistReview('anomaly', { notify: true }).catch
 const saveDedupeReview = () => persistReview('dedupe', { notify: true }).catch(showError)
 
 const prepareExecution = async taskType => {
+  if (aiRunning.value) return
   if (busy.value) return
   try {
     await persistReview(taskType)
@@ -450,6 +496,7 @@ const prepareExecution = async taskType => {
 }
 
 const confirmExecution = async () => {
+  if (aiRunning.value) return
   const preview = executionPreview.value
   if (!preview || executionSubmitting.value) return
   executionSubmitting.value = true
@@ -505,6 +552,10 @@ onMounted(async () => {
   clockTimer = window.setInterval(() => { now.value = Date.now() }, 1000)
   removeStateListener = window.auditApi.onState(applyWorkspaceState)
   removeLogListener = window.auditApi.onLog(appendLog)
+  if (aiAvailable) {
+    removeAiStateListener = window.auditApi.ai.onState(value => { aiState.value = value })
+    try { aiState.value = await window.auditApi.ai.getState() } catch (error) { showError(error) }
+  }
   try {
     await reloadAllData()
   } catch (error) {
@@ -517,6 +568,7 @@ onBeforeUnmount(() => {
   window.clearInterval(clockTimer)
   removeStateListener?.()
   removeLogListener?.()
+  removeAiStateListener?.()
 })
 </script>
 
@@ -554,6 +606,7 @@ onBeforeUnmount(() => {
 .task-estimate-line strong { color: var(--el-text-color-regular); font-variant-numeric: tabular-nums; }
 .task-band :deep(.el-alert) { margin-top: 8px; }
 .audit-tabs { flex: 1 1 auto; min-height: 0; padding: 0 18px; }
+.ai-task-band { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 18px; background: var(--el-fill-color-light); font-size: 13px; }
 .audit-tabs :deep(.el-tabs__content) { height: calc(100% - 56px); min-height: 0; overflow: hidden; }
 .audit-tabs :deep(.el-tab-pane) { height: 100%; min-height: 0; }
 @media (max-width: 900px) {

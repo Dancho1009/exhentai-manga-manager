@@ -1,7 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 const { atomicWriteJson, readJson } = require('./utils.js')
-const { DEDUPE_RULES_VERSION } = require('./dedupe_title.js')
+const { DEDUPE_REPORT_RULES_VERSION } = require('./dedupe_title.js')
 
 const REPORT_SCHEMA_VERSION = 4
 const WORKSPACE_SCHEMA_VERSION = 5
@@ -225,7 +225,7 @@ class AuditReportRepository {
     if (value !== cached?.value) this.reportCache.set(taskType, { path: reportPath, mtimeMs: stat.mtimeMs, size: stat.size, value })
     const visibleReport = applyResolvedAnomalies(value, state)
     if (visibleReport?.reportType === 'dedupe' && visibleReport.schemaVersion < 4) return { ...visibleReport, legacy: true, executable: false }
-    if (visibleReport?.reportType === 'dedupe' && visibleReport.dedupeVersion >= 2 && visibleReport.dedupeRulesVersion !== DEDUPE_RULES_VERSION) {
+    if (visibleReport?.reportType === 'dedupe' && visibleReport.dedupeVersion >= 2 && visibleReport.dedupeRulesVersion !== DEDUPE_REPORT_RULES_VERSION) {
       return { ...visibleReport, outdatedRules: true, executable: false }
     }
     return state?.staleAt

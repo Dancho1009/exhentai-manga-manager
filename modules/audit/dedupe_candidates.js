@@ -2,7 +2,26 @@ const { stableId, normalizePath, extractFilenameIdentity } = require('./utils.js
 const { summarizeBook, groupBy, scoreKeeper } = require('./dedupe_analyzer.js')
 const { resolveBookIdentity } = require('./dedupe_identity.js')
 
-const { DEDUPE_RULES_VERSION, normalizeTitle, parseBookSemantics } = require('./dedupe_title.js')
+const { DEDUPE_REPORT_RULES_VERSION, normalizeTitle, parseBookSemantics } = require('./dedupe_title.js')
+const { bookCoverageRelation } = require('./part_coverage.js')
+const { compareBookEvidence, contentProof } = require('./dedupe_comparison.js')
+
+const contentRelationOf = comparison => !comparison?.verified ? 'unknown' : !comparison.matchedCount ? 'no-exact-pages'
+  : comparison.multisetEqual ? 'equal-pages'
+    : comparison.onlyLeft.length === 0 ? 'right_contains_left'
+      : comparison.onlyRight.length === 0 ? 'left_contains_right' : 'overlap'
+
+const hasInteriorPageRun = (left, right) => {
+  const comparison = compareBookEvidence(left.inspection, right.inspection)
+  let first = null, previous = null, length = 0
+  for (const match of comparison.matched) {
+    if (previous && match.leftIndex === previous.leftIndex + 1 && match.rightIndex === previous.rightIndex + 1) length++
+    else { first = match; length = 1 }
+    if (length >= 5 && (first.leftIndex < comparison.leftPageCount - 8 || first.rightIndex < comparison.rightPageCount - 8)) return true
+    previous = match
+  }
+  return false
+}
 
 const collectDuplicateCandidates = wrappedBooks => {
   const buckets = new Map()
@@ -34,28 +53,40 @@ const collectDuplicateCandidates = wrappedBooks => {
       add(`${publication.nameKey}:${publication.issue || publication.date}`, 'publication-issue', wrapped)
     }
   }
-  // An inverted page index discovers a contained edition without an all-library
-  // pairwise comparison. Counts retain repeated pages on both sides.
+  // An inverted page index discovers contained editions without an all-library
+  // pairwise comparison. Pages shared by three or more distinct contents cannot
+  // establish partial overlap on their own (e.g. a translation group's credits).
+  // A consecutive interior run still identifies a story reprinted in several books.
   const byPage = new Map()
   const overlaps = new Map()
   for (const book of wrappedBooks) {
     const counts = new Map()
     for (const page of book.inspection?.images || []) counts.set(page.sha256, (counts.get(page.sha256) || 0) + 1)
     for (const [digest, count] of counts) {
-      for (const peer of byPage.get(digest) || []) {
-        const ids = [String(book.raw.id), String(peer.book.raw.id)].sort()
-        const key = JSON.stringify(ids)
-        const pair = overlaps.get(key) || { items: [peer.book, book], count: 0 }
-        pair.count += Math.min(count, peer.count)
-        overlaps.set(key, pair)
-      }
       if (!byPage.has(digest)) byPage.set(digest, [])
       byPage.get(digest).push({ book, count })
     }
   }
+  for (const peers of byPage.values()) {
+    if (peers.length < 2) continue
+    const distinctContents = new Set(peers.map(({ book }) => book.inspection.imageMultisetSignature ||
+      book.inspection.imageSignature || String(book.raw.id))).size
+    for (let a = 0; a < peers.length; a++) for (let b = a + 1; b < peers.length; b++) {
+      const left = peers[a], right = peers[b]
+      const key = JSON.stringify([String(left.book.raw.id), String(right.book.raw.id)].sort())
+      const pair = overlaps.get(key) || { items: [left.book, right.book], count: 0, specificPages: 0 }
+      pair.count += Math.min(left.count, right.count)
+      if (distinctContents === 2) pair.specificPages++
+      overlaps.set(key, pair)
+    }
+  }
   for (const pair of overlaps.values()) {
     const [a, b] = pair.items.map(item => item.inspection.pageCount)
-    if (a !== b && pair.count >= 2 && pair.count === Math.min(a, b)) buckets.set('coverage:' + pair.items.map(item => item.raw.id).sort().join(':'), { kind: 'page-coverage', items: pair.items })
+    if (pair.count < 2 || pair.count === a && pair.count === b) continue
+    const contained = a !== b && pair.count === Math.min(a, b)
+    if (!contained && pair.specificPages < 2 && (pair.count < 5 || !hasInteriorPageRun(...pair.items))) continue
+    buckets.set('page-overlap:' + pair.items.map(item => item.raw.id).sort().join(':'),
+      { kind: contained ? 'page-coverage' : 'page-overlap', items: pair.items })
   }
   return [...buckets.values()].map(bucket => ({ ...bucket, items: [...new Map(bucket.items.map(item => [String(item.raw.id), item])).values()] })).filter(bucket => bucket.items.length > 1)
 }
@@ -71,22 +102,142 @@ const keeper = members => {
     ...(selected.effective.status === 'tagged' ? ['metadata-complete'] : []), 'stable-path'] }
 }
 
-const buildDuplicateGroups = wrappedBooks => {
+const buildDuplicateClassification = (wrappedBooks, { semanticPairs = [], coveragePairs = [] } = {}) => {
   const candidates = collectDuplicateCandidates(wrappedBooks)
+  const byId = new Map(wrappedBooks.map(item => [String(item.raw.id), item]))
+  for (const { leftId, rightId } of semanticPairs) {
+    const left = byId.get(String(leftId)), right = byId.get(String(rightId))
+    if (left && right && left !== right) candidates.push({ kind: 'ai-semantic', items: [left, right] })
+  }
   const parent = new Map(wrappedBooks.map(item => [String(item.raw.id), String(item.raw.id)]))
   const find = id => { const p = parent.get(id); if (p !== id) parent.set(id, find(p)); return parent.get(id) }
-  for (const bucket of candidates) {
-    const anchor = find(String(bucket.items[0].raw.id))
-    for (const member of bucket.items.slice(1)) parent.set(find(String(member.raw.id)), anchor)
+  const candidateEdges = [], accepted = [], coverage = new Map(), metadataConflicts = new Set()
+  const pairKey = (left, right) => JSON.stringify([String(left.raw.id), String(right.raw.id)].sort())
+  const exactProof = (left, right) => Boolean(
+    left.archiveSha256 && left.archiveSha256 === right.archiveSha256 ||
+    left.inspection?.pageCount > 0 && left.inspection.pageCount === right.inspection?.pageCount &&
+      left.inspection.imageSignature && left.inspection.imageSignature === right.inspection.imageSignature &&
+      left.inspection.ancillarySignature === right.inspection.ancillarySignature &&
+      (!contentProof(left.inspection) || contentProof(left.inspection) === contentProof(right.inspection)))
+  const addCoverage = (left, right, scope, source) => {
+    const [a, b] = String(left.raw.id) < String(right.raw.id) ? [left, right] : [right, left]
+    const key = pairKey(left, right)
+    const normalized = a === left ? scope : scope === 'left_contains_right' ? 'right_contains_left'
+      : scope === 'right_contains_left' ? 'left_contains_right' : scope
+    const comparison = a.inspection && b.inspection ? compareBookEvidence(a.inspection, b.inspection) : null
+    const localScope = bookCoverageRelation(a.semantic || {}, b.semantic || {})
+    const pageScope = comparison?.verified && comparison.leftPageCount !== comparison.rightPageCount &&
+      comparison.matchedCount === Math.min(comparison.leftPageCount, comparison.rightPageCount)
+      ? comparison.coverage.left === 1 ? 'right_contains_left' : 'left_contains_right' : null
+    const declaredRelation = ['left_contains_right', 'right_contains_left', 'overlap'].includes(localScope) ? localScope : normalized
+    const contentRelation = contentRelationOf(comparison)
+    const previous = coverage.get(key)
+    coverage.set(key, { leftId: String(a.raw.id), rightId: String(b.raw.id),
+      leftTitle: a.effective.title || a.raw.title || String(a.raw.id), rightTitle: b.effective.title || b.raw.title || String(b.raw.id),
+      relation: declaredRelation, declaredRelation, contentRelation, category: 'coverage',
+      sources: [...new Set([...(previous?.sources || []), source])],
+      metadataConflict: Boolean(previous?.metadataConflict || pageScope && ['left_contains_right', 'right_contains_left'].includes(localScope) && pageScope !== localScope),
+      verified: comparison?.verified || false, matchedPages: comparison?.matchedCount || 0,
+      leftPages: comparison?.leftPageCount || 0, rightPages: comparison?.rightPageCount || 0,
+      leftUniquePages: comparison?.onlyLeft.length ?? null, rightUniquePages: comparison?.onlyRight.length ?? null,
+      ancillaryDifferences: comparison?.ancillary.filter(entry => entry.status !== 'same').length ?? null })
   }
-  const relatedIds = new Set(candidates.flatMap(bucket => bucket.items.map(item => String(item.raw.id))))
-  const components = groupBy(wrappedBooks.filter(item => relatedIds.has(String(item.raw.id))), item => find(String(item.raw.id)))
+  for (const bucket of candidates) {
+    for (let a = 0; a < bucket.items.length; a++) for (let b = a + 1; b < bucket.items.length; b++) {
+      const left = bucket.items[a], right = bucket.items[b]
+      const scope = bookCoverageRelation(left.semantic || {}, right.semantic || {})
+      const exact = exactProof(left, right)
+      const comparison = left.inspection && right.inspection ? compareBookEvidence(left.inspection, right.inspection) : null
+      const containedPages = comparison?.verified && comparison.leftPageCount !== comparison.rightPageCount &&
+        comparison.matchedCount >= 2 && comparison.matchedCount === Math.min(comparison.leftPageCount, comparison.rightPageCount)
+      if (!exact && containedPages) {
+        addCoverage(left, right, ['left_contains_right', 'right_contains_left', 'overlap'].includes(scope) ? scope :
+          comparison.coverage.left === 1 ? 'right_contains_left' : 'left_contains_right', bucket.kind)
+        continue
+      }
+      if (!exact && ['page-coverage', 'page-overlap'].includes(bucket.kind)) {
+        const relation = scope === 'left_contains_right' || scope === 'right_contains_left' || scope === 'overlap'
+          ? scope : comparison.coverage.left === 1 ? 'right_contains_left' : comparison.coverage.right === 1 ? 'left_contains_right' : 'overlap'
+        addCoverage(left, right, relation, bucket.kind)
+        continue
+      }
+      if (!exact && ['left_contains_right', 'right_contains_left', 'overlap'].includes(scope)) {
+        addCoverage(left, right, scope, bucket.kind)
+        continue
+      }
+      if (!exact && scope === 'disjoint' && bucket.kind !== 'database-path') continue
+      if (exact && !['equal', 'unknown'].includes(scope)) metadataConflicts.add(pairKey(left, right))
+      candidateEdges.push({ kind: bucket.kind, items: [left, right] })
+    }
+  }
+  // A weak A–B and B–C path must not merge A and C when their explicit
+  // work-part scopes are different. Process direct content proof first.
+  const members = new Map(wrappedBooks.map(item => [String(item.raw.id), [item]]))
+  candidateEdges.sort((a, b) => Number(exactProof(...b.items)) - Number(exactProof(...a.items)) ||
+    Number(bookCoverageRelation(...b.items.map(item => item.semantic || {})) === 'equal') -
+      Number(bookCoverageRelation(...a.items.map(item => item.semantic || {})) === 'equal'))
+  for (const edge of candidateEdges) {
+    const [left, right] = edge.items, leftRoot = find(String(left.raw.id)), rightRoot = find(String(right.raw.id))
+    if (leftRoot !== rightRoot) {
+      const conflicts = members.get(leftRoot).flatMap(a => members.get(rightRoot).flatMap(b => {
+        const scope = bookCoverageRelation(a.semantic || {}, b.semantic || {})
+        return !exactProof(a, b) && ['left_contains_right', 'right_contains_left', 'overlap', 'disjoint'].includes(scope)
+          ? [{ a, b, scope }] : []
+      }))
+      for (const { a, b, scope } of conflicts) if (scope !== 'disjoint') addCoverage(a, b, scope, 'scope-boundary')
+      if (conflicts.length) continue
+      parent.set(rightRoot, leftRoot)
+      members.set(leftRoot, [...members.get(leftRoot), ...members.get(rightRoot)])
+      members.delete(rightRoot)
+    }
+    accepted.push(edge)
+  }
+  for (const pair of coveragePairs) {
+    const left = byId.get(String(pair.leftId)), right = byId.get(String(pair.rightId))
+    if (!left || !right || left === right) continue
+    const scope = { same_work_left_contains_right: 'left_contains_right', same_work_right_contains_left: 'right_contains_left',
+      same_work_partial_overlap: 'overlap' }[pair.relation]
+    if (scope && !exactProof(left, right)) addCoverage(left, right, scope, 'ai-semantic')
+  }
+  // Review components include containment and overlap edges. This connects the
+  // display and selection scope only; it never makes indirect pairs equivalent.
+  const reviewParent = new Map(wrappedBooks.map(item => [String(item.raw.id), String(item.raw.id)]))
+  const reviewFind = id => { const p = reviewParent.get(id); if (p !== id) reviewParent.set(id, reviewFind(p)); return reviewParent.get(id) }
+  const reviewJoin = (leftId, rightId) => { reviewParent.set(reviewFind(String(rightId)), reviewFind(String(leftId))) }
+  for (const edge of accepted) reviewJoin(edge.items[0].raw.id, edge.items[1].raw.id)
+  for (const relation of coverage.values()) reviewJoin(relation.leftId, relation.rightId)
+  const relatedIds = new Set([...accepted.flatMap(edge => edge.items.map(item => String(item.raw.id))),
+    ...[...coverage.values()].flatMap(relation => [relation.leftId, relation.rightId])])
+  const components = groupBy(wrappedBooks.filter(item => relatedIds.has(String(item.raw.id))), item => reviewFind(String(item.raw.id)))
   const groups = []
   for (const component of components.values()) {
     const members = [...component].sort((a, b) => String(a.raw.id).localeCompare(String(b.raw.id)))
     const memberIds = new Set(members.map(item => String(item.raw.id)))
-    const reasons = candidates.filter(bucket => bucket.items.some(item => memberIds.has(String(item.raw.id))))
+    const reasons = accepted.filter(bucket => bucket.items.every(item => memberIds.has(String(item.raw.id))))
       .map(bucket => ({ code: bucket.kind, memberIds: bucket.items.map(item => String(item.raw.id)) }))
+    const coverageRelations = [...coverage.values()].filter(relation => memberIds.has(relation.leftId) && memberIds.has(relation.rightId))
+    reasons.push(...coverageRelations.map(relation => ({ code: relation.sources[0] || 'coverage', memberIds: [relation.leftId, relation.rightId] })))
+    const direct = new Map(coverageRelations.map(relation => [JSON.stringify([relation.leftId, relation.rightId]), relation]))
+    for (const edge of accepted.filter(edge => edge.items.every(item => memberIds.has(String(item.raw.id))))) {
+      const [a, b] = [...edge.items].sort((left, right) => String(left.raw.id).localeCompare(String(right.raw.id)))
+      const leftId = String(a.raw.id), rightId = String(b.raw.id), key = JSON.stringify([leftId, rightId])
+      const previous = direct.get(key)
+      if (previous) {
+        previous.sources = [...new Set([...previous.sources, edge.kind])]
+        continue
+      }
+      const comparison = a.inspection && b.inspection ? compareBookEvidence(a.inspection, b.inspection) : null
+      const declaredRelation = bookCoverageRelation(a.semantic || {}, b.semantic || {})
+      direct.set(key, { leftId, rightId,
+        leftTitle: a.effective.title || a.raw.title || leftId, rightTitle: b.effective.title || b.raw.title || rightId,
+        relation: declaredRelation, declaredRelation, contentRelation: contentRelationOf(comparison), category: 'duplicate',
+        sources: [edge.kind], metadataConflict: metadataConflicts.has(key), verified: comparison?.verified || false,
+        matchedPages: comparison?.matchedCount || 0, leftPages: comparison?.leftPageCount || 0, rightPages: comparison?.rightPageCount || 0,
+        leftUniquePages: comparison?.onlyLeft.length ?? null, rightUniquePages: comparison?.onlyRight.length ?? null,
+        ancillaryDifferences: comparison?.ancillary.filter(entry => entry.status !== 'same').length ?? null })
+    }
+    const relations = [...direct.values()].sort((a, b) => a.leftId.localeCompare(b.leftId) || a.rightId.localeCompare(b.rightId))
+    const scopeConflicts = [...metadataConflicts].filter(key => JSON.parse(key).every(id => memberIds.has(id)))
     const pathConflict = [...groupBy(members, item => normalizePath(item.raw.filepath)).values()].some(items => items.length > 1)
     const items = members.map(summarizeBook)
     const classes = []
@@ -101,7 +252,9 @@ const buildDuplicateGroups = wrappedBooks => {
       const exact = peers.every(item => item.archiveSha256 && item.archiveSha256 === peers[0].archiveSha256)
       const identityConsistent = summaries.every(item => item.sourceEvidence.status === 'known') && new Set(summaries.map(item => item.sourceEvidence.key)).size === 1
       const conflict = summaries.some(item => ['conflict', 'invalid', 'ambiguous'].includes(item.sourceEvidence.status))
-      const eligible = !pathConflict && peers.every(item => item.inspection?.pageCount > 0) && !summaries.some(item => item.uncoveredEntries.length || item.nestedBookIds.length) && (exact ? !conflict : identityConsistent)
+      const peerIds = new Set(summaries.map(item => item.id))
+      const scopeConflict = scopeConflicts.some(key => JSON.parse(key).every(id => peerIds.has(id)))
+      const eligible = !pathConflict && !scopeConflict && peers.every(item => item.inspection?.pageCount > 0) && !summaries.some(item => item.uncoveredEntries.length || item.nestedBookIds.length) && (exact ? !conflict : identityConsistent)
       const suggestion = keeper(peers)
       classes.push({ id: stableId('equivalence', summaries.map(item => item.id).sort()), memberIds: summaries.map(item => item.id),
         kind: exact ? 'exact-archive' : identityConsistent ? 'strict-content' : 'content-review', eligible,
@@ -114,22 +267,27 @@ const buildDuplicateGroups = wrappedBooks => {
     const allExact = members.every(item => item.archiveSha256 && item.archiveSha256 === members[0].archiveSha256)
     const allEquivalent = classes.length === 1 && classes[0].memberIds.length === members.length
     const kinds = new Set(reasons.map(reason => reason.code))
-    let kind = pathConflict ? 'duplicate-database-path' : allExact ? 'exact-archive' : allEquivalent ? classes[0].kind : orderedEqual ? 'content-review' : setEqual ? 'page-order-review' : kinds.has('source') || kinds.has('title-author') || kinds.has('publication-issue') || kinds.has('filename-id') ? 'version-review' : 'candidate-review'
-    if (kinds.has('page-coverage') && !orderedEqual && !setEqual && !allEquivalent) kind = 'coverage-review'
+    let kind = pathConflict ? 'duplicate-database-path' : allExact ? 'exact-archive' : allEquivalent ? classes[0].kind : coverageRelations.length ? 'coverage-review' : orderedEqual ? 'content-review' : setEqual ? 'page-order-review' : kinds.has('source') || kinds.has('title-author') || kinds.has('publication-issue') || kinds.has('filename-id') ? 'version-review' : 'candidate-review'
     if (kinds.size === 1 && kinds.has('sample-hash')) kind = 'shared-hash-review'
     const eligible = classes.some(item => item.eligible)
     const potentialBytes = classes.filter(item => item.eligible).reduce((sum, group) => sum + items.filter(item => group.memberIds.includes(item.id) && item.id !== group.suggestedKeepId).reduce((bytes, item) => bytes + Number(item.transferBytes || 0), 0), 0)
-    const evidenceRevision = stableId(DEDUPE_RULES_VERSION, items.map(item => [item.id, item.filepath, item.archiveSha256, item.contentProof, item.folderFingerprint, item.size, item.mtimeMs, item.sourceEvidence.fingerprint, item.metadataFingerprint, item.nestedBookIds.slice().sort()]))
-    groups.push({ id: stableId('dedupe-group', items.map(item => item.id).sort()), kind, eligible, actionable: !pathConflict && kind !== 'shared-hash-review',
-      severity: eligible ? 'medium' : 'high', items, equivalenceClasses: classes, reasons, evidenceRevision,
+    const evidenceRevision = stableId(DEDUPE_REPORT_RULES_VERSION, items.map(item => [item.id, item.filepath, item.archiveSha256, item.contentProof, item.folderFingerprint, item.size, item.mtimeMs, item.sourceEvidence.fingerprint, item.metadataFingerprint, item.nestedBookIds.slice().sort()]),
+      relations.map(({ leftId, rightId, declaredRelation, contentRelation, matchedPages, leftPages, rightPages, sources }) =>
+        [leftId, rightId, declaredRelation, contentRelation, matchedPages, leftPages, rightPages, sources]))
+    groups.push({ id: stableId('dedupe-group', items.map(item => item.id).sort()), kind, eligible, actionable: true,
+      severity: eligible ? 'medium' : 'high', items, equivalenceClasses: classes, reasons, relations, evidenceRevision,
       suggestedKeepId: classes.find(item => item.eligible)?.suggestedKeepId || keeper(members).id, potentialBytes,
       verification: { status: members.every(item => item.inspection) ? 'verified' : members.some(item => item.inspection || item.archiveSha256) ? 'partial' : 'unverified', checkedAt: new Date().toISOString(),
         missingEvidence: items.filter(item => !item.contentProof).map(item => item.id), fromCache: members.every(item => item.inspection?.fromCache) },
-      conflicts: items.filter(item => item.sourceEvidence.status !== 'known').map(item => ({ field: 'source', bookId: item.id, status: item.sourceEvidence.status })),
+      conflicts: [...items.filter(item => item.sourceEvidence.status !== 'known').map(item => ({ field: 'source', bookId: item.id, status: item.sourceEvidence.status })),
+        ...scopeConflicts.map(key => ({ field: 'chapter-coverage', memberIds: JSON.parse(key), status: 'metadata-conflict' }))],
       evidence: { sha256: allExact ? members[0].archiveSha256 : null, imageCount: orderedEqual ? members[0].inspection.pageCount : null, identities: items.map(item => item.sourceEvidence), reasons },
       reviewReason: eligible ? null : kind })
   }
-  return groups.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.potentialBytes - a.potentialBytes || a.id.localeCompare(b.id))
+  return { groups: groups.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.potentialBytes - a.potentialBytes || a.id.localeCompare(b.id)),
+    coverageRelations: [...coverage.values()].sort((a, b) => a.leftId.localeCompare(b.leftId) || a.rightId.localeCompare(b.rightId)) }
 }
 
-module.exports = { normalizeTitle, parseBookSemantics, collectDuplicateCandidates, buildDuplicateGroups }
+const buildDuplicateGroups = (wrappedBooks, options) => buildDuplicateClassification(wrappedBooks, options).groups
+
+module.exports = { normalizeTitle, parseBookSemantics, collectDuplicateCandidates, buildDuplicateGroups, buildDuplicateClassification }

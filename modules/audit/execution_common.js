@@ -121,11 +121,12 @@ const uniqueTargetPath = async (target, bookId) => {
   }
 }
 
-const mergeRendererState = (rendererState, idMap) => {
+const mergeRendererState = (rendererState, idMap, dropIds = new Set()) => {
   const next = JSON.parse(JSON.stringify(rendererState || {}))
   if (Array.isArray(next.recentRead)) {
     const recordMap = new Map()
     for (const record of next.recentRead) {
+      if (dropIds.has(String(record.id))) continue
       const id = idMap[record.id] || record.id
       const previous = recordMap.get(id)
       if (!previous || Number(record.read_time || 0) > Number(previous.read_time || 0)) recordMap.set(id, { ...record, id })
@@ -135,6 +136,7 @@ const mergeRendererState = (rendererState, idMap) => {
   if (Array.isArray(next.viewerReadingProgress)) {
     const progressMap = new Map()
     for (const progress of next.viewerReadingProgress) {
+      if (dropIds.has(String(progress.bookId))) continue
       const bookId = idMap[progress.bookId] || progress.bookId
       if (!progressMap.has(bookId)) progressMap.set(bookId, { ...progress, bookId })
     }

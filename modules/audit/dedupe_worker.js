@@ -6,10 +6,10 @@ const { buildSnapshot } = require('./library_snapshot.js')
 const { AuditCache } = require('./cache.js')
 const { inspectBookContent } = require('./archive_inspector.js')
 const { enumerateBookEntries } = require('./dedupe_manifest.js')
-const { collectDuplicateCandidates, buildDuplicateGroups } = require('./dedupe_candidates.js')
-const { DEDUPE_RULES_VERSION } = require('./dedupe_title.js')
+const { collectDuplicateCandidates, buildDuplicateClassification } = require('./dedupe_candidates.js')
+const { DEDUPE_REPORT_RULES_VERSION } = require('./dedupe_title.js')
 const { groupBy } = require('./dedupe_analyzer.js')
-const { atomicWriteJson, normalizePath, hashFile, stableId } = require('./utils.js')
+const { atomicWriteJson, normalizePath, hashFile, stableId, metadataFingerprint } = require('./utils.js')
 const { REPORT_SCHEMA_VERSION, getReportId } = require('./report_repository.js')
 const { createWorkerRuntime, mapWithConcurrency } = require('./worker_runtime.js')
 
@@ -26,7 +26,7 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
     const snapshot = await buildSnapshot({ ...options, onProgress: progress, isCancelled })
     const actualByPath = new Map(snapshot.actualItems.map(item => [normalizePath(item.filepath), item]))
     const allBooks = snapshot.books.map(wrapped => ({ ...wrapped, actual: actualByPath.get(normalizePath(wrapped.raw.filepath)) }))
-    const selectedIds = options.baseReport ? new Set(options.baseReport.groups.filter(group => options.groupIds.includes(group.id)).flatMap(group => group.items.map(item => String(item.id)))) : null
+    const selectedIds = options.bookIds?.length ? new Set(options.bookIds.map(String)) : options.baseReport ? new Set(options.baseReport.groups.filter(group => options.groupIds.includes(group.id)).flatMap(group => group.items.map(item => String(item.id)))) : null
     const books = selectedIds ? allBooks.filter(item => selectedIds.has(String(item.raw.id))) : allBooks
     const physicalBooks = [...groupBy(books.filter(item => item.actual), item => normalizePath(item.raw.filepath)).values()].map(items => items[0])
     for (const wrapped of physicalBooks) {
@@ -86,11 +86,24 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       await verifyStat(wrapped)
       await cache.update(wrapped.raw, wrapped.actual, { archiveSha256: wrapped.archiveSha256 })
     })
+    const allById = new Map(allBooks.map(book => [String(book.raw.id), book]))
+    const currentFingerprint = id => {
+      const book = allById.get(String(id))
+      return book ? metadataFingerprint(book.effective) : null
+    }
+    const previousPairs = options.baseReport?.aiCandidatePairs || options.aiCandidatePairs || {}
+    const retained = pairs => (pairs || []).filter(pair =>
+      pair.inputFingerprints?.[0] === currentFingerprint(pair.leftId) &&
+      pair.inputFingerprints?.[1] === currentFingerprint(pair.rightId))
+    const retainedPairs = [...retained(previousPairs.semantic), ...retained(previousPairs.coverage)]
     const candidates = collectDuplicateCandidates(physicalBooks)
     const strongKinds = new Set(['archive-sha256', 'manifest-order', 'manifest-set', 'page-sizes', 'cover-pages'])
     const candidateIds = new Set(candidates.filter(bucket => strongKinds.has(bucket.kind) ||
       (['source', 'title-author', 'publication-issue'].includes(bucket.kind) && bucket.items.every(item => item.manifest?.pageCount > 0)))
       .flatMap(bucket => bucket.items.map(item => String(item.raw.id))))
+    for (const pair of [...retainedPairs, ...(options.semanticPairs || []), ...(options.coveragePairs || [])]) {
+      candidateIds.add(String(pair.leftId)); candidateIds.add(String(pair.rightId))
+    }
     const inspectTargets = physicalBooks.filter(item => scanMode === 'full' || selectedIds || candidateIds.has(String(item.raw.id)))
     const representatives = new Map()
     await perform('inspecting-content', inspectTargets, async wrapped => {
@@ -123,7 +136,14 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
       if (physical) Object.assign(wrapped, { manifest: physical.manifest, inspection: physical.inspection, archiveSha256: physical.archiveSha256, evidenceRef: physical.evidenceRef, nestedBookIds: physical.nestedBookIds })
     }
     progress('classifying-relations', 0, 1)
-    let groups = buildDuplicateGroups(books)
+    const attachFingerprints = pair => ({ ...pair, leftId: String(pair.leftId), rightId: String(pair.rightId),
+      inputFingerprints: [currentFingerprint(pair.leftId), currentFingerprint(pair.rightId)] })
+    const mergePairs = (previous, incoming) => [...new Map([...retained(previous), ...(incoming || []).map(attachFingerprints)]
+      .map(pair => [JSON.stringify([pair.leftId, pair.rightId].sort()) + ':' + (pair.relation || ''), pair])).values()]
+    const semanticPairs = mergePairs(previousPairs.semantic, options.candidatePairs || options.semanticPairs)
+    const coveragePairs = mergePairs(previousPairs.coverage, options.coveragePairs)
+    const classification = buildDuplicateClassification(books, { semanticPairs, coveragePairs })
+    let groups = classification.groups, coverageRelations = classification.coverageRelations
     const booksById = new Map(books.map(book => [String(book.raw.id), book]))
     for (const group of groups) for (const item of group.items) item.evidenceRef = booksById.get(item.id)?.evidenceRef || null
     if (options.baseReport) {
@@ -135,21 +155,27 @@ runtime.run(async ({ isCancelled, assertNotCancelled, progress, log }) => {
         replacements.forEach(candidate => remaining.delete(candidate))
         return replacements
       })
+      groups.push(...remaining)
+      coverageRelations = [...(options.baseReport.coverageRelations || []).filter(pair => !selectedIds.has(String(pair.leftId)) && !selectedIds.has(String(pair.rightId))), ...coverageRelations]
     }
     progress('classifying-relations', 1, 1)
     const excludedItems = options.baseReport ? [...(options.baseReport.excludedItems || []).filter(item => !selectedIds.has(String(item.bookId))), ...excluded.values()] : [...excluded.values()]
     const registeredPaths = new Set(allBooks.map(item => normalizePath(item.raw.filepath)))
     const report = {
-      schemaVersion: REPORT_SCHEMA_VERSION, dedupeVersion: 2, dedupeRulesVersion: DEDUPE_RULES_VERSION, reportType: 'dedupe', reportId: getReportId('dedupe', jobId), jobId,
+      schemaVersion: REPORT_SCHEMA_VERSION, dedupeVersion: 2, dedupeRulesVersion: DEDUPE_REPORT_RULES_VERSION, reportType: 'dedupe', reportId: getReportId('dedupe', jobId), jobId,
       legacy: false, executable: true, createdAt: snapshot.createdAt,
       source: { library: options.library, databasePath: options.databasePath, metadataPath: options.metadataPath },
-      options: { scanMode, forceRecompute, forceContent: forceRecompute, scope: selectedIds ? 'groups' : 'library' },
+      options: { scanMode, forceRecompute, forceContent: forceRecompute, scope: options.scope === 'library' ? 'library' : options.candidatePairs?.length ? 'candidates' : selectedIds ? 'groups' : 'library',
+        aiRunId: options.aiRunId ? String(options.aiRunId) : null, aiSource: options.aiSource ? String(options.aiSource) : null,
+        aiPartial: options.aiPartial === true, semanticPairCount: semanticPairs.length,
+        coveragePairCount: coveragePairs.length },
       summary: { libraryItems: snapshot.actualItems.length, mangaRows: allBooks.length, metadataRows: snapshot.metadataRows.length,
         unregisteredItems: snapshot.actualItems.filter(item => !registeredPaths.has(normalizePath(item.filepath))).length,
         missingItems: allBooks.filter(item => !item.actual).length, checkedItems: physicalBooks.length,
         duplicateGroups: groups.length, eligibleDuplicateGroups: groups.filter(group => group.eligible).length,
+        coverageRelations: coverageRelations.length,
         excludedItems: excludedItems.length, potentialBytes: groups.reduce((sum, group) => sum + group.potentialBytes, 0) },
-      groups, excludedItems, performance: metrics
+      groups, coverageRelations, aiCandidatePairs: { semantic: semanticPairs, coverage: coveragePairs }, excludedItems, performance: metrics
     }
     progress('finalizing-report', 0, 1)
     const reportPath = path.join(jobDir, 'report.json')

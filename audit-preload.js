@@ -8,6 +8,33 @@ const listen = (channel, listener) => {
 const cloneIpcPayload = value => JSON.parse(JSON.stringify(value ?? null))
 
 contextBridge.exposeInMainWorld('auditApi', {
+  aiTrace: {
+    snapshot: request => ipcRenderer.invoke('ai-trace:snapshot', cloneIpcPayload(request)),
+    open: request => ipcRenderer.invoke('ai-trace:open', cloneIpcPayload(request)),
+    onEvents: listener => listen('ai-trace:events', listener)
+  },
+  ai: {
+    getConfig: () => ipcRenderer.invoke('ai:get-config'),
+    saveConfig: request => ipcRenderer.invoke('ai:save-config', cloneIpcPayload(request)),
+    testConnection: request => ipcRenderer.invoke('ai:test-connection', cloneIpcPayload(request)),
+    listModels: request => ipcRenderer.invoke('ai:list-models', cloneIpcPayload(request)),
+    getAuthState: request => ipcRenderer.invoke('ai:get-auth-state', cloneIpcPayload(request)),
+    refreshUsage: request => ipcRenderer.invoke('ai:refresh-usage', cloneIpcPayload(request)),
+    openUsagePage: request => ipcRenderer.invoke('ai:open-usage-page', cloneIpcPayload(request)),
+    importOAuthJson: request => ipcRenderer.invoke('ai:import-oauth-json', cloneIpcPayload(request)),
+    startLogin: request => ipcRenderer.invoke('ai:start-login', cloneIpcPayload(request)),
+    reopenLogin: () => ipcRenderer.invoke('ai:reopen-login'),
+    cancelLogin: () => ipcRenderer.invoke('ai:cancel-login'),
+    logout: request => ipcRenderer.invoke('ai:logout', cloneIpcPayload(request)),
+    onAuthState: listener => listen('ai:auth-state', listener),
+    getState: () => ipcRenderer.invoke('ai:get-state'),
+    getResults: request => ipcRenderer.invoke('ai:get-results', cloneIpcPayload(request)),
+    start: request => ipcRenderer.invoke('ai:start', cloneIpcPayload(request)),
+    discoverAndQueue: request => ipcRenderer.invoke('ai:discover-and-queue', cloneIpcPayload(request)),
+    cancel: () => ipcRenderer.invoke('ai:cancel'),
+    verifyCandidates: request => ipcRenderer.invoke('ai:verify-candidates', cloneIpcPayload(request)),
+    onState: listener => listen('ai:state', listener)
+  },
   loadSetting: () => ipcRenderer.invoke('load-setting'),
   getLocale: () => ipcRenderer.invoke('get-locale'),
   getWorkspaceState: () => ipcRenderer.invoke('audit:get-workspace-state'),

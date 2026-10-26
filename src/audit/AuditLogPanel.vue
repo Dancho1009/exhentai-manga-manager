@@ -3,11 +3,11 @@
     <el-collapse-item name="logs">
       <template #title>
         <div class="log-header">
-          <span class="log-title"><el-icon><Tickets /></el-icon><span>{{ $t('audit.taskLog') }}</span><el-tag size="small" type="info" effect="plain">{{ logs.length }}</el-tag></span>
-          <span v-if="activeTask" class="log-live-summary">
-            <el-tag size="small" :type="statusTagType" effect="plain">{{ activeTaskLabel }}</el-tag>
-            <span class="log-live-phase">{{ phaseLabel }}</span>
-            <strong>{{ compactProgressText }}</strong>
+          <span class="log-title"><el-icon><Tickets /></el-icon><span>{{ $t('audit.taskLog') }}</span><el-tag size="small" type="info" effect="plain">{{ mergedLogs.length }}</el-tag></span>
+          <span v-if="activeTask || aiRunning" class="log-live-summary">
+            <el-tag size="small" :type="activeTask ? statusTagType : aiStatusTagType" effect="plain">{{ activeTask ? activeTaskLabel : aiTaskLabel }}</el-tag>
+            <span class="log-live-phase">{{ activeTask ? phaseLabel : aiPhaseLabel }}</span>
+            <strong>{{ activeTask ? compactProgressText : aiProgressText }}</strong>
           </span>
         </div>
       </template>
@@ -45,6 +45,7 @@
           <span v-if="optionLabels.length"><small>{{ $t('audit.taskOptions') }}</small><strong>{{ optionLabels.join(' · ') }}</strong></span>
         </div>
       </section>
+      <ai-trace-panel @logs="value => traceLogs = value" />
       <div class="log-toolbar" @click.stop>
         <el-segmented v-model="filter" size="small" :options="filterOptions" />
       </div>
@@ -55,12 +56,12 @@
           class="log-line"
           :class="[`level-${entry.level || 'info'}`, { 'is-active-log': isActiveLog(entry) }]"
         >
-          <span>{{ new Date(entry.at).toLocaleString() }}</span>
+          <span>{{ formatBeijingLogTime(entry.at) }}</span>
           <strong class="log-task-label">
             <span class="log-spinner-slot" aria-hidden="true">
               <el-icon v-if="isActiveLog(entry)" class="running-log-spinner"><Loading /></el-icon>
             </span>
-            <span>{{ taskLabel(entry.taskType) }}</span>
+            <span>{{ taskLabel(entry.taskType, entry) }}</span>
           </strong>
           <code>{{ entry.message }}</code>
         </div>
@@ -74,9 +75,13 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Loading, Tickets } from '@element-plus/icons-vue'
+import { compareLogTimes, formatBeijingLogTime } from './logTime.mjs'
+import AiTracePanel from './AiTracePanel.vue'
 
 const props = defineProps({
   logs: { type: Array, default: () => [] },
+  aiLogs: { type: Array, default: () => [] },
+  aiState: { type: Object, default: () => ({ status: 'idle' }) },
   activeTask: { type: Object, default: null },
   activeState: { type: Object, default: () => ({}) },
   timing: { type: Object, default: () => ({ elapsedText: '-', remainingText: '-', finishText: '-' }) },
@@ -85,23 +90,42 @@ const props = defineProps({
 const { t, te } = useI18n()
 const activePanels = ref([])
 const filter = ref('all')
+const traceLogs = ref([])
 
 const filterOptions = computed(() => [
   { label: t('audit.allTasks'), value: 'all' },
+  { label: t('audit.aiFullLibrary'), value: 'ai' },
   { label: t('audit.anomalyTab'), value: 'anomaly' },
   { label: t('audit.dedupTab'), value: 'dedupe' },
   { label: t('audit.executionTask'), value: 'execution' }
 ])
-const filteredLogs = computed(() => filter.value === 'all' ? props.logs : props.logs.filter(entry => entry.taskType === filter.value))
+const mergedLogs = computed(() => [...props.logs, ...props.aiLogs, ...traceLogs.value]
+  .sort(compareLogTimes)
+  .slice(-400))
+const filteredLogs = computed(() => filter.value === 'all' ? mergedLogs.value : mergedLogs.value.filter(entry => entry.taskType === filter.value))
+const aiRunning = computed(() => ['running', 'cancelling'].includes(props.aiState?.status))
 const activeLogEntry = computed(() => {
-  if (!props.activeTask?.jobId || !['running', 'cancelling'].includes(props.activeState?.status)) return null
-  return [...props.logs].reverse().find(entry => entry.jobId === props.activeTask.jobId) || null
+  if (props.activeTask?.jobId && ['running', 'cancelling'].includes(props.activeState?.status)) {
+    return [...mergedLogs.value].reverse().find(entry => entry.jobId === props.activeTask.jobId) || null
+  }
+  if (aiRunning.value) return [...mergedLogs.value].reverse().find(entry => entry.taskType === 'ai') || null
+  return null
 })
-const taskLabel = taskType => ({ anomaly: t('audit.anomalyTab'), dedupe: t('audit.dedupTab'), execution: t('audit.executionTask') })[taskType] || taskType
+const taskLabel = (taskType, entry = null) => {
+  if (taskType === 'ai') {
+    if (entry?.task === 'series') return t('ai.task_series')
+    if (entry?.task === 'dedupe') return t('ai.task_dedupe')
+    return t('audit.aiFullLibrary')
+  }
+  return ({ anomaly: t('audit.anomalyTab'), dedupe: t('audit.dedupTab'), execution: t('audit.executionTask') })[taskType] || taskType
+}
 const isActiveLog = entry => entry === activeLogEntry.value
 const activeTaskLabel = computed(() => props.activeTask?.type === 'execution'
   ? props.activeState?.options?.sourceTaskType === 'dedupe' ? t('audit.dedupeExecutionTask') : t('audit.anomalyExecutionTask')
   : taskLabel(props.activeTask?.type))
+const aiTaskLabel = computed(() => props.aiState?.task === 'series'
+  ? t('ai.task_series')
+  : props.aiState?.task === 'dedupe' ? t('ai.task_dedupe') : t('audit.aiFullLibrary'))
 const phaseLabel = computed(() => {
   const key = `audit.phase_${props.activeState?.phase || 'starting'}`
   return te(key) ? t(key) : props.activeState?.phase || t('audit.phase_starting')
@@ -132,11 +156,21 @@ const progressPercentage = computed(() => hasProgressTotal.value ? Math.min(100,
 const compactProgressText = computed(() => hasProgressTotal.value
   ? `${completed.value}/${total.value} · ${progressPercentage.value}%`
   : t('audit.calculatingTotal'))
+const aiPhaseLabel = computed(() => {
+  const key = `ai.phase_${props.aiState?.phase || 'preparing'}`
+  return te(key) ? t(key) : props.aiState?.phase || t('audit.calculatingTotal')
+})
+const aiProgressText = computed(() => {
+  const completed = Number(props.aiState?.completed || 0)
+  const total = Number(props.aiState?.total || 0)
+  return total > 0 ? `${completed}/${total} · ${Math.min(100, Math.round(completed / total * 100))}%` : t('audit.calculatingTotal')
+})
+const aiStatusTagType = computed(() => ({ running: 'primary', cancelling: 'warning' }[props.aiState?.status] || 'info'))
 const progressText = computed(() => hasProgressTotal.value
   ? t('audit.stageProgressValue', { completed: completed.value, total: total.value, percentage: progressPercentage.value })
   : t('audit.calculatingTotal'))
 const startedAtText = computed(() => props.activeState?.startedAt
-  ? new Date(props.activeState.startedAt).toLocaleString()
+  ? formatBeijingLogTime(props.activeState.startedAt)
   : '-')
 const nextStageLabel = computed(() => props.stageSummary?.nextStage?.labelKey
   ? t(props.stageSummary.nextStage.labelKey)
@@ -157,6 +191,13 @@ const optionLabels = computed(() => {
     ].filter(Boolean)
   }
   if (props.activeTask?.type === 'dedupe') {
+    if (options.aiSource === 'ai-discovery') {
+      return [
+        t('audit.aiFullLibrary'),
+        t('audit.aiSemanticPairs', { count: Number(options.semanticPairCount || 0) }),
+        options.aiPartial ? t('audit.aiPartial') : ''
+      ].filter(Boolean)
+    }
     return [t('audit.dedupeReview.' + (options.scanMode === 'full' ? 'full' : 'daily')), options.forceRecompute ? t('audit.dedupeReview.recompute') : t('audit.cacheAllowed')]
   }
   if (props.activeTask?.type === 'execution') {
@@ -165,7 +206,7 @@ const optionLabels = computed(() => {
   return []
 })
 
-watch(() => props.logs[props.logs.length - 1], entry => {
+watch(() => mergedLogs.value[mergedLogs.value.length - 1], entry => {
   if (entry?.level !== 'error') return
   filter.value = 'all'
   if (!activePanels.value.includes('logs')) activePanels.value = [...activePanels.value, 'logs']
@@ -176,6 +217,7 @@ watch(() => props.logs[props.logs.length - 1], entry => {
 <style scoped>
 .log-pane { position: relative; z-index: 4; flex: 0 0 auto; margin: 0 18px 12px; overflow: hidden; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-bg-color-overlay); }
 .log-pane :deep(.el-collapse-item__header) { min-height: 48px; padding: 0 16px; color: var(--el-text-color-primary); background: var(--el-fill-color-light); cursor: pointer; }
+.log-pane :deep(.el-collapse-item__wrap) { max-height: 420px; overflow: auto; }
 .log-pane :deep(.el-collapse-item__title) { min-width: 0; }
 .log-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; width: 100%; min-width: 0; padding-right: 12px; }
 .log-title { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 9px; font-weight: 600; }

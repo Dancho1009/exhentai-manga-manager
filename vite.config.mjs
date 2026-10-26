@@ -8,13 +8,16 @@ export default defineConfig({
   base: './',
   server: {
     // 5374 is reserved by Windows on some installations (EACCES on ::1/127.0.0.1).
-    port: 15374
+    host: '127.0.0.1',
+    port: 15374,
+    strictPort: true
   },
   build: {
     rollupOptions: {
       input: {
         main: resolve(process.cwd(), 'index.html'),
         audit: resolve(process.cwd(), 'audit.html'),
+        aiInspector: resolve(process.cwd(), 'ai-inspector.html'),
         bookDetail: resolve(process.cwd(), 'book-detail.html')
       }
     }

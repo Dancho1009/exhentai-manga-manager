@@ -1,3 +1,5 @@
+const { safeSend } = require('./electron_window_messenger.js')
+
 const prepareTemplate = (win) => {
   return [
     {
@@ -7,7 +9,7 @@ const prepareTemplate = (win) => {
           label: 'Setting',
           accelerator: 'CommandOrControl+E',
           click: async () => {
-            win.webContents.send('send-action', {
+            safeSend(win, 'send-action', {
               action: 'setting'
             })
           }
@@ -49,7 +51,7 @@ const prepareTemplate = (win) => {
         {
           label: 'Tag-fail Non-tag Book',
           click: () => {
-            win.webContents.send('send-action', {
+            safeSend(win, 'send-action', {
               action: 'tag-fail-non-tag-book'
             })
           }
@@ -63,7 +65,7 @@ const prepareTemplate = (win) => {
           label: 'About',
           accelerator: 'F1',
           click: async () => {
-            win.webContents.send('send-action', {
+            safeSend(win, 'send-action', {
               action: 'about'
             })
           }
@@ -72,7 +74,7 @@ const prepareTemplate = (win) => {
           label: 'Accelerator',
           accelerator: 'Shift+F1',
           click: async () => {
-            win.webContents.send('send-action', {
+            safeSend(win, 'send-action', {
               action: 'accelerator'
             })
           }
