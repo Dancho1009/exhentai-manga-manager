@@ -96,7 +96,7 @@ test('full content scans bypass weak filters and distinguish repeated, reordered
     { id: 'c', title: 'Unrelated C', hash: null, tags: {}, url: '', entries: { '01.jpg': 'one', '02.jpg': 'repeat', '03.jpg': 'insert' } }
   ])
   const report = await scan(fixture, { scanMode: 'full' })
-  const items = report.groups[0].items
+  const items = report.groups.find(group => ['a', 'b'].every(id => group.items.some(item => item.id === id))).items
   const [a, b] = await Promise.all(['a', 'b'].map(id => evidenceFor(fixture, items.find(item => item.id === id))))
   const comparison = compareBookEvidence(a.inspection, b.inspection)
   assert.equal(comparison.multisetEqual, true)
@@ -137,14 +137,17 @@ test('a full scan finds partial page overlap without a title or source clue', as
     { id: 'b', title: 'Other title', hash: null, url: '', tags: {}, entries: { '01.jpg': 'shared-1', '02.jpg': 'shared-2', '03.jpg': 'last' } }
   ])
   const report = await scan(fixture, { scanMode: 'full' })
-  assert.equal(report.groups.length, 1)
-  assert.equal(report.groups[0].items.length, 3)
-  const relation = report.groups[0].relations.find(pair => pair.leftId === 'a' && pair.rightId === 'b')
+  assert.ok(report.groups.every(group => group.items.length === 2))
+  assert.ok(report.groups.some(group => group.reviewShape === 'whole-book' &&
+    ['a', 'a-copy'].every(id => group.items.some(item => item.id === id))))
+  const pairGroup = report.groups.find(group => group.reviewShape === 'direct-pair' &&
+    ['a', 'b'].every(id => group.items.some(item => item.id === id)))
+  const relation = pairGroup.relations.find(pair => pair.leftId === 'a' && pair.rightId === 'b')
   assert.ok(relation.sources.includes('page-overlap'))
   assert.equal(relation.contentRelation, 'overlap')
   assert.equal(relation.matchedPages, 2)
   assert.deepEqual([relation.leftUniquePages, relation.rightUniquePages], [1, 1])
-  assert.equal(report.groups[0].eligible, false)
+  assert.equal(pairGroup.eligible, false)
 })
 
 test('shared translation pages do not join unrelated works into one review group', async t => {

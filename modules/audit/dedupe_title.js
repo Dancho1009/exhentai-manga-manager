@@ -4,7 +4,7 @@ const { ordinalCoverage, listCoverage, coverageRelation } = require('./part_cove
 
 const DEDUPE_RULES_VERSION = 5
 // Report classification can change without invalidating per-book AI semantics.
-const DEDUPE_REPORT_RULES_VERSION = 7
+const DEDUPE_REPORT_RULES_VERSION = 8
 const normalizeTitle = value => String(value || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
 const publicationNameKey = name => {
   const key = normalizeTitle(name)

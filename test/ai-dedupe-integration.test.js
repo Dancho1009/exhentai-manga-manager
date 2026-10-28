@@ -74,7 +74,7 @@ test('AI targeted import preserves unrelated existing groups and daily scans can
   assert.deepEqual(findPair(nextScan, ['c', 'd']).equivalenceClasses.map(item => item.memberIds.sort()), [['c', 'd']])
 })
 
-test('full local verification reviews contained chapters together without inferring indirect equivalence', async t => {
+test('full local verification keeps contained chapters as direct pair cases without inferring indirect equivalence', async t => {
   const fixture = await fixtureFor(t, [
     { id: 'a', title: 'Title Ch.1-3', hash: null, url: '', entries: { '01.jpg': 'one', '02.jpg': 'two', '03.jpg': 'three' } },
     { id: 'b', title: 'Title Ch.2', hash: null, url: '', entries: { '01.jpg': 'two', '02.jpg': 'three' } },
@@ -83,11 +83,13 @@ test('full local verification reviews contained chapters together without inferr
   const report = await scan(fixture, { scanMode: 'full', semanticPairs: [
     { leftId: 'a', rightId: 'b' }, { leftId: 'b', rightId: 'c' }],
   coveragePairs: [{ leftId: 'a', rightId: 'c', relation: 'same_work_left_contains_right' }] }, 'scope-separated')
-  assert.deepEqual(report.groups.map(group => memberIds(group)), [['a', 'b', 'c']])
+  assert.deepEqual(report.groups.map(group => memberIds(group)).sort(), [['a', 'b'], ['a', 'c'], ['b', 'c']])
   assert.ok(report.coverageRelations.some(pair => pair.leftId === 'a' && pair.rightId === 'b' && pair.relation === 'left_contains_right'))
   assert.ok(report.coverageRelations.some(pair => pair.leftId === 'a' && pair.rightId === 'c' && pair.relation === 'left_contains_right'))
-  assert.deepEqual(report.groups[0].relations.map(pair => [pair.leftId, pair.rightId]), [['a', 'b'], ['a', 'c'], ['b', 'c']])
-  assert.ok(report.groups[0].equivalenceClasses.every(entry => !entry.memberIds.includes('a')))
-  assert.equal(report.summary.duplicateGroups, 1)
+  assert.ok(report.groups.every(group => group.relations.length === 1))
+  assert.equal(report.groups.find(group => memberIds(group).join(',') === 'b,c').reviewShape, 'whole-book')
+  assert.ok(report.groups.filter(group => memberIds(group).includes('a')).every(group => group.reviewShape === 'direct-pair'))
+  assert.ok(report.groups.every(group => group.equivalenceClasses.every(entry => !entry.memberIds.includes('a'))))
+  assert.equal(report.summary.duplicateGroups, 3)
   assert.equal(report.summary.coverageRelations, 2)
 })

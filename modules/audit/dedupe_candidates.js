@@ -170,28 +170,6 @@ const buildDuplicateClassification = (wrappedBooks, { semanticPairs = [], covera
       candidateEdges.push({ kind: bucket.kind, items: [left, right] })
     }
   }
-  // A weak A–B and B–C path must not merge A and C when their explicit
-  // work-part scopes are different. Process direct content proof first.
-  const members = new Map(wrappedBooks.map(item => [String(item.raw.id), [item]]))
-  candidateEdges.sort((a, b) => Number(exactProof(...b.items)) - Number(exactProof(...a.items)) ||
-    Number(bookCoverageRelation(...b.items.map(item => item.semantic || {})) === 'equal') -
-      Number(bookCoverageRelation(...a.items.map(item => item.semantic || {})) === 'equal'))
-  for (const edge of candidateEdges) {
-    const [left, right] = edge.items, leftRoot = find(String(left.raw.id)), rightRoot = find(String(right.raw.id))
-    if (leftRoot !== rightRoot) {
-      const conflicts = members.get(leftRoot).flatMap(a => members.get(rightRoot).flatMap(b => {
-        const scope = bookCoverageRelation(a.semantic || {}, b.semantic || {})
-        return !exactProof(a, b) && ['left_contains_right', 'right_contains_left', 'overlap', 'disjoint'].includes(scope)
-          ? [{ a, b, scope }] : []
-      }))
-      for (const { a, b, scope } of conflicts) if (scope !== 'disjoint') addCoverage(a, b, scope, 'scope-boundary')
-      if (conflicts.length) continue
-      parent.set(rightRoot, leftRoot)
-      members.set(leftRoot, [...members.get(leftRoot), ...members.get(rightRoot)])
-      members.delete(rightRoot)
-    }
-    accepted.push(edge)
-  }
   for (const pair of coveragePairs) {
     const left = byId.get(String(pair.leftId)), right = byId.get(String(pair.rightId))
     if (!left || !right || left === right) continue
@@ -199,26 +177,78 @@ const buildDuplicateClassification = (wrappedBooks, { semanticPairs = [], covera
       same_work_partial_overlap: 'overlap' }[pair.relation]
     if (scope && !exactProof(left, right)) addCoverage(left, right, scope, 'ai-semantic')
   }
-  // Review components include containment and overlap edges. This connects the
-  // display and selection scope only; it never makes indirect pairs equivalent.
-  const reviewParent = new Map(wrappedBooks.map(item => [String(item.raw.id), String(item.raw.id)]))
-  const reviewFind = id => { const p = reviewParent.get(id); if (p !== id) reviewParent.set(id, reviewFind(p)); return reviewParent.get(id) }
-  const reviewJoin = (leftId, rightId) => { reviewParent.set(reviewFind(String(rightId)), reviewFind(String(leftId))) }
-  for (const edge of accepted) reviewJoin(edge.items[0].raw.id, edge.items[1].raw.id)
-  for (const relation of coverage.values()) reviewJoin(relation.leftId, relation.rightId)
-  const relatedIds = new Set([...accepted.flatMap(edge => edge.items.map(item => String(item.raw.id))),
-    ...[...coverage.values()].flatMap(relation => [relation.leftId, relation.rightId])])
-  const components = groupBy(wrappedBooks.filter(item => relatedIds.has(String(item.raw.id))), item => reviewFind(String(item.raw.id)))
+  const sameWholeBook = (left, right) => {
+    if (exactProof(left, right) || normalizePath(left.raw.filepath) === normalizePath(right.raw.filepath)) return true
+    if (left.inspection?.pageCount > 0 && left.inspection.pageCount === right.inspection?.pageCount &&
+        left.inspection.imageMultisetSignature && left.inspection.imageMultisetSignature === right.inspection.imageMultisetSignature) return true
+    if (coverage.has(pairKey(left, right))) return false
+    const leftIdentity = resolveBookIdentity(left, left.inspection?.ehviewer || left.manifest?.ehviewer)
+    const rightIdentity = resolveBookIdentity(right, right.inspection?.ehviewer || right.manifest?.ehviewer)
+    if (leftIdentity.status === 'known' && leftIdentity.key === rightIdentity.key) return true
+    const publications = [left, right].map(book => (book.semantic?.publications || []).filter(item => item.kind === 'whole-issue'))
+    if (publications.some(items => items.length)) return publications.every(items => items.length) && publications[0].some(a =>
+      publications[1].some(b => a.nameKey === b.nameKey && (a.issue || a.date) && (a.issue || a.date) === (b.issue || b.date)))
+    if (bookCoverageRelation(left.semantic || {}, right.semantic || {}) !== 'equal' &&
+        bookCoverageRelation(left.semantic || {}, right.semantic || {}) !== 'unknown') return false
+    const rightTitles = new Set(right.semantic?.titles || [])
+    return (left.semantic?.titles || []).some(title => rightTitles.has(title))
+  }
+  const distinctWholeIssues = (left, right) => {
+    const leftIssues = (left.semantic?.publications || []).filter(item => item.kind === 'whole-issue')
+    const rightIssues = (right.semantic?.publications || []).filter(item => item.kind === 'whole-issue')
+    return leftIssues.length > 0 && rightIssues.length > 0 && !leftIssues.some(a =>
+      rightIssues.some(b => a.nameKey === b.nameKey && (a.issue || a.date) && (a.issue || a.date) === (b.issue || b.date)))
+  }
+  // Only pairwise-compatible whole books form a multi-member selection.
+  // A shared page run remains a direct two-book review item.
+  const members = new Map(wrappedBooks.map(item => [String(item.raw.id), [item]]))
+  const pairCandidates = new Map()
+  const rememberPair = edge => {
+    if (distinctWholeIssues(...edge.items)) return
+    const key = pairKey(...edge.items)
+    if (!pairCandidates.has(key)) pairCandidates.set(key, { items: edge.items })
+  }
+  candidateEdges.sort((a, b) => Number(exactProof(...b.items)) - Number(exactProof(...a.items)) ||
+    Number(bookCoverageRelation(...b.items.map(item => item.semantic || {})) === 'equal') -
+      Number(bookCoverageRelation(...a.items.map(item => item.semantic || {})) === 'equal'))
+  for (const edge of candidateEdges) {
+    const [left, right] = edge.items, leftRoot = find(String(left.raw.id)), rightRoot = find(String(right.raw.id))
+    if (!sameWholeBook(left, right)) { rememberPair(edge); continue }
+    if (leftRoot !== rightRoot) {
+      if (members.get(leftRoot).some(a => members.get(rightRoot).some(b => !sameWholeBook(a, b)))) {
+        rememberPair(edge)
+        continue
+      }
+      parent.set(rightRoot, leftRoot)
+      members.set(leftRoot, [...members.get(leftRoot), ...members.get(rightRoot)])
+      members.delete(rightRoot)
+    }
+    accepted.push(edge)
+  }
+  const primaryIds = new Set(accepted.flatMap(edge => edge.items.map(item => String(item.raw.id))))
+  const components = [...groupBy(wrappedBooks.filter(item => primaryIds.has(String(item.raw.id))), item => find(String(item.raw.id))).values()]
+    .map(items => ({ members: items, reviewShape: 'whole-book' }))
+  const pairs = new Map()
+  for (const relation of coverage.values()) pairs.set(JSON.stringify([relation.leftId, relation.rightId]),
+    { members: [byId.get(relation.leftId), byId.get(relation.rightId)], reviewShape: 'direct-pair' })
+  for (const [key, candidate] of pairCandidates) if (!pairs.has(key)) pairs.set(key,
+    { members: candidate.items, reviewShape: 'direct-pair' })
+  for (const [key, pair] of pairs) {
+    const [leftId, rightId] = JSON.parse(key)
+    if (find(leftId) !== find(rightId) || !primaryIds.has(leftId)) components.push(pair)
+  }
   const groups = []
-  for (const component of components.values()) {
-    const members = [...component].sort((a, b) => String(a.raw.id).localeCompare(String(b.raw.id)))
+  for (const component of components) {
+    const members = [...component.members].sort((a, b) => String(a.raw.id).localeCompare(String(b.raw.id)))
     const memberIds = new Set(members.map(item => String(item.raw.id)))
-    const reasons = accepted.filter(bucket => bucket.items.every(item => memberIds.has(String(item.raw.id))))
+    const scopedEdges = component.reviewShape === 'whole-book' ? accepted : candidateEdges.filter(edge =>
+      edge.items.every(item => memberIds.has(String(item.raw.id))))
+    const reasons = scopedEdges.filter(bucket => bucket.items.every(item => memberIds.has(String(item.raw.id))))
       .map(bucket => ({ code: bucket.kind, memberIds: bucket.items.map(item => String(item.raw.id)) }))
     const coverageRelations = [...coverage.values()].filter(relation => memberIds.has(relation.leftId) && memberIds.has(relation.rightId))
     reasons.push(...coverageRelations.map(relation => ({ code: relation.sources[0] || 'coverage', memberIds: [relation.leftId, relation.rightId] })))
     const direct = new Map(coverageRelations.map(relation => [JSON.stringify([relation.leftId, relation.rightId]), relation]))
-    for (const edge of accepted.filter(edge => edge.items.every(item => memberIds.has(String(item.raw.id))))) {
+    for (const edge of scopedEdges.filter(edge => edge.items.every(item => memberIds.has(String(item.raw.id))))) {
       const [a, b] = [...edge.items].sort((left, right) => String(left.raw.id).localeCompare(String(right.raw.id)))
       const leftId = String(a.raw.id), rightId = String(b.raw.id), key = JSON.stringify([leftId, rightId])
       const previous = direct.get(key)
@@ -274,7 +304,8 @@ const buildDuplicateClassification = (wrappedBooks, { semanticPairs = [], covera
     const evidenceRevision = stableId(DEDUPE_REPORT_RULES_VERSION, items.map(item => [item.id, item.filepath, item.archiveSha256, item.contentProof, item.folderFingerprint, item.size, item.mtimeMs, item.sourceEvidence.fingerprint, item.metadataFingerprint, item.nestedBookIds.slice().sort()]),
       relations.map(({ leftId, rightId, declaredRelation, contentRelation, matchedPages, leftPages, rightPages, sources }) =>
         [leftId, rightId, declaredRelation, contentRelation, matchedPages, leftPages, rightPages, sources]))
-    groups.push({ id: stableId('dedupe-group', items.map(item => item.id).sort()), kind, eligible, actionable: true,
+    groups.push({ id: stableId(component.reviewShape === 'whole-book' ? 'dedupe-group' : 'dedupe-pair', items.map(item => item.id).sort()),
+      reviewShape: component.reviewShape, kind, eligible, actionable: true,
       severity: eligible ? 'medium' : 'high', items, equivalenceClasses: classes, reasons, relations, evidenceRevision,
       suggestedKeepId: classes.find(item => item.eligible)?.suggestedKeepId || keeper(members).id, potentialBytes,
       verification: { status: members.every(item => item.inspection) ? 'verified' : members.some(item => item.inspection || item.archiveSha256) ? 'partial' : 'unverified', checkedAt: new Date().toISOString(),

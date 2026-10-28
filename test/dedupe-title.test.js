@@ -51,19 +51,20 @@ test('a chapter collection enters the review group without becoming an equivalen
   const classification = buildDuplicateClassification([
     book('a', 'Title Ch.1-3'), book('b', 'Title Ch.2'), book('c', 'Title Ch.2 [Digital]')
   ], { semanticPairs: [{ leftId: 'a', rightId: 'b' }, { leftId: 'b', rightId: 'c' }] })
-  assert.deepEqual(classification.groups.map(group => group.items.map(item => item.id)), [['a', 'b', 'c']])
+  assert.deepEqual(classification.groups.map(group => group.items.map(item => item.id).sort()).sort(), [['a', 'b'], ['b', 'c']])
   assert.deepEqual(classification.coverageRelations.map(pair => [pair.leftId, pair.rightId, pair.relation]),
     [['a', 'b', 'left_contains_right']])
-  assert.ok(classification.groups[0].equivalenceClasses.every(entry => !entry.memberIds.includes('a')))
+  assert.ok(classification.groups.every(group => group.equivalenceClasses.every(entry => !entry.memberIds.includes('a'))))
 })
 
 test('an unnumbered middle book does not make incompatible chapters equivalent', () => {
   const books = [book('a', 'Title Ch.1-3'), book('b', 'Title'), book('c', 'Title Ch.2')]
   for (const item of books) item.raw.hash = 'shared-sample'
   const classified = buildDuplicateClassification(books)
-  assert.ok(classified.groups.some(group => ['a', 'b', 'c'].every(id => group.items.some(item => item.id === id))))
+  assert.ok(classified.groups.every(group => group.items.length === 2))
+  assert.ok(classified.groups.some(group => ['a', 'b'].every(id => group.items.some(item => item.id === id))))
   assert.ok(classified.coverageRelations.some(pair => pair.leftId === 'a' && pair.rightId === 'c'))
-  assert.ok(classified.groups[0].equivalenceClasses.every(entry => !['a', 'c'].every(id => entry.memberIds.includes(id))))
+  assert.ok(classified.groups.every(group => group.equivalenceClasses.every(entry => !['a', 'c'].every(id => entry.memberIds.includes(id)))))
 })
 
 test('bare magazine issue numbers remain publication sources rather than story numbers', () => {
