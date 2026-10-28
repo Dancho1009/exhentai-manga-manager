@@ -181,9 +181,57 @@ test('a consecutive story segment stays reviewable when several distinct books c
       '01.jpg': 'collection-two-opening', ...story, '99.jpg': 'collection-two-ending' } }
   ])
   const report = await scan(fixture, { scanMode: 'full' })
-  assert.equal(report.groups.length, 1)
-  assert.equal(report.groups[0].items.length, 3)
-  assert.ok(report.groups[0].relations.some(relation => relation.sources.includes('page-overlap') && relation.matchedPages === 10))
+  assert.equal(report.groups.length, 3)
+  assert.ok(report.groups.every(group => group.reviewShape === 'direct-pair' && group.items.length === 2))
+  assert.ok(report.groups.every(group => group.relations.some(relation => relation.sources.includes('page-overlap') && relation.matchedPages === 10)))
+})
+
+test('pair reviews may share a keeper, but one book cannot be quarantined twice or also kept', async t => {
+  const shared = Object.fromEntries(Array.from({ length: 10 }, (_, index) =>
+    [`${String(index + 10).padStart(2, '0')}.jpg`, `shared-story-${index}`]))
+  const fixture = await fixtureFor(t, ['a', 'b', 'c'].map(id => ({ id, title: `Edition ${id}`, hash: null,
+    url: '', tags: {}, entries: { '01.jpg': `${id}-opening`, ...shared, '99.jpg': `${id}-ending` } })))
+  const report = await scan(fixture, { scanMode: 'full' })
+  const pair = (left, right) => report.groups.find(group =>
+    group.items.length === 2 && [left, right].every(id => group.items.some(item => item.id === id)))
+  const ab = pair('a', 'b'), ac = pair('a', 'c'), bc = pair('b', 'c')
+  assert.ok(ab && ac && bc)
+  const keep = (group, id) => ({ disposition: 'duplicate', selectionMode: 'checkbox',
+    evidenceRevision: group.evidenceRevision, keepIds: [id] })
+  const review = { reportId: report.reportId, decisions: { [ab.id]: keep(ab, 'a'), [ac.id]: keep(ac, 'a') } }
+  assert.doesNotThrow(() => normalizeDedupeReview(report, review))
+  const repository = new AuditReportRepository(fixture.root)
+  const state = { latestCompletedJobId: report.jobId, latestReportId: report.reportId,
+    latestReportPath: path.join(fixture.auditStorePath, 'jobs', 'dedupe', report.jobId, 'report.json') }
+  await repository.saveReview('dedupe', state, review)
+  assert.equal(Object.keys((await repository.getReview('dedupe', state)).decisions).length, 2)
+  const doubleRemoval = { ...review, decisions: { ...review.decisions, [bc.id]: keep(bc, 'c') } }
+  await assert.rejects(repository.saveReview('dedupe', state, doubleRemoval), /OVERLAPPING_DUPLICATE_SELECTION/)
+  const keepAndRemove = { ...review, decisions: { ...review.decisions, [ac.id]: keep(ac, 'c') } }
+  await assert.rejects(repository.saveReview('dedupe', state, keepAndRemove), /OVERLAPPING_DUPLICATE_SELECTION/)
+  assert.equal(Object.keys((await repository.getReview('dedupe', state)).decisions).length, 2)
+})
+
+test('different magazine issues stay separate while their direct story overlaps remain reviewable', async t => {
+  const pages = (prefix, count) => Object.fromEntries(Array.from({ length: count }, (_, index) =>
+    [`${prefix}-${String(index + 1).padStart(2, '0')}.jpg`, `${prefix}-page-${index + 1}`]))
+  const chapters = Array.from({ length: 7 }, (_, index) => pages(`chapter-${index + 1}`, 10))
+  const fixture = await fixtureFor(t, [
+    { id: 'mag35', title: 'Dascomi Vol.35', hash: null, url: '', tags: {}, entries: { 'cover.jpg': 'mag35-cover', ...chapters[0], 'end.jpg': 'mag35-end' } },
+    { id: 'mag35-color', title: 'Dascomi Vol.35 [Colorized]', hash: null, url: '', tags: {}, entries: { 'cover.jpg': 'colored-cover', ...pages('colored', 10), 'end.jpg': 'colored-end' } },
+    { id: 'mag38', title: 'Dascomi Vol.38', hash: null, url: '', tags: {}, entries: { 'cover.jpg': 'mag38-cover', ...chapters[1], 'end.jpg': 'mag38-end' } },
+    { id: 'mag42', title: 'Dascomi Vol.42', hash: null, url: '', tags: {}, entries: { 'cover.jpg': 'mag42-cover', ...chapters[5], 'end.jpg': 'mag42-end' } },
+    { id: 'serial5', title: '[Creator] Story Ch.1-5', hash: null, url: '', tags: {}, entries: Object.assign({}, ...chapters.slice(0, 5)) },
+    { id: 'serial7', title: '[Creator] Story Ch.1-7', hash: null, url: '', tags: {}, entries: Object.assign({}, ...chapters) }
+  ])
+  const report = await scan(fixture, { scanMode: 'full' })
+  const members = group => group.items.map(item => item.id).sort().join(',')
+  assert.ok(report.groups.every(group => group.items.length === 2))
+  assert.ok(report.groups.some(group => group.reviewShape === 'whole-book' && members(group) === 'mag35,mag35-color'))
+  for (const pair of ['mag35,serial5', 'mag38,serial5', 'mag42,serial7', 'serial5,serial7']) {
+    assert.ok(report.groups.some(group => group.reviewShape === 'direct-pair' && members(group) === pair), pair)
+  }
+  assert.ok(!report.groups.some(group => ['mag35,mag38', 'mag38,mag42'].includes(members(group))))
 })
 
 test('old grouping reports require a full rebuild while retaining existing AI candidate pairs', async t => {
@@ -460,7 +508,7 @@ test('unchanged decisions survive shared-page grouping revisions', async t => {
   const fixture = await fixtureFor(t, [{ id: 'a' }, { id: 'b', comment: 'repack' }])
   const report = await scan(fixture, { scanMode: 'full' })
   const group = report.groups[0]
-  for (const version of [5, 6]) {
+  for (const version of [5, 6, 7]) {
     const previousRevision = stableId(version, group.items.map(item => [item.id, item.filepath, item.archiveSha256, item.contentProof,
       item.folderFingerprint, item.size, item.mtimeMs, item.sourceEvidence.fingerprint, item.metadataFingerprint,
       item.nestedBookIds.slice().sort()]),
@@ -474,6 +522,30 @@ test('unchanged decisions survive shared-page grouping revisions', async t => {
   }
   const changed = { ...report, groups: [{ ...group, relations: [...group.relations, { category: 'coverage' }] }] }
   assert.deepEqual(await loadDedupeDecisions(fixture.auditStorePath, changed), {})
+})
+
+test('unchanged two-book coverage choices migrate to pair IDs, while split multi-book choices do not', async t => {
+  const fixture = await fixtureFor(t, [
+    { id: 'short', title: 'Story Ch.2', hash: null, url: '', entries: { '01.jpg': 'one', '02.jpg': 'two' } },
+    { id: 'long', title: 'Story Ch.1-3', hash: null, url: '', entries: { '01.jpg': 'intro', '02.jpg': 'one', '03.jpg': 'two', '04.jpg': 'end' } }
+  ])
+  const report = await scan(fixture, { scanMode: 'full' })
+  const pair = report.groups[0]
+  assert.equal(pair.reviewShape, 'direct-pair')
+  const oldId = stableId('dedupe-group', pair.items.map(item => item.id).sort())
+  const previousRevision = stableId(7, pair.items.map(item => [item.id, item.filepath, item.archiveSha256, item.contentProof,
+    item.folderFingerprint, item.size, item.mtimeMs, item.sourceEvidence.fingerprint, item.metadataFingerprint,
+    item.nestedBookIds.slice().sort()]),
+  pair.relations.map(({ leftId, rightId, declaredRelation, contentRelation, matchedPages, leftPages, rightPages, sources }) =>
+    [leftId, rightId, declaredRelation, contentRelation, matchedPages, leftPages, rightPages, sources]))
+  const decision = { disposition: 'not-duplicate', evidenceRevision: previousRevision, keepIds: pair.items.map(item => item.id) }
+  await saveDedupeDecisions(fixture.auditStorePath, { [oldId]: decision })
+  assert.equal((await loadDedupeDecisions(fixture.auditStorePath, report))[pair.id].evidenceRevision, pair.evidenceRevision)
+  const changed = { ...report, groups: [{ ...pair, relations: pair.relations.map(relation => ({ ...relation, matchedPages: relation.matchedPages - 1 })) }] }
+  assert.deepEqual(await loadDedupeDecisions(fixture.auditStorePath, changed), {})
+  await saveDedupeDecisions(fixture.auditStorePath,
+    { [stableId('dedupe-group', ['a', 'b', 'c'])]: decision }, [oldId])
+  assert.deepEqual(await loadDedupeDecisions(fixture.auditStorePath, report), {})
 })
 
 test('decisions bind evidence revisions, validate explicit mappings and preview unique physical files', async t => {
@@ -502,7 +574,8 @@ test('checkbox review saves one keeper and two removals without a target or mand
   assert.deepEqual(normalized.decisions[group.id].quarantineIds.sort(), ['b', 'c'])
   assert.deepEqual(normalized.decisions[group.id].quarantineToKeep, { b: 'a' })
   const repository = new AuditReportRepository(fixture.root)
-  const state = { latestCompletedJobId: report.jobId, latestReportId: report.reportId }
+  const state = { latestCompletedJobId: report.jobId, latestReportId: report.reportId,
+    latestReportPath: path.join(fixture.auditStorePath, 'jobs', 'dedupe', report.jobId, 'report.json') }
   await repository.saveReview('dedupe', state, normalized)
   assert.deepEqual((await new AuditReportRepository(fixture.root).getReview('dedupe', state)).decisions[group.id].keepIds, ['a'])
   const preview = buildExecutionPreview({ taskType: 'dedupe', report, review, library: fixture.library })
@@ -591,6 +664,25 @@ test('scoped group verification keeps other groups and their lazy evidence refer
   await manager.startDedupe({ library: fixture.library, databasePath: fixture.databasePath, metadataPath: fixture.metadataPath, auditStorePath: fixture.auditStorePath, reportId: after.reportId, groupIds: [changed.id] })
   await waitForDedupe(manager)
   assert.deepEqual((await manager.getReport('dedupe')).groups, [unchanged])
+})
+
+test('scoped verification refreshes every pair sharing a member and leaves disconnected cases alone', async () => {
+  const groups = [
+    { id: 'ab', items: [{ id: 'a' }, { id: 'b' }] },
+    { id: 'bc', items: [{ id: 'b' }, { id: 'c' }] },
+    { id: 'cd', items: [{ id: 'c' }, { id: 'd' }] },
+    { id: 'ef', items: [{ id: 'e' }, { id: 'f' }] }
+  ]
+  const report = { reportId: 'dedupe:scope', dedupeVersion: 2, groups }
+  const manager = { getReport: async () => report, startWorker: async (_task, _worker, options) => options }
+  const scoped = await AuditWorkspaceManager.prototype.startDedupe.call(manager,
+    { reportId: report.reportId, groupIds: ['ab'] })
+  assert.deepEqual(scoped.groupIds.sort(), ['ab', 'bc', 'cd'])
+  assert.deepEqual(scoped.bookIds.sort(), ['a', 'b', 'c', 'd'])
+  const candidates = await AuditWorkspaceManager.prototype.startDedupe.call(manager,
+    { candidatePairs: [{ leftId: 'a', rightId: 'b' }] })
+  assert.deepEqual(candidates.bookIds.sort(), ['a', 'b', 'c', 'd'])
+  assert.equal(candidates.scope, 'candidates')
 })
 
 test('lazy page previews extract selected neighbors, verify bytes, isolate owners and cancel rapid switches', async t => {

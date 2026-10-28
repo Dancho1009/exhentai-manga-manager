@@ -102,15 +102,17 @@ const normalizeDedupeReview = (report, review = {}) => {
   const groups = new Map((report.groups || []).map(group => [normalizeId(group.id), group]))
   const selections = {}
   const decisions = {}
-  const participants = new Map()
+  const retained = new Set()
+  const quarantineOwners = new Map()
   const register = (group, keepId, quarantineIds) => {
     if (report.executable === false) throw new Error('DEDUPE_REPORT_NOT_EXECUTABLE')
     const itemIds = new Set(group.items.map(item => normalizeId(item.id)))
     if ((keepId && !itemIds.has(keepId)) || !quarantineIds.length || quarantineIds.includes(keepId) || quarantineIds.some(id => !itemIds.has(id))) throw new Error('INVALID_DUPLICATE_SELECTION: ' + group.id)
-    for (const bookId of [keepId, ...quarantineIds].filter(Boolean)) {
-      const previous = participants.get(bookId)
-      if (previous && previous !== group.id) throw new Error('OVERLAPPING_DUPLICATE_SELECTION: ' + bookId)
-      participants.set(bookId, group.id)
+    if (keepId && quarantineOwners.has(keepId)) throw new Error('OVERLAPPING_DUPLICATE_SELECTION: ' + keepId)
+    if (keepId) retained.add(keepId)
+    for (const bookId of quarantineIds) {
+      if (retained.has(bookId) || quarantineOwners.has(bookId)) throw new Error('OVERLAPPING_DUPLICATE_SELECTION: ' + bookId)
+      quarantineOwners.set(bookId, group.id)
     }
   }
   for (const [rawGroupId, value] of Object.entries(review.decisions || {})) {
@@ -134,9 +136,8 @@ const normalizeDedupeReview = (report, review = {}) => {
         }))
       : value.disposition === 'duplicate' ? Object.fromEntries(Object.entries(value.quarantineToKeep || {}).map(([id, keep]) => [normalizeId(id), normalizeId(keep)])) : {}
     if (checkboxSelection) for (const keepId of keepIds) {
-      const previous = participants.get(keepId)
-      if (previous && previous !== group.id) throw new Error('OVERLAPPING_DUPLICATE_SELECTION: ' + keepId)
-      participants.set(keepId, group.id)
+      if (quarantineOwners.has(keepId)) throw new Error('OVERLAPPING_DUPLICATE_SELECTION: ' + keepId)
+      retained.add(keepId)
     }
     for (const id of quarantineIds) {
       const keepId = quarantineToKeep[id] || null

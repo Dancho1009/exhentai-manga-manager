@@ -5,12 +5,15 @@ const getHistoryPath = storePath => path.join(storePath, 'dedupe-review-history.
 const loadDedupeDecisions = async (storePath, report) => {
   const history = await readJson(getHistoryPath(storePath), {})
   return Object.fromEntries((report.groups || []).flatMap(group => {
-    const previous = history[group.id]
+    // A previous two-book coverage group now has a pair ID. Its decision can
+    // follow the pair when the members and direct evidence still match.
+    const legacyPairId = group.reviewShape === 'direct-pair' && group.items.length === 2
+      ? stableId('dedupe-group', group.items.map(item => item.id).sort()) : null
+    const previous = history[group.id] || (legacyPairId ? history[legacyPairId] : null)
     if (previous?.evidenceRevision === group.evidenceRevision) return [[group.id, previous]]
-    // Report revisions 6 and 7 only change how shared pages create groups.
     // Preserve a choice when members and direct relations are unchanged.
     if (previous) {
-      for (const version of [6, 5]) {
+      for (const version of [7, 6, 5]) {
         const priorRevision = stableId(version, group.items.map(item => [item.id, item.filepath, item.archiveSha256, item.contentProof,
           item.folderFingerprint, item.size, item.mtimeMs, item.sourceEvidence.fingerprint, item.metadataFingerprint,
           item.nestedBookIds.slice().sort()]),

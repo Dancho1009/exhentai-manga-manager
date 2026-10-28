@@ -213,10 +213,14 @@ class AuditWorkspaceManager extends EventEmitter {
       const bookIds = new Set(candidatePairs.flatMap(pair => [pair.leftId, pair.rightId]))
       const previous = await this.getReport('dedupe')
       const baseReport = previous && previous.dedupeVersion === 2 && !previous.stale && !previous.outdatedRules && !previous.legacy ? previous : null
-      // Recheck whole overlapping review groups so no member loses its old evidence.
-      for (const group of baseReport?.groups || []) if (group.items.some(item => bookIds.has(String(item.id)))) {
-        for (const item of group.items) bookIds.add(String(item.id))
-      }
+      // Include every review item that shares a book with the refreshed cases.
+      let expanded
+      do {
+        expanded = false
+        for (const group of baseReport?.groups || []) if (group.items.some(item => bookIds.has(String(item.id)))) {
+          for (const item of group.items) if (!bookIds.has(String(item.id))) { bookIds.add(String(item.id)); expanded = true }
+        }
+      } while (expanded)
       options = previous?.outdatedRules && !previous.stale
         ? { ...options, candidatePairs, bookIds: undefined, baseReport: null, aiCandidatePairs: previous.aiCandidatePairs, scanMode: 'full', scope: 'library' }
         : { ...options, candidatePairs, bookIds: [...bookIds], baseReport, scanMode: 'full', scope: 'candidates' }
@@ -226,7 +230,16 @@ class AuditWorkspaceManager extends EventEmitter {
       if (baseReport?.reportId !== options.reportId || baseReport?.dedupeVersion !== 2 || baseReport.stale || baseReport.outdatedRules || baseReport.legacy) throw new Error('DEDUPE_REVIEW_MISMATCH')
       const ids = new Set(options.groupIds.map(String))
       if ([...ids].some(id => !baseReport.groups.some(group => group.id === id))) throw new Error('DUPLICATE_GROUP_MISSING')
-      options = { ...options, baseReport, groupIds: [...ids], scanMode: 'full' }
+      const bookIds = new Set(baseReport.groups.filter(group => ids.has(group.id)).flatMap(group => group.items.map(item => String(item.id))))
+      let expanded
+      do {
+        expanded = false
+        for (const group of baseReport.groups) if (group.items.some(item => bookIds.has(String(item.id)))) {
+          if (!ids.has(group.id)) { ids.add(group.id); expanded = true }
+          for (const item of group.items) if (!bookIds.has(String(item.id))) { bookIds.add(String(item.id)); expanded = true }
+        }
+      } while (expanded)
+      options = { ...options, baseReport, groupIds: [...ids], bookIds: [...bookIds], scanMode: 'full' }
     }
     if (!options.baseReport && !options.semanticPairs?.length && !options.coveragePairs?.length) {
       const previous = await this.getReport('dedupe')

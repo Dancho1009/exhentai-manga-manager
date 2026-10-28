@@ -272,6 +272,10 @@ class AuditReportRepository {
           quarantineRoot: String(review?.quarantineRoot || ''),
           updatedAt: new Date().toISOString()
         }
+    if (taskType === 'dedupe') {
+      const report = await this.getReport(taskType, state)
+      require('./review_validator.js').normalizeDedupeReview(report, value)
+    }
     await atomicWriteJson(path.join(this.getJobDir(taskType, state.latestCompletedJobId), 'review.json'), value)
     if (taskType === 'dedupe') {
       const report = await this.getReport(taskType, state)
