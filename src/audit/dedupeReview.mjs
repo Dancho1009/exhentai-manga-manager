@@ -1,5 +1,21 @@
 export const isPendingDecision = decision => !decision || decision.disposition === 'deferred'
 
+export const scheduledRemovalOwners = (report, decisions = {}) => {
+  const owners = new Map()
+  for (const group of report?.groups || []) {
+    const decision = decisions[group.id]
+    if (decision?.disposition !== 'duplicate') continue
+    const removed = decision.selectionMode === 'checkbox'
+      ? group.items.filter(item => !decision.keepIds?.includes(item.id)).map(item => item.id)
+      : Object.keys(decision.quarantineToKeep || {})
+    for (const id of removed) owners.set(id, group.id)
+  }
+  return owners
+}
+
+export const resolvedByOtherDecision = (group, owners) => group?.reviewShape === 'direct-pair' &&
+  group.items.some(item => owners.has(item.id) && owners.get(item.id) !== group.id)
+
 export const resolveKeepTargets = (group, draft) => {
   const keepIds = group.items.filter(item => draft.keepIds.includes(item.id)).map(item => item.id)
   return { evidenceRevision: group.evidenceRevision, keepIds }

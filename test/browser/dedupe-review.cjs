@@ -415,6 +415,30 @@ module.exports = async ({ chromium, executablePath, baseUrl, imageDataUrl, scree
     await page.getByRole('tab', { name: '异常检查', exact: true }).click()
     await page.getByRole('tab', { name: '重复检查', exact: true }).click()
     await selected('Group 32')
+
+    // Entry and save-driven navigation center the selected row in the queue viewport.
+    await page.evaluate(() => {
+      sessionStorage.removeItem('dedupe-report')
+      const decisions = Object.fromEntries(Array.from({ length: 15 }, (_, index) => [
+        'group-' + index, { disposition: 'not-duplicate', evidenceRevision: 'revision-' + index }
+      ]))
+      sessionStorage.setItem('dedupe-review', JSON.stringify({ reportId: 'dedupe:browser', selections: {}, decisions, quarantineRoot: 'C:/fixture/Quarantine' }))
+    })
+    await page.reload()
+    await page.getByRole('tab', { name: '重复检查', exact: true }).click()
+    await selected('Group 15')
+    const centeredInQueue = () => page.waitForFunction(() => {
+      const list = document.querySelector('.dedupe-panel .queue-list')
+      const item = list?.querySelector('.queue-item.selected')
+      if (!item) return false
+      const listRect = list.getBoundingClientRect(), itemRect = item.getBoundingClientRect()
+      return Math.abs((itemRect.top + itemRect.bottom - listRect.top - listRect.bottom) / 2) < 3
+    })
+    await centeredInQueue()
+    await panel.locator('.queue-list').evaluate(node => { node.scrollTop = 0 })
+    await panel.getByRole('button', { name: '不是重复', exact: true }).click()
+    await selected('Group 16')
+    await centeredInQueue()
     assert.deepEqual(errors, [])
     return { screenshots, errors, savedDecisions: Object.keys(saved.decisions), viewports: viewports.map(item => item.width), testedMembers: [2, 3, 5, 20] }
   } catch (error) {

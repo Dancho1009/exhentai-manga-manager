@@ -432,6 +432,8 @@ const updateDedupeSelections = selections => {
   scheduleReviewSave('dedupe')
 }
 const commitDedupeDecisions = async changes => {
+  const previous = dedupeReview.value
+  const previousDirty = reviewDirty.dedupe
   const decisions = { ...(dedupeReview.value.decisions || {}) }
   const selections = { ...(dedupeReview.value.selections || {}) }
   for (const [id, decision] of Object.entries(changes)) {
@@ -442,7 +444,15 @@ const commitDedupeDecisions = async changes => {
   reviewRevision.dedupe += 1
   dedupeReview.value = { ...dedupeReview.value, selections, decisions }
   reviewDirty.dedupe = true
-  return await persistReview('dedupe')
+  try { return await persistReview('dedupe') }
+  catch (error) {
+    if (dedupeReview.value.decisions === decisions) {
+      reviewRevision.dedupe += 1
+      dedupeReview.value = previous
+      reviewDirty.dedupe = previousDirty
+    }
+    throw error
+  }
 }
 const updateQuarantineRoot = value => {
   reviewRevision.dedupe += 1

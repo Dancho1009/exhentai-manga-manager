@@ -39,3 +39,15 @@ test('draft changes track checkbox choices and optional review note', async () =
   assert.notEqual(keepDraftFingerprint(initial), keepDraftFingerprint(initial, 'note'))
   assert.equal(keepDraftFingerprint(initial), keepDraftFingerprint(createKeepDraft(group())))
 })
+
+test('a pair resolved by another scheduled removal remains visible but leaves the pending queue', async () => {
+  const { scheduledRemovalOwners, resolvedByOtherDecision } = await helpers
+  const ab = { id: 'ab', reviewShape: 'direct-pair', items: [{ id: 'a' }, { id: 'b' }] }
+  const bc = { id: 'bc', reviewShape: 'direct-pair', items: [{ id: 'b' }, { id: 'c' }] }
+  const report = { groups: [ab, bc] }
+  const owners = scheduledRemovalOwners(report, { ab: { disposition: 'duplicate', selectionMode: 'checkbox', keepIds: ['a'] } })
+  assert.equal(owners.get('b'), 'ab')
+  assert.equal(resolvedByOtherDecision(ab, owners), false)
+  assert.equal(resolvedByOtherDecision(bc, owners), true)
+  assert.equal(resolvedByOtherDecision({ ...bc, reviewShape: 'whole-book' }, owners), false)
+})
